@@ -1,34 +1,54 @@
-# react-ts
+# QATestFlow Recorder
 
-An Electron application with React and TypeScript
+> No-code QA test recorder with AI-powered selectors.
+> Built with Electron + React + TypeScript.
 
-## Recommended IDE Setup
+A desktop QA workbench. Record a browser session by simply *using* the app — every click, type, and assertion becomes a step in an editable, reusable test. Export to Playwright (TS), YAML, or JSON. Resilient selectors. AI-assisted failure translation. See [`QA-Platform-PRD.md`](./QA-Platform-PRD.md) for the full spec.
 
-- [VSCode](https://code.visualstudio.com/) + [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) + [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)
+## Tech stack
 
-## Project Setup
+- **Electron** — desktop shell (cross-platform window + Node.js + Chromium)
+- **React + TypeScript** — UI for the recorder, step editor, and library
+- **Vite (via electron-vite)** — fast dev server, hot reload
+- **Playwright** *(coming soon)* — replay engine
 
-### Install
+## Prerequisites
 
-```bash
-$ pnpm install
-```
+- Node.js v18+ (works on v24)
+- npm
 
-### Development
-
-```bash
-$ pnpm dev
-```
-
-### Build
+## Getting started
 
 ```bash
-# For windows
-$ pnpm build:win
+# Install dependencies
+npm install
 
-# For macOS
-$ pnpm build:mac
-
-# For Linux
-$ pnpm build:linux
+# Start dev server (opens the app with hot reload)
+npm run dev
 ```
+
+## Build for release
+
+```bash
+# Windows installer
+npm run build:win
+
+# macOS
+npm run build:mac
+
+# Linux
+npm run build:linux
+```
+
+## Project structure
+
+```
+src/
+├── main/            # Electron main process — owns the window, IPC handlers
+├── preload/         # Safe bridge exposing limited APIs to the renderer
+└── renderer/        # React UI (welcome screen + browser chrome)
+```
+
+## Recommended IDE
+
+- [VS Code](https://code.visualstudio.com/) with the [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) and [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode) extensions.

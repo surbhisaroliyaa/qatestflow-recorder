@@ -1,10 +1,10 @@
 {
-  "name": "qastudio-recorder",
+  "name": "qatestflow-recorder",
   "version": "0.1.0",
   "description": "Desktop QA workbench — record browser sessions, generate Playwright tests with resilient selectors, AI-assisted failure triage. Built with Electron + React + TypeScript.",
   "main": "./out/main/index.js",
   "author": "Surbhi Saroliya",
-  "homepage": "https://github.com/surbhisaroliyaa/qastudio-recorder",
+  "homepage": "https://github.com/surbhisaroliyaa/qatestflow-recorder",
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",
