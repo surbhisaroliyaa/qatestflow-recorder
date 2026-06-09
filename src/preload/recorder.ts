@@ -164,12 +164,14 @@ document.addEventListener(
     if (tag !== 'input' && tag !== 'textarea') return
     const field = el as HTMLInputElement
 
-    // Never record a real password in plain text (QA secrets hygiene).
-    const isPassword = field.type === 'password'
+    // Mark passwords as secret. We keep the real value (so replay can log in),
+    // but it stays in memory only — shown masked on screen and exported as an
+    // env var, never written to disk. (QA secrets hygiene.)
     ipcRenderer.send('recorder:event', {
       type: 'type',
       facts: collectFacts(field),
-      value: isPassword ? '••••••••' : field.value
+      value: field.value,
+      secret: field.type === 'password'
     })
   },
   true

@@ -1,8 +1,13 @@
-import { app, shell, BrowserWindow, ipcMain, WebContentsView } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, WebContentsView, dialog } from 'electron'
 import { join } from 'path'
+import { writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
+import { buildActionScript, pickCss, type ReplayStep } from './replay'
+
+// Small pause so a human can watch each replayed step happen.
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 // Height in pixels reserved at the top of the window for our React chrome
 // (URL bar + back/forward/reload buttons). Everything below this is the
@@ -48,8 +53,13 @@ function createWindow(): void {
   // whole window. After first navigation, it expands to fill below the chrome.
   let hasNavigated = false
 
+  // The embedded browser is a NATIVE pane painted ON TOP of our React screen,
+  // so it covers any React pop-up (e.g. the export modal). While an overlay is
+  // open we hide the browser by shrinking it to nothing, then restore it.
+  let overlayOpen = false
+
   const resizeEmbedded = (): void => {
-    if (!hasNavigated) {
+    if (!hasNavigated || overlayOpen) {
       embeddedBrowser.setBounds({ x: 0, y: 0, width: 0, height: 0 })
       return
     }
@@ -128,6 +138,13 @@ function createWindow(): void {
     embeddedBrowser.webContents.reload()
   })
 
+  // When the React UI opens a full-window overlay (e.g. the export modal), hide
+  // the native embedded browser so it doesn't cover the overlay; restore after.
+  ipcMain.handle('browser:setOverlay', (_event, open: boolean) => {
+    overlayOpen = open
+    resizeEmbedded()
+  })
+
   // "Home" — jump straight back to the welcome screen in one click, instead of
   // walking Back through the whole history. A fresh start: also stop recording
   // (disarm the observer) so nothing is captured on the way out. Hide the
@@ -179,13 +196,14 @@ function createWindow(): void {
   // it to React. We only forward while recording (the observer self-gates too).
   ipcMain.on(
     'recorder:event',
-    (_event, raw: { type: string; facts: ElementFacts; value?: string }) => {
+    (_event, raw: { type: string; facts: ElementFacts; value?: string; secret?: boolean }) => {
       if (!isRecording) return
       const { primary, candidates } = buildSelectors(raw.facts)
       sendStep({
         type: raw.type,
         label: labelFrom(raw.facts),
         value: raw.value,
+        secret: raw.secret,
         selector: primary,
         candidates
       })
@@ -196,6 +214,78 @@ function createWindow(): void {
   // (its `recording` flag resets to false). If we're recording, re-arm it.
   embeddedBrowser.webContents.on('did-finish-load', () => {
     if (isRecording) embeddedBrowser.webContents.send('recorder:set-active', true)
+  })
+
+  // === Replay ========================================================
+  // Run the recorded steps one-by-one inside the embedded browser. We report
+  // progress per step so React can highlight the current/failed step, and stop
+  // at the first failure (basic — smart waits/recovery come later).
+  ipcMain.handle(
+    'recorder:replay',
+    async (
+      _event,
+      steps: ReplayStep[]
+    ): Promise<{ ok: boolean; failedAt?: number; error?: string }> => {
+      overlayOpen = false // make sure the browser is visible while replaying
+
+      // Test isolation: start EVERY replay from a clean state (fresh cookies +
+      // localStorage), exactly like a real Playwright test gets a fresh browser
+      // context. Without this, leftover state — e.g. an item already in the cart
+      // from the recording session — breaks the replay ("Add to cart" is gone).
+      try {
+        await embeddedBrowser.webContents.session.clearStorageData({
+          storages: ['cookies', 'localstorage']
+        })
+      } catch {
+        // best-effort; continue even if clearing isn't supported
+      }
+
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i]
+        mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
+        try {
+          if (step.type === 'navigate') {
+            hasNavigated = true
+            resizeEmbedded()
+            await embeddedBrowser.webContents.loadURL(step.url ?? '')
+          } else {
+            const css = pickCss(step)
+            if (!css) throw new Error('No usable CSS selector for this step')
+            const result = await embeddedBrowser.webContents.executeJavaScript(
+              buildActionScript(step, css),
+              true
+            )
+            if (!result || !result.ok) throw new Error(result?.error || 'Action failed')
+          }
+          mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'done' })
+          await wait(450)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          mainWindow.webContents.send('recorder:replay-progress', {
+            index: i,
+            status: 'error',
+            error: message
+          })
+          return { ok: false, failedAt: i, error: message }
+        }
+      }
+      return { ok: true }
+    }
+  )
+
+  // === Export ========================================================
+  // React generates the Playwright code (it owns the steps); main just saves
+  // it to disk, because only the backstage engine is allowed to touch files.
+  // Returns the saved file path, or null if the user cancels the dialog.
+  ipcMain.handle('recorder:export', async (_event, code: string): Promise<string | null> => {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Playwright test',
+      defaultPath: 'recorded.spec.ts',
+      filters: [{ name: 'TypeScript test', extensions: ['ts'] }]
+    })
+    if (result.canceled || !result.filePath) return null
+    await writeFile(result.filePath, code, 'utf-8')
+    return result.filePath
   })
 }
 

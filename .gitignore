@@ -58,6 +58,9 @@ playwright/.cache/
 # --- Local-only learning docs (kept on disk, not pushed to GitHub) ---
 /docs/
 
+# --- Exported test artifacts (the app's OUTPUT, not its source) ---
+/Recorded/
+
 # --- OS noise ---
 .DS_Store
 Thumbs.db

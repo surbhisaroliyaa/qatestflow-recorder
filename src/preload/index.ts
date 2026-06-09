@@ -16,6 +16,9 @@ const api = {
     // Reset straight to the welcome screen.
     home: (): Promise<void> => ipcRenderer.invoke('browser:home'),
 
+    // Hide/show the embedded browser so React overlays (modals) aren't covered.
+    setOverlay: (open: boolean): Promise<void> => ipcRenderer.invoke('browser:setOverlay', open),
+
     // Subscribe to URL changes from the embedded browser.
     // Returns an unsubscribe function so React effects can clean up.
     onUrlChange: (callback: (url: string) => void): (() => void) => {
@@ -36,6 +39,23 @@ const api = {
       const listener = (_event: unknown, step: unknown): void => callback(step)
       ipcRenderer.on('recorder:step', listener)
       return () => ipcRenderer.removeListener('recorder:step', listener)
+    },
+
+    // Save the generated Playwright code to a .ts file the user picks.
+    // Resolves to the saved file path, or null if cancelled.
+    exportTest: (code: string): Promise<string | null> =>
+      ipcRenderer.invoke('recorder:export', code),
+
+    // Replay the given steps in the embedded browser. Resolves when done
+    // (or at the first failed step).
+    replay: (steps: unknown[]): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
+      ipcRenderer.invoke('recorder:replay', steps),
+
+    // Subscribe to per-step replay progress. Returns an unsubscribe fn.
+    onReplayProgress: (callback: (progress: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, progress: unknown): void => callback(progress)
+      ipcRenderer.on('recorder:replay-progress', listener)
+      return () => ipcRenderer.removeListener('recorder:replay-progress', listener)
     }
   }
 }

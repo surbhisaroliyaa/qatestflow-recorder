@@ -6,12 +6,28 @@ interface BrowserAPI {
   goForward: () => Promise<boolean>
   reload: () => Promise<void>
   home: () => Promise<void>
+  setOverlay: (open: boolean) => Promise<void>
   onUrlChange: (callback: (url: string) => void) => () => void
+}
+
+interface ReplayProgress {
+  index: number
+  status: 'running' | 'done' | 'error'
+  error?: string
+}
+
+interface ReplayResult {
+  ok: boolean
+  failedAt?: number
+  error?: string
 }
 
 interface RecorderAPI {
   toggle: () => Promise<boolean>
   onStep: (callback: (step: RecorderStep) => void) => () => void
+  exportTest: (code: string) => Promise<string | null>
+  replay: (steps: RecorderStep[]) => Promise<ReplayResult>
+  onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
 }
 
 interface API {
@@ -36,6 +52,7 @@ declare global {
     type: 'navigate' | 'click' | 'type' | 'select'
     label?: string
     value?: string
+    secret?: boolean // password field — value masked on screen / in export
     url?: string
     selector?: string
     candidates?: SelectorCandidate[]

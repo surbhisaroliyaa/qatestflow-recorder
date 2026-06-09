@@ -1,22 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
+import { generatePlaywrightTest, stepText } from './playwrightExport'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
-
-// Turn a recorded step into one readable line for the panel.
-function stepText(step: RecorderStep): string {
-  switch (step.type) {
-    case 'navigate':
-      return `Go to ${step.url}`
-    case 'click':
-      return `Click ${step.label}`
-    case 'type':
-      return `Type "${step.value}" into ${step.label}`
-    case 'select':
-      return `Select "${step.value}" in ${step.label}`
-    default:
-      return JSON.stringify(step)
-  }
-}
 
 // Map a stability score (0–100) to a traffic-light class for the dot.
 function stabilityClass(score: number | undefined): string {
@@ -31,6 +16,15 @@ function App(): React.JSX.Element {
   const [hasNavigated, setHasNavigated] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [steps, setSteps] = useState<RecorderStep[]>([])
+  // The generated Playwright code shown in the export modal (null = closed).
+  const [exportCode, setExportCode] = useState<string | null>(null)
+  const [savedPath, setSavedPath] = useState<string | null>(null)
+  // Replay state: which step is running, which finished, which failed + why.
+  const [isReplaying, setIsReplaying] = useState(false)
+  const [replayingIndex, setReplayingIndex] = useState<number | null>(null)
+  const [doneIndices, setDoneIndices] = useState<Set<number>>(new Set())
+  const [failedIndex, setFailedIndex] = useState<number | null>(null)
+  const [replayError, setReplayError] = useState<string | null>(null)
 
   // Sync the URL bar whenever the embedded browser navigates.
   // Mark hasNavigated true so we switch from welcome -> chrome view.
@@ -48,6 +42,22 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const unsubscribe = window.api.recorder.onStep((step) => {
       setSteps((prev) => [...prev, step])
+    })
+    return unsubscribe
+  }, [])
+
+  // The embedded browser is a native pane that paints over our UI, so while the
+  // export modal is open we ask main to hide it (else it covers the modal).
+  useEffect(() => {
+    window.api.browser.setOverlay(exportCode !== null)
+  }, [exportCode])
+
+  // Follow replay progress so we can highlight running / done / failed steps.
+  useEffect(() => {
+    const unsubscribe = window.api.recorder.onReplayProgress((p) => {
+      if (p.status === 'running') setReplayingIndex(p.index)
+      else if (p.status === 'done') setDoneIndices((prev) => new Set(prev).add(p.index))
+      else if (p.status === 'error') setFailedIndex(p.index)
     })
     return unsubscribe
   }, [])
@@ -92,6 +102,49 @@ function App(): React.JSX.Element {
     setIsRecording(false)
     setSteps([])
   }
+
+  // Export: generate the Playwright code and open the preview modal.
+  const handleExport = (): void => {
+    setSavedPath(null)
+    setExportCode(generatePlaywrightTest(steps))
+  }
+
+  // Save the previewed code to a .ts file (main shows the OS save dialog).
+  const handleSaveExport = async (): Promise<void> => {
+    if (!exportCode) return
+    const path = await window.api.recorder.exportTest(exportCode)
+    if (path) setSavedPath(path)
+  }
+
+  const handleCopyExport = (): void => {
+    if (exportCode) navigator.clipboard.writeText(exportCode)
+  }
+
+  // Replay: run all recorded steps in the embedded browser and watch them go.
+  const handleReplay = async (): Promise<void> => {
+    setFailedIndex(null)
+    setReplayError(null)
+    setDoneIndices(new Set())
+    setReplayingIndex(null)
+    setIsReplaying(true)
+    const result = await window.api.recorder.replay(steps)
+    setIsReplaying(false)
+    setReplayingIndex(null)
+    if (!result.ok) {
+      setFailedIndex(result.failedAt ?? null)
+      setReplayError(result.error ?? 'Replay failed')
+    }
+  }
+
+  // A one-line summary of the last/current replay for the status banner.
+  const replayBanner = ((): { tone: string; text: string } | null => {
+    if (isReplaying) return { tone: 'running', text: 'Replaying…' }
+    if (failedIndex !== null)
+      return { tone: 'failed', text: `✗ Failed at step ${failedIndex + 1}: ${replayError}` }
+    if (doneIndices.size > 0 && doneIndices.size === steps.length)
+      return { tone: 'passed', text: `✓ All ${steps.length} steps passed` }
+    return null
+  })()
 
   // === Welcome view — shown before any navigation ===
   if (!hasNavigated) {
@@ -187,9 +240,33 @@ function App(): React.JSX.Element {
         <div className="browser-area" />
         <aside className="steps-panel">
           <div className="steps-header">
-            Steps
-            {steps.length > 0 && <span className="steps-count">{steps.length}</span>}
+            <span className="steps-title">
+              Steps
+              {steps.length > 0 && <span className="steps-count">{steps.length}</span>}
+            </span>
+            {steps.length > 0 && (
+              <div className="steps-actions">
+                <button
+                  className="replay-btn"
+                  onClick={handleReplay}
+                  disabled={isReplaying || isRecording}
+                  title="Replay these steps in the browser"
+                >
+                  ▶ {isReplaying ? 'Replaying…' : 'Replay'}
+                </button>
+                <button
+                  className="export-btn"
+                  onClick={handleExport}
+                  title="Export as Playwright test"
+                >
+                  {'</>'} Export
+                </button>
+              </div>
+            )}
           </div>
+          {replayBanner && (
+            <div className={`replay-status ${replayBanner.tone}`}>{replayBanner.text}</div>
+          )}
           {steps.length === 0 ? (
             <p className="steps-empty">
               {isRecording
@@ -199,8 +276,19 @@ function App(): React.JSX.Element {
           ) : (
             <ol className="steps-list">
               {steps.map((step, i) => (
-                <li key={i} className="step-item">
-                  <span className="step-num">{i + 1}</span>
+                <li
+                  key={i}
+                  className={`step-item${
+                    i === failedIndex
+                      ? ' failed'
+                      : i === replayingIndex
+                        ? ' running'
+                        : doneIndices.has(i)
+                          ? ' done'
+                          : ''
+                  }`}
+                >
+                  <span className="step-num">{doneIndices.has(i) ? '✓' : i + 1}</span>
                   <div className="step-body">
                     <span className="step-text">{stepText(step)}</span>
                     {step.selector && (
@@ -216,6 +304,32 @@ function App(): React.JSX.Element {
           )}
         </aside>
       </div>
+
+      {/* === Export preview modal === */}
+      {exportCode !== null && (
+        <div className="modal-backdrop" onClick={() => setExportCode(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Playwright test</span>
+              <button className="modal-close" onClick={() => setExportCode(null)} aria-label="Close">
+                ✕
+              </button>
+            </div>
+            <pre className="modal-code">
+              <code>{exportCode}</code>
+            </pre>
+            <div className="modal-footer">
+              {savedPath && <span className="saved-path">Saved to {savedPath}</span>}
+              <button className="modal-btn" onClick={handleCopyExport}>
+                Copy
+              </button>
+              <button className="modal-btn primary" onClick={handleSaveExport}>
+                Save .ts
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
