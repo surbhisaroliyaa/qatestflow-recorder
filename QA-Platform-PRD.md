@@ -2,9 +2,6 @@
 
 **Product (working name):** Recorder
 **Type:** Desktop application (Electron) with embedded browser, React UI, Node.js backend, PostgreSQL database
-**Status:** Draft v1.0
-**Owner:** Sameer
-**Last updated:** June 1, 2026
 
 ---
 
