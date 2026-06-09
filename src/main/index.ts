@@ -2,11 +2,17 @@ import { app, shell, BrowserWindow, ipcMain, WebContentsView } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import { buildSelectors, labelFrom, type ElementFacts } from './selector'
 
 // Height in pixels reserved at the top of the window for our React chrome
 // (URL bar + back/forward/reload buttons). Everything below this is the
 // embedded browser showing the website under test.
 const CHROME_HEIGHT = 60
+
+// Width in pixels reserved on the RIGHT for our React "steps" panel (the live
+// recording list). Once the user has navigated, the embedded browser shrinks
+// by this much so the panel showing through underneath stays uncovered.
+const PANEL_WIDTH = 340
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -23,8 +29,19 @@ function createWindow(): void {
   })
 
   // === The embedded browser — a real Chrome view that loads the website ===
-  const embeddedBrowser = new WebContentsView()
+  // We inject the "recorder" observer preload into every page it loads, so it
+  // can watch for clicks/typing while recording is ON.
+  const embeddedBrowser = new WebContentsView({
+    webPreferences: {
+      preload: join(__dirname, '../preload/recorder.js'),
+      sandbox: false
+    }
+  })
   mainWindow.contentView.addChildView(embeddedBrowser)
+
+  // Recording on/off lives here in main, because main is the hub that merges
+  // page events (from the observer) with navigation events (which main owns).
+  let isRecording = false
 
   // Until the user navigates to a real URL, we keep the embedded browser
   // hidden (zero size) so the React welcome page is visible across the
@@ -36,11 +53,14 @@ function createWindow(): void {
       embeddedBrowser.setBounds({ x: 0, y: 0, width: 0, height: 0 })
       return
     }
-    const { width, height } = mainWindow.getBounds()
+    // getContentBounds = the drawable area inside the window frame, so the
+    // native browser view and the CSS panel measure from the same ruler and
+    // meet exactly at width - PANEL_WIDTH (no overlap, no gap at the seam).
+    const { width, height } = mainWindow.getContentBounds()
     embeddedBrowser.setBounds({
       x: 0,
       y: CHROME_HEIGHT,
-      width,
+      width: Math.max(0, width - PANEL_WIDTH),
       height: Math.max(0, height - CHROME_HEIGHT)
     })
   }
@@ -70,6 +90,8 @@ function createWindow(): void {
     const url = normalizeUrl(rawUrl)
     hasNavigated = true
     resizeEmbedded() // unhide the embedded browser
+    // Navigating via the URL bar is itself a step worth recording.
+    if (isRecording) sendStep({ type: 'navigate', url })
     await embeddedBrowser.webContents.loadURL(url)
     return url
   })
@@ -106,6 +128,22 @@ function createWindow(): void {
     embeddedBrowser.webContents.reload()
   })
 
+  // "Home" — jump straight back to the welcome screen in one click, instead of
+  // walking Back through the whole history. A fresh start: also stop recording
+  // (disarm the observer) so nothing is captured on the way out. Hide the
+  // embedded browser and forget its history so the next navigation starts clean.
+  ipcMain.handle('browser:home', () => {
+    hasNavigated = false
+    isRecording = false
+    embeddedBrowser.webContents.send('recorder:set-active', false)
+    resizeEmbedded() // hide the embedded browser
+    try {
+      embeddedBrowser.webContents.navigationHistory.clear()
+    } catch {
+      // older Electron versions might not have clear(); safe to ignore
+    }
+  })
+
   // === Tell the React UI whenever the embedded browser changes URL ===
   const notifyUrlChange = (url: string): void => {
     mainWindow.webContents.send('browser:url-changed', url)
@@ -113,6 +151,52 @@ function createWindow(): void {
 
   embeddedBrowser.webContents.on('did-navigate', (_event, url) => notifyUrlChange(url))
   embeddedBrowser.webContents.on('did-navigate-in-page', (_event, url) => notifyUrlChange(url))
+
+  // === Recording =====================================================
+  // One door for steps: whether a step came from the observer (a click/type
+  // inside the page) or from main itself (a navigation), it leaves through
+  // here on its way to the React panel.
+  const sendStep = (step: Record<string, unknown>): void => {
+    mainWindow.webContents.send('recorder:step', step)
+  }
+
+  // Start/stop recording. Returns the new state so React stays in sync.
+  ipcMain.handle('recorder:toggle', (): boolean => {
+    isRecording = !isRecording
+    // Arm or disarm the observer living inside the current page.
+    embeddedBrowser.webContents.send('recorder:set-active', isRecording)
+    // When recording begins, log where we're starting from as the first step.
+    if (isRecording) {
+      const url = embeddedBrowser.webContents.getURL()
+      if (url && !url.startsWith('data:')) sendStep({ type: 'navigate', url })
+    }
+    return isRecording
+  })
+
+  // The observer reports a click/type/select with the RAW facts of the
+  // element. Here we run those facts through the selector engine to build the
+  // canonical step (a human label + a ranked selector ladder) before sending
+  // it to React. We only forward while recording (the observer self-gates too).
+  ipcMain.on(
+    'recorder:event',
+    (_event, raw: { type: string; facts: ElementFacts; value?: string }) => {
+      if (!isRecording) return
+      const { primary, candidates } = buildSelectors(raw.facts)
+      sendStep({
+        type: raw.type,
+        label: labelFrom(raw.facts),
+        value: raw.value,
+        selector: primary,
+        candidates
+      })
+    }
+  )
+
+  // Every page load gives us a fresh copy of the observer that starts OFF
+  // (its `recording` flag resets to false). If we're recording, re-arm it.
+  embeddedBrowser.webContents.on('did-finish-load', () => {
+    if (isRecording) embeddedBrowser.webContents.send('recorder:set-active', true)
+  })
 }
 
 // If the user types "google.com" we turn it into "https://google.com"

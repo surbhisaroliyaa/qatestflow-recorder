@@ -132,11 +132,19 @@ body {
    CHROME VIEW — shown after navigation
    =================================================== */
 
+/* Whole post-navigation app: chrome bar on top, workspace filling the rest */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
 .chrome {
   display: flex;
   align-items: center;
   gap: 8px;
   height: 60px;
+  flex: none;
   padding: 0 12px;
   background: #2c2c2c;
   border-bottom: 1px solid #444;
@@ -205,4 +213,200 @@ body {
 
 .go-btn:hover {
   background: #5b7cff;
+}
+
+/* === Record button (lives in the chrome bar) === */
+.record-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 16px;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 120ms ease;
+}
+
+.record-btn:hover {
+  background: #4a4a4a;
+}
+
+.record-btn .record-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #e0524d;
+}
+
+/* While recording: red button + pulsing dot */
+.record-btn.recording {
+  background: #5a1f1d;
+  border-color: #e0524d;
+  color: #ffd5d2;
+}
+
+.record-btn.recording .record-dot {
+  animation: record-pulse 1s ease-in-out infinite;
+}
+
+@keyframes record-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+
+/* === Workspace: empty browser area (native view paints over it) + panel === */
+.workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.browser-area {
+  flex: 1;
+}
+
+/* Width MUST match PANEL_WIDTH in src/main/index.ts (340) so the native
+   browser view ends exactly where this panel begins. */
+.steps-panel {
+  width: 340px;
+  flex: none;
+  background: #252525;
+  border-left: 1px solid #444;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.steps-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: #aaa;
+  border-bottom: 1px solid #3a3a3a;
+}
+
+.steps-count {
+  background: #4a6cf7;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+
+.steps-empty {
+  margin: 0;
+  padding: 18px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #777;
+}
+
+.steps-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.step-item:nth-child(odd) {
+  background: #2c2c2c;
+}
+
+.step-num {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #3a3a3a;
+  color: #9aa;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 1px;
+}
+
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.step-text {
+  color: #d8d8d8;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* The primary selector under each step, with a stability dot. */
+.step-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.step-selector code {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #8aa;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
+.stability-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #777;
+}
+
+.stability-dot.high {
+  background: #3fb950;
+}
+
+.stability-dot.med {
+  background: #d29922;
+}
+
+.stability-dot.low {
+  background: #e0524d;
 }

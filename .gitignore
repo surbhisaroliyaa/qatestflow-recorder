@@ -49,11 +49,14 @@ playwright/.cache/
 
 # --- IDE / Editor noise ---
 .vscode/
-.idea/workspace.xml
-.idea/tasks.xml
-.idea/shelf/
-.idea/usage.statistics.xml
+.idea/
 *.iml
+
+# --- Ad-hoc screenshots dropped in the repo root ---
+/Screenshot *.png
+
+# --- Local-only learning docs (kept on disk, not pushed to GitHub) ---
+/docs/
 
 # --- OS noise ---
 .DS_Store
