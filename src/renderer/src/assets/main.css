@@ -493,12 +493,30 @@ body {
   user-select: text;
 }
 
-/* The primary selector under each step, with a stability dot. */
+/* The primary selector under each step, with a stability dot. A BUTTON since
+   Day 10(c): clicking it expands the full candidate ladder underneath, so the
+   button chrome is reset to keep it reading as a chip. */
 .step-selector {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.step-selector:hover code {
+  border-color: #555;
+  color: #acc;
+}
+
+.selector-caret {
+  flex: none;
+  font-size: 9px;
+  color: #667;
 }
 
 .step-selector code {
@@ -533,6 +551,84 @@ body {
 
 .stability-dot.low {
   background: #e0524d;
+}
+
+/* ===================================================
+   CANDIDATE LADDER — every way we know to find one element (Day 10c)
+   =================================================== */
+
+.candidate-list {
+  list-style: none;
+  margin: 4px 0 2px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #161616;
+  border: 1px solid #2c2c2c;
+  border-radius: 6px;
+}
+
+.candidate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+}
+
+.candidate:hover:not(:disabled) {
+  background: #222;
+  border-color: #333;
+}
+
+.candidate:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.candidate.chosen {
+  background: #1c2733;
+  border-color: #2c4a66;
+}
+
+.candidate-kind {
+  flex: none;
+  font-size: 10px;
+  color: #889;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  width: 78px;
+}
+
+.candidate-locator {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #8aa;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.candidate-score {
+  flex: none;
+  font-size: 10px;
+  color: #667;
+  font-variant-numeric: tabular-nums;
+}
+
+.candidate-check {
+  flex: none;
+  font-size: 11px;
+  color: #58a6ff;
 }
 
 /* ===================================================

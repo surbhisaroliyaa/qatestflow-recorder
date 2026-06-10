@@ -246,6 +246,39 @@ function createWindow(): void {
         // best-effort; continue even if clearing isn't supported
       }
 
+      // Hover steps need a REAL mouse move. Electron's sendInputEvent delivers
+      // the event to page JavaScript but does NOT reliably switch on CSS
+      // :hover styling (electron/electron#13511). So we attach the Chrome
+      // DevTools Protocol (CDP) and use Input.dispatchMouseEvent — the same
+      // engine-level channel Playwright's .hover() uses. Attached once per
+      // replay, detached in the finally below.
+      const cdp = embeddedBrowser.webContents.debugger
+      let cdpReady = false
+      try {
+        if (!cdp.isAttached()) cdp.attach('1.3')
+        cdpReady = true
+      } catch {
+        // attach can fail (e.g. DevTools already attached) — we'll fall back
+        // to sendInputEvent, which at least delivers JS mouse events.
+      }
+
+      // Every exit from the replay goes through here so the CDP debugger is
+      // always released, pass or fail.
+      const finish = (outcome: {
+        ok: boolean
+        failedAt?: number
+        error?: string
+      }): { ok: boolean; failedAt?: number; error?: string } => {
+        if (cdpReady) {
+          try {
+            cdp.detach()
+          } catch {
+            // already detached — fine
+          }
+        }
+        return outcome
+      }
+
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i]
         // Steps turned off in the editor are skipped — leave their row neutral
@@ -265,6 +298,26 @@ function createWindow(): void {
               true
             )
             if (!result || !result.ok) throw new Error(result?.error || 'Action failed')
+            // A hover step: the page script located the trigger and returned
+            // its center. Move the engine-level mouse there via CDP (sets CSS
+            // :hover for real), then give the page a beat to react.
+            if (result.hoverAt) {
+              const x = Math.round(result.hoverAt.x)
+              const y = Math.round(result.hoverAt.y)
+              let moved = false
+              if (cdpReady) {
+                try {
+                  await cdp.sendCommand('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
+                  moved = true
+                } catch {
+                  // CDP hiccup — fall through to the weaker fallback
+                }
+              }
+              if (!moved) {
+                embeddedBrowser.webContents.sendInputEvent({ type: 'mouseMove', x, y })
+              }
+              await wait(150)
+            }
           }
           mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'done' })
           await wait(450)
@@ -275,10 +328,10 @@ function createWindow(): void {
             status: 'error',
             error: message
           })
-          return { ok: false, failedAt: i, error: message }
+          return finish({ ok: false, failedAt: i, error: message })
         }
       }
-      return { ok: true }
+      return finish({ ok: true })
     }
   )
 

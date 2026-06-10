@@ -45,6 +45,8 @@ declare global {
     role?: string // for kind 'role' — ARIA role (Day 10 replay-by-role)
     name?: string // for kind 'role' — accessible name
     text?: string // for kind 'text' — visible text
+    nth?: number // Day 10(b) — which of several matches is ours (0-based)
+    pinned?: boolean // Day 10(c) — hand-picked in the ladder UI; replay tries it first
   }
 
   // One recorded action (the canonical step model). `navigate` carries `url`;
@@ -52,7 +54,7 @@ declare global {
   // (`selector` is the primary; `candidates` are the fallbacks). `type`/
   // `select` also carry the entered/chosen `value`.
   interface RecorderStep {
-    type: 'navigate' | 'click' | 'type' | 'select' | 'press'
+    type: 'navigate' | 'click' | 'type' | 'select' | 'press' | 'hover'
     label?: string
     value?: string
     key?: string // for `press` steps — the key pressed (e.g. 'Enter')

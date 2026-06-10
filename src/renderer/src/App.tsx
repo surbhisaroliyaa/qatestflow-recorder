@@ -3,6 +3,12 @@ import { generatePlaywrightTest, stepText } from './playwrightExport'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
+// The candidate the step's primary selector points at. After a hand-pick the
+// primary is no longer necessarily the top-scored candidates[0].
+function primaryCandidate(step: RecorderStep): SelectorCandidate | undefined {
+  return step.candidates?.find((c) => c.locator === step.selector) ?? step.candidates?.[0]
+}
+
 // Map a stability score (0–100) to a traffic-light class for the dot.
 function stabilityClass(score: number | undefined): string {
   if (score === undefined) return ''
@@ -29,6 +35,9 @@ function App(): React.JSX.Element {
   // working text. Editing is only allowed when not recording / not replaying.
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [editValue, setEditValue] = useState('')
+  // Candidate transparency (Day 10c): which step's full selector ladder is
+  // expanded under its row (null = all collapsed).
+  const [expandedIndex, setExpandedIndex] = useState<number | null>(null)
 
   // Steps left ON (disabled steps are skipped by replay + export).
   const enabledCount = steps.filter((s) => !s.disabled).length
@@ -167,10 +176,33 @@ function App(): React.JSX.Element {
   const editSteps = (next: RecorderStep[]): void => {
     setSteps(next)
     setEditingIndex(null)
+    setExpandedIndex(null) // rows may have shifted — an open ladder would lie
     setDoneIndices(new Set())
     setFailedIndex(null)
     setReplayError(null)
     setReplayingIndex(null)
+  }
+
+  // Day 10(c): hand-pick a selector candidate as the step's primary. The pick
+  // is recorded as `pinned` — replay tries the pinned candidate FIRST (before
+  // higher-scored ones), and export emits its locator. Picking again later
+  // simply moves the pin.
+  const handlePickCandidate = (stepIdx: number, candIdx: number): void => {
+    const step = steps[stepIdx]
+    if (!step.candidates) return
+    const candidates = step.candidates.map((c, idx) => ({
+      ...c,
+      pinned: idx === candIdx || undefined
+    }))
+    setSteps(
+      steps.map((s, idx) =>
+        idx === stepIdx ? { ...s, selector: candidates[candIdx].locator, candidates } : s
+      )
+    )
+    // Changing the selector invalidates the last replay's pass/fail marks.
+    setDoneIndices(new Set())
+    setFailedIndex(null)
+    setReplayError(null)
   }
 
   // Move a step one slot up (dir -1) or down (dir +1) by swapping neighbours.
@@ -408,13 +440,51 @@ function App(): React.JSX.Element {
                         <span className="step-text">{stepText(step)}</span>
                       )}
                       {step.selector && (
-                        <span
+                        <button
+                          type="button"
                           className="step-selector"
-                          title={`stability ${step.candidates?.[0]?.score ?? '?'}/100`}
+                          onClick={() => setExpandedIndex(expandedIndex === i ? null : i)}
+                          title={`stability ${primaryCandidate(step)?.score ?? '?'}/100 — click to see all ways to find this element`}
                         >
-                          <span className={`stability-dot ${stabilityClass(step.candidates?.[0]?.score)}`} />
+                          <span
+                            className={`stability-dot ${stabilityClass(primaryCandidate(step)?.score)}`}
+                          />
                           <code>{step.selector}</code>
-                        </span>
+                          <span className="selector-caret">{expandedIndex === i ? '▾' : '▸'}</span>
+                        </button>
+                      )}
+                      {expandedIndex === i && step.candidates && step.candidates.length > 0 && (
+                        <ul className="candidate-list">
+                          {step.candidates
+                            // Hide the bare-tag last resort (kind 'css', e.g.
+                            // locator('a')): replay refuses to use it, so
+                            // offering it as a pick would be a false choice.
+                            .map((c, ci) => ({ c, ci }))
+                            .filter(({ c }) => c.kind !== 'css')
+                            .map(({ c, ci }) => (
+                              <li key={ci}>
+                                <button
+                                  type="button"
+                                  className={`candidate${step.selector === c.locator ? ' chosen' : ''}`}
+                                  onClick={() => handlePickCandidate(i, ci)}
+                                  disabled={!canEdit}
+                                  title={
+                                    step.selector === c.locator
+                                      ? 'Current primary selector'
+                                      : 'Use this selector instead'
+                                  }
+                                >
+                                  <span className={`stability-dot ${stabilityClass(c.score)}`} />
+                                  <span className="candidate-kind">{c.kind}</span>
+                                  <code className="candidate-locator">{c.locator}</code>
+                                  <span className="candidate-score">{c.score}</span>
+                                  {step.selector === c.locator && (
+                                    <span className="candidate-check">✓</span>
+                                  )}
+                                </button>
+                              </li>
+                            ))}
+                        </ul>
                       )}
                     </div>
                     {canEdit && editingIndex !== i && (

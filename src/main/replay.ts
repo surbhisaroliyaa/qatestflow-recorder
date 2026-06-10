@@ -20,6 +20,8 @@ export interface ReplayCandidate {
   role?: string
   name?: string
   text?: string
+  nth?: number // Day 10(b): which of several matches is ours (0-based)
+  pinned?: boolean // Day 10(c): hand-picked by the user — try this one FIRST
 }
 
 export interface ReplayStep {
@@ -50,7 +52,8 @@ function resolverHelpers(): string {
       textbox: 'input:not([type=button]):not([type=submit]):not([type=reset]):not([type=checkbox]):not([type=radio]), textarea, [role=textbox], [contenteditable=""], [contenteditable=true]',
       combobox: 'select, [role=combobox]',
       checkbox: 'input[type=checkbox], [role=checkbox]',
-      radio: 'input[type=radio], [role=radio]'
+      radio: 'input[type=radio], [role=radio]',
+      img: 'img, [role=img]'
     };
 
     // The element's "accessible name" — roughly what a user would call it.
@@ -69,41 +72,48 @@ function resolverHelpers(): string {
       return title ? norm(title) : '';
     };
 
-    // Find by ARIA role + accessible name: exact name first, then "contains".
-    const byRole = (role, name) => {
+    // MIRROR WARNING (Day 10b): byRole/byText must walk the SAME match lists
+    // that capture-time duplicate counting walks (collectDup in
+    // src/preload/recorder.ts) — otherwise a recorded .nth(i) lands on the
+    // wrong element. Change one → change both.
+
+    // All elements matching role + accessible name, in DOM order: exact-name
+    // matches win; only if there are none, fall back to "name contains".
+    const byRoleAll = (role, name) => {
       const sel = ROLE_SELECTORS[role] || ('[role=' + role + ']');
       let nodes;
-      try { nodes = Array.from(document.querySelectorAll(sel)); } catch (e) { return null; }
+      try { nodes = Array.from(document.querySelectorAll(sel)); } catch (e) { return []; }
       const want = norm(name);
-      if (!want) return nodes[0] || null;
-      return nodes.find((n) => accName(n) === want)
-        || nodes.find((n) => accName(n).includes(want))
-        || null;
+      if (!want) return nodes;
+      const exact = nodes.filter((n) => accName(n) === want);
+      if (exact.length) return exact;
+      return nodes.filter((n) => accName(n).includes(want));
     };
 
-    // Find by visible text — pick the MOST SPECIFIC element whose own trimmed
-    // text equals the target (fewest element descendants), so we click the link
-    // itself, not the giant container that happens to contain the text.
-    const byText = (text) => {
+    // All elements whose trimmed visible text equals the target, keeping only
+    // the INNERMOST of nested matches (the <span> inside the <a>, not both),
+    // in DOM order.
+    const byTextAll = (text) => {
       const want = norm(text);
-      if (!want) return null;
+      if (!want) return [];
       let nodes;
       try {
         nodes = Array.from(document.querySelectorAll(
-          'a, button, [role=button], [role=link], label, span, li, p, td, th, h1, h2, h3, h4, div'
+          'a, button, [role=button], [role=link], label, span, li, p, td, th, h1, h2, h3, h4, h5, h6, div'
         ));
-      } catch (e) { return null; }
+      } catch (e) { return []; }
       const matches = nodes.filter((n) => norm(n.textContent) === want);
-      matches.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
-      return matches[0] || null;
+      return matches.filter((m) => !matches.some((o) => o !== m && m.contains(o)));
     };
 
-    // Resolve ONE candidate to an element (or null).
+    // Resolve ONE candidate to an element (or null). When capture counted
+    // duplicates, c.nth says which of the matches is ours.
     const findByCandidate = (c) => {
+      const at = c.nth || 0;
       try {
-        if (c.css) return document.querySelector(c.css);
-        if (c.kind === 'role' && c.role) return byRole(c.role, c.name);
-        if (c.kind === 'text' && c.text) return byText(c.text);
+        if (c.css) return document.querySelectorAll(c.css)[at] || null;
+        if (c.kind === 'role' && c.role) return byRoleAll(c.role, c.name)[at] || null;
+        if (c.kind === 'text' && c.text) return byTextAll(c.text)[at] || null;
       } catch (e) { /* malformed selector — treat as no match */ }
       return null;
     };`
@@ -113,30 +123,44 @@ function resolverHelpers(): string {
 // candidates strongest-first, returning the first one that resolves to a
 // visible, enabled (actionable) element. Mirrors how real automation waits AND
 // how it falls back across locator strategies.
-function findPrelude(candidates: ReplayCandidate[]): string {
+//
+// allowHidden (hover steps only): a hover TRIGGER may only be findable through
+// a child that is itself hover-hidden (e.g. the caption text inside a card) —
+// you'd need the hover to find the hover. So after a short grace period we
+// accept a hidden match too; the hover action then climbs to its nearest
+// VISIBLE ancestor and points the mouse there, like a human would.
+function findPrelude(candidates: ReplayCandidate[], allowHidden = false): string {
   return (
     resolverHelpers() +
     `
     const raw = ${JSON.stringify(candidates ?? [])};
+    const ALLOW_HIDDEN = ${allowHidden ? 'true' : 'false'};
     // Drop the bare-tag last resort (css 'a' / 'div' / 'button' on its own): it
     // matches the FIRST such element on the page, almost never the recorded one.
     // Failing honestly beats clicking the wrong element and reporting success.
     const isBareTag = (c) => !!(c.css && /^[a-zA-Z][a-zA-Z0-9]*$/.test(c.css.trim()));
-    const cands = raw.filter((c) => !isBareTag(c)).sort((a, b) => (b.score || 0) - (a.score || 0));
+    // Hand-picked (pinned) candidate first, then strongest score (Day 10c).
+    const cands = raw.filter((c) => !isBareTag(c)).sort(
+      (a, b) => ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)) || ((b.score || 0) - (a.score || 0))
+    );
     if (raw.length && !cands.length) {
       return { ok: false, error: 'No reliable selector for this element (no stable id / role / text was captured) — skipped to avoid clicking the wrong thing' };
     }
     const deadline = Date.now() + 8000;
-    let el = null, everFound = false;
+    let el = null, everFound = false, hidden = null, hiddenAt = 0;
     while (Date.now() < deadline) {
       for (const c of cands) {
         const cand = findByCandidate(c);
         if (cand) {
           everFound = true;
+          if (!hidden) { hidden = cand; hiddenAt = Date.now(); }
           if (isVisible(cand) && !cand.disabled) { el = cand; break; }
         }
       }
       if (el) break;
+      // Hover triggers: prefer a visible match, but settle for a hidden one
+      // after 600ms instead of burning the whole 8s wait.
+      if (ALLOW_HIDDEN && hidden && Date.now() - hiddenAt > 600) { el = hidden; break; }
       await new Promise((r) => setTimeout(r, 100));
     }
     if (!el) return {
@@ -184,6 +208,23 @@ export function buildActionScript(step: ReplayStep): string {
       break
     }
 
+    case 'hover': {
+      // A synthetic mouseover event CANNOT switch on CSS :hover — only real
+      // input can. So the page script just locates the trigger and returns its
+      // center; main then sends a REAL mouseMove via webContents.sendInputEvent,
+      // which sets :hover exactly like a human moving the mouse.
+      // If the ladder resolved a hover-HIDDEN child (allowHidden above), climb
+      // to the nearest visible ancestor — that's the surface a human points at.
+      action = `
+        let target = el;
+        while (target && !isVisible(target)) target = target.parentElement;
+        if (!target) return { ok: false, error: 'Hover target has no visible ancestor to point at' };
+        target.scrollIntoView({ block: 'center' });
+        const r = target.getBoundingClientRect();
+        return { ok: true, hoverAt: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };`
+      break
+    }
+
     case 'press': {
       const k = JSON.stringify(step.key ?? 'Enter')
       // We can't drive the real keyboard, so we (1) dispatch synthetic key
@@ -209,5 +250,5 @@ export function buildActionScript(step: ReplayStep): string {
       action = `return { ok: false, error: 'Unsupported step type: ' + ${JSON.stringify(step.type)} };`
   }
 
-  return `(async () => {${findPrelude(step.candidates ?? [])}${action}\n})()`
+  return `(async () => {${findPrelude(step.candidates ?? [], step.type === 'hover')}${action}\n})()`
 }

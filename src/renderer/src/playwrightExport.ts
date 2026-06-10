@@ -26,6 +26,8 @@ export function stepText(step: RecorderStep): string {
       return `Select "${step.value}" in ${step.label}`
     case 'press':
       return `Press ${step.key ?? 'Enter'} in ${step.label}`
+    case 'hover':
+      return `Hover over ${step.label}`
     default:
       return JSON.stringify(step)
   }
@@ -55,6 +57,9 @@ function actionFor(step: RecorderStep): string | null {
     case 'press':
       // Playwright's .press() is a real key press — it triggers form submit.
       return `await ${locator}.press(${quote(step.key ?? 'Enter')})`
+    case 'hover':
+      // Playwright's .hover() moves the real mouse — CSS :hover reveals work.
+      return `await ${locator}.hover()`
     default:
       return null
   }

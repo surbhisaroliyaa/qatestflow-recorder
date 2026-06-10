@@ -10,6 +10,15 @@
 // the rest are kept as fallbacks for later.
 // =====================================================================
 
+// Day 10(b): how many elements on the page matched one locating strategy, and
+// which one OURS was (0-based, in DOM order). Counted by the observer AT
+// CAPTURE TIME, inside the page — a click can navigate away, so by the time
+// these facts reach us there may be no page left to count.
+export interface DupInfo {
+  count: number
+  index: number
+}
+
 // The raw facts the observer gathers about an element. Everything optional
 // except the tag — real pages are messy and most attributes are absent.
 export interface ElementFacts {
@@ -25,6 +34,9 @@ export interface ElementFacts {
   text?: string // trimmed visible text
   imgAlt?: string // alt of the element's own / inner image
   inputValue?: string // value of an <input type=submit|button>
+  // Per-strategy duplicate info — only present when a strategy matched MORE
+  // than one element (absence means "unique", the happy path).
+  dup?: Partial<Record<'testId' | 'id' | 'role' | 'name' | 'placeholder' | 'text', DupInfo>>
 }
 
 // How we found the element + how stable that strategy is (0–100).
@@ -39,6 +51,13 @@ export interface SelectorCandidate {
   role?: string // for kind 'role' — the ARIA role
   name?: string // for kind 'role' — the accessible name
   text?: string // for kind 'text' — the visible text
+  // Day 10(b): when this strategy matched several elements, which one is ours.
+  // A selector that silently matches 5 things is a lie — .nth() makes the
+  // ambiguity explicit (and costs score: position is fragile).
+  nth?: number
+  // Day 10(c): the user hand-picked this candidate in the ladder UI — replay
+  // tries it FIRST, regardless of score, and export uses its locator.
+  pinned?: boolean
 }
 
 export interface BuiltSelector {
@@ -68,73 +87,123 @@ function accessibleName(f: ElementFacts): string | undefined {
   return f.ariaLabel || f.inputValue || f.imgAlt || f.text || f.title
 }
 
+// Day 10(b): if the observer counted MORE than one match for this candidate's
+// strategy, make the ambiguity explicit. `.nth(i)` says "the i-th of several"
+// out loud (Playwright has the same API), and the score drops 30 points —
+// position is fragile: add one row above ours and the selector breaks. A
+// duplicated testId (95) now scores below a UNIQUE role locator (80), so the
+// ladder naturally prefers strategies that pinpoint exactly one element.
+function disambiguate(c: SelectorCandidate, dup?: DupInfo): SelectorCandidate {
+  if (!dup || dup.count <= 1 || dup.index < 0) return c
+  return {
+    ...c,
+    nth: dup.index,
+    locator: `${c.locator}.nth(${dup.index})`,
+    score: Math.max(20, c.score - 30)
+  }
+}
+
 // === The ladder: turn facts into ranked candidates ===
 export function buildSelectors(facts: ElementFacts): BuiltSelector {
   const candidates: SelectorCandidate[] = []
   const name = accessibleName(facts)
   const isField = facts.tag === 'input' || facts.tag === 'select' || facts.tag === 'textarea'
+  const dup = facts.dup ?? {}
 
   // 1. test id — the gold standard, added FOR testing, never restyled away.
   if (facts.testId) {
-    candidates.push({
-      kind: 'testId',
-      score: 95,
-      locator: `getByTestId('${esc(facts.testId)}')`,
-      css: `[data-test="${esc(facts.testId)}"]`
-    })
+    candidates.push(
+      disambiguate(
+        {
+          kind: 'testId',
+          score: 95,
+          locator: `getByTestId('${esc(facts.testId)}')`,
+          css: `[data-test="${esc(facts.testId)}"]`
+        },
+        dup.testId
+      )
+    )
   }
 
   // 2. id — stable & unique if a human named it; weak if auto-generated.
   if (facts.id) {
-    candidates.push({
-      kind: 'id',
-      score: looksGenerated(facts.id) ? 40 : 90,
-      locator: `locator('${idToCss(facts.id)}')`,
-      css: idToCss(facts.id)
-    })
+    candidates.push(
+      disambiguate(
+        {
+          kind: 'id',
+          score: looksGenerated(facts.id) ? 40 : 90,
+          locator: `locator('${idToCss(facts.id)}')`,
+          css: idToCss(facts.id)
+        },
+        dup.id
+      )
+    )
   }
 
   // 3. role + accessible name — how a USER finds it; survives restyling.
   if (facts.role && name) {
-    candidates.push({
-      kind: 'role',
-      score: 80,
-      locator: `getByRole('${facts.role}', { name: '${esc(name)}' })`,
-      css: null, // not expressible as plain CSS — replay resolves it semantically
-      role: facts.role,
-      name
-    })
+    candidates.push(
+      disambiguate(
+        {
+          kind: 'role',
+          score: 80,
+          locator: `getByRole('${facts.role}', { name: '${esc(name)}' })`,
+          css: null, // not expressible as plain CSS — replay resolves it semantically
+          role: facts.role,
+          name
+        },
+        dup.role
+      )
+    )
   }
 
   // 4. name attribute — stable for form fields.
   if (facts.name) {
-    candidates.push({
-      kind: 'name',
-      score: 70,
-      locator: `locator('${facts.tag}[name="${esc(facts.name)}"]')`,
-      css: `${facts.tag}[name="${esc(facts.name)}"]`
-    })
+    candidates.push(
+      disambiguate(
+        {
+          kind: 'name',
+          score: 70,
+          locator: `locator('${facts.tag}[name="${esc(facts.name)}"]')`,
+          css: `${facts.tag}[name="${esc(facts.name)}"]`
+        },
+        dup.name
+      )
+    )
   }
 
   // 5. placeholder — decent for inputs, but breaks if copy changes.
   if (facts.placeholder) {
-    candidates.push({
-      kind: 'placeholder',
-      score: 65,
-      locator: `getByPlaceholder('${esc(facts.placeholder)}')`,
-      css: `[placeholder="${esc(facts.placeholder)}"]`
-    })
+    candidates.push(
+      disambiguate(
+        {
+          kind: 'placeholder',
+          score: 65,
+          locator: `getByPlaceholder('${esc(facts.placeholder)}')`,
+          css: `[placeholder="${esc(facts.placeholder)}"]`
+        },
+        dup.placeholder
+      )
+    )
   }
 
   // 6. visible text — readable, but fragile (copy edits, i18n). Not for fields.
-  if (name && !isField && name.length <= 40) {
-    candidates.push({
-      kind: 'text',
-      score: 50,
-      locator: `getByText('${esc(name)}')`,
-      css: null, // replay resolves this by matching visible text
-      text: name
-    })
+  // STRICTLY facts.text (words actually written on the page) — never alt/aria
+  // names: getByText searches text content, so a selector built from an
+  // invisible alt ("User Avatar") would be a promise replay can never keep.
+  if (facts.text && !isField && facts.text.length <= 40) {
+    candidates.push(
+      disambiguate(
+        {
+          kind: 'text',
+          score: 50,
+          locator: `getByText('${esc(facts.text)}')`,
+          css: null, // replay resolves this by matching visible text
+          text: facts.text
+        },
+        dup.text
+      )
+    )
   }
 
   // 7. tag — last resort. Almost certainly not unique, so very low score.

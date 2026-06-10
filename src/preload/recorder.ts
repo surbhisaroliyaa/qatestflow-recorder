@@ -1,4 +1,7 @@
 import { ipcRenderer } from 'electron'
+// Type-only import (erased at build time) so the facts we send and the facts
+// the selector engine receives can never drift apart.
+import type { DupInfo, ElementFacts } from '../main/selector'
 
 // =====================================================================
 // THE OBSERVER
@@ -65,14 +68,150 @@ function roleFor(el: Element): string | undefined {
       return 'textbox'
     case 'input':
       return inputRole((el as HTMLInputElement).type)
+    case 'img':
+      // Images are found BY THEIR ALT TEXT via getByRole('img', { name }) —
+      // alt is invisible on the page, so it must NOT become a text selector.
+      return 'img'
     default:
       return undefined
   }
 }
 
+// === Day 10(b): duplicate counting ===================================
+// A selector that matches FIVE elements silently acts on the first one — a
+// false pass waiting to happen. So while we're still standing on the live page
+// (a click may navigate away a millisecond later!), we count, for each
+// strategy, how many elements match and which one ours is. The selector
+// engine turns "count > 1" into an explicit .nth(index).
+//
+// MIRROR WARNING: the byRole / byText counting here MUST stay in sync with how
+// replay RESOLVES those candidates (resolverHelpers in src/main/replay.ts).
+// If capture counts a different list than replay walks, .nth(i) points at the
+// wrong element. Change one → change both.
+
+const norm = (s: string | null | undefined): string => (s || '').replace(/\s+/g, ' ').trim()
+
+// Same role → CSS approximation table as replay's resolver.
+const ROLE_SELECTORS: Record<string, string> = {
+  button: 'button, [role=button], input[type=submit], input[type=button], input[type=reset]',
+  link: 'a[href], [role=link]',
+  textbox:
+    'input:not([type=button]):not([type=submit]):not([type=reset]):not([type=checkbox]):not([type=radio]), textarea, [role=textbox], [contenteditable=""], [contenteditable=true]',
+  combobox: 'select, [role=combobox]',
+  checkbox: 'input[type=checkbox], [role=checkbox]',
+  radio: 'input[type=radio], [role=radio]',
+  img: 'img, [role=img]'
+}
+
+// Mirror of replay's accName(): roughly what a user would call the element.
+function accNameOf(el: Element): string {
+  const aria = el.getAttribute('aria-label')
+  if (aria) return norm(aria)
+  if (el instanceof HTMLInputElement && /^(submit|button|reset)$/i.test(el.type) && el.value) {
+    return norm(el.value)
+  }
+  if (el instanceof HTMLImageElement && el.alt) return norm(el.alt)
+  const innerImg = el.querySelector('img[alt]') as HTMLImageElement | null
+  if (innerImg && innerImg.alt) return norm(innerImg.alt)
+  const text = norm(el.textContent)
+  if (text) return text
+  const title = el.getAttribute('title')
+  return title ? norm(title) : ''
+}
+
+function queryAll(selector: string): Element[] {
+  try {
+    return Array.from(document.querySelectorAll(selector))
+  } catch {
+    return [] // malformed selector — no info is better than wrong info
+  }
+}
+
+// All elements a role+name candidate matches, in DOM order — exact-name
+// matches win; only if there are none do we fall back to "name contains".
+function roleMatches(role: string, name: string): Element[] {
+  const nodes = queryAll(ROLE_SELECTORS[role] || `[role=${role}]`)
+  const want = norm(name)
+  if (!want) return nodes
+  const exact = nodes.filter((n) => accNameOf(n) === want)
+  if (exact.length) return exact
+  return nodes.filter((n) => accNameOf(n).includes(want))
+}
+
+// All elements a visible-text candidate matches: same trimmed text, keeping
+// only the INNERMOST of nested matches (an <a> and the <span> inside it both
+// "contain" the text — the span is the specific one).
+function textMatches(text: string): Element[] {
+  const want = norm(text)
+  if (!want) return []
+  const nodes = queryAll(
+    // Must cover every tag capture can take text from — collectFacts prefers
+    // inner headings up to h6, so h5/h6 MUST be searchable here too.
+    'a, button, [role=button], [role=link], label, span, li, p, td, th, h1, h2, h3, h4, h5, h6, div'
+  )
+  const matches = nodes.filter((n) => norm(n.textContent) === want)
+  return matches.filter((m) => !matches.some((other) => other !== m && m.contains(other)))
+}
+
+// Escape a value for use inside [attr="..."] in a CSS selector.
+function attrEsc(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+// Count duplicates for every strategy the facts support. Only strategies with
+// MORE than one match are reported — absence means "unique".
+function collectDup(el: Element, facts: ElementFacts): void {
+  const dup: NonNullable<ElementFacts['dup']> = {}
+  const note = (key: keyof NonNullable<ElementFacts['dup']>, list: Element[], index: number): void => {
+    if (list.length > 1 && index >= 0) dup[key] = { count: list.length, index } satisfies DupInfo
+  }
+
+  if (facts.testId) {
+    const list = queryAll(
+      `[data-test="${attrEsc(facts.testId)}"], [data-testid="${attrEsc(facts.testId)}"]`
+    )
+    note('testId', list, list.indexOf(el))
+  }
+  if (facts.id) {
+    // ids SHOULD be unique — but real sites duplicate them all the time.
+    const list = queryAll(`[id="${attrEsc(facts.id)}"]`)
+    note('id', list, list.indexOf(el))
+  }
+  if (facts.name) {
+    const list = queryAll(`${facts.tag}[name="${attrEsc(facts.name)}"]`)
+    note('name', list, list.indexOf(el))
+  }
+  if (facts.placeholder) {
+    const list = queryAll(`[placeholder="${attrEsc(facts.placeholder)}"]`)
+    note('placeholder', list, list.indexOf(el))
+  }
+  // The ROLE candidate is built from the engine's accessibleName(facts)
+  // priority — mirror that exact value here, or we'd count a different list
+  // than the candidate will match.
+  const name = facts.ariaLabel || facts.inputValue || facts.imgAlt || facts.text || facts.title
+  if (facts.role && name) {
+    const list = roleMatches(facts.role, name)
+    note('role', list, list.indexOf(el))
+  }
+  // The TEXT candidate is built strictly from facts.text (words actually on
+  // the page) — count with the same value.
+  if (facts.text) {
+    const list = textMatches(facts.text)
+    // The innermost text match may be a child of the element we recorded
+    // (the <span> inside our <button>) — count containment as "ours".
+    note(
+      'text',
+      list,
+      list.findIndex((m) => m === el || el.contains(m) || m.contains(el))
+    )
+  }
+
+  if (Object.keys(dup).length) facts.dup = dup
+}
+
 // Gather the raw facts the selector engine needs. All optional but `tag`.
-function collectFacts(el: Element): Record<string, string> {
-  const facts: Record<string, string> = { tag: el.tagName.toLowerCase() }
+function collectFacts(el: Element): ElementFacts {
+  const facts: ElementFacts = { tag: el.tagName.toLowerCase() }
 
   const testId = el.getAttribute('data-test') || el.getAttribute('data-testid')
   if (testId) facts.testId = testId
@@ -122,6 +261,9 @@ function collectFacts(el: Element): Record<string, string> {
     if (img && img.alt) facts.imgAlt = img.alt.trim()
   }
 
+  // Day 10(b): count duplicates NOW, while the page still exists.
+  collectDup(el, facts)
+
   return facts
 }
 
@@ -130,6 +272,85 @@ function meaningfulTarget(start: Element): Element {
   return (
     start.closest('a, button, input, select, textarea, [role="button"], [data-test]') || start
   )
+}
+
+// === Day 10(d): smart hover detection ================================
+// Naive recorders either spam a step for every mouse twitch or ignore hover
+// entirely (and then replay fails on hover-menus). We do neither: hover is
+// only interesting when something you CLICK was revealed by it — so we check
+// exactly once, at click time.
+//
+// The trick: you can't ask CSS "would this be visible if nothing were
+// hovered?" — but a CLONE has no :hover state. We clone the element's page
+// branch into a hidden off-screen box, walk down to the same element in the
+// clone, and read its computed styles there. Hidden in the clone + visible
+// live = hover-revealed. The hover TRIGGER is the deepest ancestor that is
+// still visible in the clone (the card you point at, not the hidden caption).
+//
+// Limitation (accepted): JS-driven menus that toggle a class on hover keep
+// that class in the clone, so they look "always visible" and we record no
+// hover — Phase-2 hardening territory. Pure CSS :hover reveals (the common
+// case) are caught.
+function findHoverTrigger(el: Element): Element | null {
+  // The branch to clone: el's ancestor that sits directly under <body>. Cloning
+  // high keeps descendant CSS rules (".figure .figcaption {…}") applying to
+  // the clone; cloning just the element would rip it out of selector context.
+  let top: Element = el
+  while (top.parentElement && top.parentElement !== document.body) top = top.parentElement
+  if (!top.parentElement || top === el) return null
+
+  // Child-index path from `top` down to `el`, so we can walk the same path in
+  // the clone.
+  const path: number[] = []
+  for (let n: Element = el; n !== top; ) {
+    const parent = n.parentElement
+    if (!parent) return null
+    path.unshift(Array.prototype.indexOf.call(parent.children, n))
+    n = parent
+  }
+
+  const box = document.createElement('div')
+  box.style.cssText =
+    'position:fixed;left:-99999px;top:0;width:1px;height:1px;overflow:hidden;pointer-events:none;'
+  box.appendChild(top.cloneNode(true))
+  document.body.appendChild(box)
+  try {
+    const cloneTop = box.firstElementChild
+    if (!cloneTop) return null
+
+    // The chain of clone nodes from cloneTop (depth 0) down to el's twin.
+    const chain: Element[] = [cloneTop]
+    let node: Element = cloneTop
+    for (const idx of path) {
+      const child = node.children[idx]
+      if (!child) return null // clone diverged — give up quietly
+      chain.push(child)
+      node = child
+    }
+
+    const hiddenByStyle = (n: Element): boolean => {
+      const cs = getComputedStyle(n)
+      return cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0
+    }
+
+    // Walk DOWN the chain: the last depth where everything is still visible.
+    let lastVisible = -1
+    for (let depth = 0; depth < chain.length; depth++) {
+      if (hiddenByStyle(chain[depth])) break
+      lastVisible = depth
+    }
+    if (lastVisible === chain.length - 1) return null // visible without hover — normal click
+    if (lastVisible < 0) return null // whole branch hidden without hover — can't pick a trigger
+
+    // Map the deepest visible depth back to the LIVE tree.
+    let live: Element = top
+    for (let depth = 0; depth < lastVisible; depth++) {
+      live = live.children[path[depth]]
+    }
+    return live === document.body || live === el ? null : live
+  } finally {
+    box.remove()
+  }
 }
 
 // --- Capture CLICKS ---
@@ -149,6 +370,17 @@ document.addEventListener(
     // 'change' listener below captures the real action, so skip the click.
     const tag = el.tagName.toLowerCase()
     if (tag === 'select' || tag === 'option') return
+    // Day 10(d): if this element is only visible BECAUSE something is hovered
+    // right now, record that hover first — replay (and the exported Playwright
+    // test) must hover the trigger before the click can possibly work.
+    try {
+      const trigger = findHoverTrigger(el)
+      if (trigger) {
+        ipcRenderer.send('recorder:event', { type: 'hover', facts: collectFacts(trigger) })
+      }
+    } catch {
+      // hover detection is best-effort — never let it break click recording
+    }
     ipcRenderer.send('recorder:event', { type: 'click', facts: collectFacts(el) })
   },
   true // "capture phase" — we see the event on the way down, before the page reacts
