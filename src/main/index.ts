@@ -4,7 +4,7 @@ import { writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
-import { buildActionScript, pickCss, type ReplayStep } from './replay'
+import { buildActionScript, type ReplayStep } from './replay'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -178,12 +178,14 @@ function createWindow(): void {
   }
 
   // Start/stop recording. Returns the new state so React stays in sync.
-  ipcMain.handle('recorder:toggle', (): boolean => {
+  // `resume` = continue an existing recording: we DON'T log a starting Go-to
+  // step (the existing list already begins with one), we just append more.
+  ipcMain.handle('recorder:toggle', (_event, resume?: boolean): boolean => {
     isRecording = !isRecording
     // Arm or disarm the observer living inside the current page.
     embeddedBrowser.webContents.send('recorder:set-active', isRecording)
-    // When recording begins, log where we're starting from as the first step.
-    if (isRecording) {
+    // When a FRESH recording begins, log where we're starting from as step 1.
+    if (isRecording && !resume) {
       const url = embeddedBrowser.webContents.getURL()
       if (url && !url.startsWith('data:')) sendStep({ type: 'navigate', url })
     }
@@ -196,7 +198,10 @@ function createWindow(): void {
   // it to React. We only forward while recording (the observer self-gates too).
   ipcMain.on(
     'recorder:event',
-    (_event, raw: { type: string; facts: ElementFacts; value?: string; secret?: boolean }) => {
+    (
+      _event,
+      raw: { type: string; facts: ElementFacts; value?: string; secret?: boolean; key?: string }
+    ) => {
       if (!isRecording) return
       const { primary, candidates } = buildSelectors(raw.facts)
       sendStep({
@@ -204,6 +209,7 @@ function createWindow(): void {
         label: labelFrom(raw.facts),
         value: raw.value,
         secret: raw.secret,
+        key: raw.key,
         selector: primary,
         candidates
       })
@@ -242,6 +248,9 @@ function createWindow(): void {
 
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i]
+        // Steps turned off in the editor are skipped — leave their row neutral
+        // (no running/done/error) so the UI shows them as inert, not run.
+        if (step.disabled) continue
         mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
         try {
           if (step.type === 'navigate') {
@@ -249,10 +258,10 @@ function createWindow(): void {
             resizeEmbedded()
             await embeddedBrowser.webContents.loadURL(step.url ?? '')
           } else {
-            const css = pickCss(step)
-            if (!css) throw new Error('No usable CSS selector for this step')
+            // The injected finder resolves the element through the full
+            // candidate ladder (role / text / CSS), strongest-first.
             const result = await embeddedBrowser.webContents.executeJavaScript(
-              buildActionScript(step, css),
+              buildActionScript(step),
               true
             )
             if (!result || !result.ok) throw new Error(result?.error || 'Action failed')

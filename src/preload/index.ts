@@ -29,8 +29,10 @@ const api = {
   },
 
   recorder: {
-    // Flip recording on/off. Resolves to the NEW recording state.
-    toggle: (): Promise<boolean> => ipcRenderer.invoke('recorder:toggle'),
+    // Flip recording on/off. Resolves to the NEW recording state. `resume` true
+    // means "continue an existing recording" — main then skips emitting the
+    // starting Go-to step (the list already begins with one).
+    toggle: (resume?: boolean): Promise<boolean> => ipcRenderer.invoke('recorder:toggle', resume),
 
     // Subscribe to recorded steps as they happen. Returns an unsubscribe fn.
     // (Step is typed structurally here; the renderer gets the named

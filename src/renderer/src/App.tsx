@@ -25,6 +25,13 @@ function App(): React.JSX.Element {
   const [doneIndices, setDoneIndices] = useState<Set<number>>(new Set())
   const [failedIndex, setFailedIndex] = useState<number | null>(null)
   const [replayError, setReplayError] = useState<string | null>(null)
+  // Step editor: which step's value is being edited inline (null = none) + its
+  // working text. Editing is only allowed when not recording / not replaying.
+  const [editingIndex, setEditingIndex] = useState<number | null>(null)
+  const [editValue, setEditValue] = useState('')
+
+  // Steps left ON (disabled steps are skipped by replay + export).
+  const enabledCount = steps.filter((s) => !s.disabled).length
 
   // Sync the URL bar whenever the embedded browser navigates.
   // Mark hasNavigated true so we switch from welcome -> chrome view.
@@ -62,11 +69,28 @@ function App(): React.JSX.Element {
     return unsubscribe
   }, [])
 
-  // Toggle recording. Starting a fresh recording clears the previous steps.
+  // Toggle recording. We no longer wipe on start — if steps already exist we
+  // RESUME (append new steps to the end). Use the 🗑 Clear button to start over.
+  // Starting any recording clears the previous replay's pass/fail marks.
   const handleRecordToggle = async (): Promise<void> => {
-    if (!isRecording) setSteps([]) // clear synchronously, before the first step arrives
-    const nowRecording = await window.api.recorder.toggle()
+    const resume = !isRecording && steps.length > 0
+    if (!isRecording) {
+      setDoneIndices(new Set())
+      setFailedIndex(null)
+      setReplayError(null)
+      setReplayingIndex(null)
+      setEditingIndex(null)
+    }
+    const nowRecording = await window.api.recorder.toggle(resume)
     setIsRecording(nowRecording)
+  }
+
+  // Wipe the whole step list for a genuinely fresh start (asks first, since
+  // it can't be undone). Only offered when not recording / replaying.
+  const handleClearSteps = (): void => {
+    if (steps.length === 0) return
+    if (!window.confirm(`Clear all ${steps.length} steps and start over?`)) return
+    editSteps([])
   }
 
   const handleSubmit = (e: FormEvent): void => {
@@ -136,13 +160,72 @@ function App(): React.JSX.Element {
     }
   }
 
+  // === No-code step editor ==========================================
+  // Every edit changes the single source of truth — the `steps` array. It also
+  // clears the last replay's pass/fail marks (they no longer describe the new
+  // list) and closes any open inline edit.
+  const editSteps = (next: RecorderStep[]): void => {
+    setSteps(next)
+    setEditingIndex(null)
+    setDoneIndices(new Set())
+    setFailedIndex(null)
+    setReplayError(null)
+    setReplayingIndex(null)
+  }
+
+  // Move a step one slot up (dir -1) or down (dir +1) by swapping neighbours.
+  const handleMoveStep = (i: number, dir: -1 | 1): void => {
+    const j = i + dir
+    if (j < 0 || j >= steps.length) return
+    const next = steps.slice()
+    ;[next[i], next[j]] = [next[j], next[i]]
+    editSteps(next)
+  }
+
+  const handleDeleteStep = (i: number): void => {
+    editSteps(steps.filter((_, idx) => idx !== i))
+  }
+
+  // Turn a step off/on. A disabled step stays in the list (so you don't lose it)
+  // but is skipped by both replay and export.
+  const handleToggleDisabled = (i: number): void => {
+    editSteps(steps.map((s, idx) => (idx === i ? { ...s, disabled: !s.disabled } : s)))
+  }
+
+  // The text an inline edit would change: a navigate edits its URL; a type /
+  // select edits its value. Clicks have nothing to edit; passwords are never
+  // surfaced in a text box. Returns null when the step isn't editable.
+  const editableValue = (step: RecorderStep): string | null => {
+    if (step.type === 'navigate') return step.url ?? ''
+    if (step.secret) return null
+    if (step.type === 'type' || step.type === 'select') return step.value ?? ''
+    return null
+  }
+
+  const handleStartEdit = (i: number): void => {
+    const current = editableValue(steps[i])
+    if (current === null) return
+    setEditValue(current)
+    setEditingIndex(i)
+  }
+
+  const handleCommitEdit = (): void => {
+    if (editingIndex === null) return
+    const i = editingIndex
+    editSteps(
+      steps.map((s, idx) =>
+        idx !== i ? s : s.type === 'navigate' ? { ...s, url: editValue } : { ...s, value: editValue }
+      )
+    )
+  }
+
   // A one-line summary of the last/current replay for the status banner.
   const replayBanner = ((): { tone: string; text: string } | null => {
     if (isReplaying) return { tone: 'running', text: 'Replaying…' }
     if (failedIndex !== null)
       return { tone: 'failed', text: `✗ Failed at step ${failedIndex + 1}: ${replayError}` }
-    if (doneIndices.size > 0 && doneIndices.size === steps.length)
-      return { tone: 'passed', text: `✓ All ${steps.length} steps passed` }
+    if (doneIndices.size > 0 && doneIndices.size === enabledCount)
+      return { tone: 'passed', text: `✓ All ${enabledCount} steps passed` }
     return null
   })()
 
@@ -227,10 +310,16 @@ function App(): React.JSX.Element {
         <button
           className={`record-btn${isRecording ? ' recording' : ''}`}
           onClick={handleRecordToggle}
-          title={isRecording ? 'Stop recording' : 'Start recording'}
+          title={
+            isRecording
+              ? 'Stop recording'
+              : steps.length > 0
+                ? 'Resume recording — new steps are added to the end'
+                : 'Start recording'
+          }
         >
           <span className="record-dot" />
-          {isRecording ? 'Stop' : 'Record'}
+          {isRecording ? 'Stop' : steps.length > 0 ? 'Resume' : 'Record'}
         </button>
       </div>
 
@@ -249,7 +338,7 @@ function App(): React.JSX.Element {
                 <button
                   className="replay-btn"
                   onClick={handleReplay}
-                  disabled={isReplaying || isRecording}
+                  disabled={isReplaying || isRecording || enabledCount === 0}
                   title="Replay these steps in the browser"
                 >
                   ▶ {isReplaying ? 'Replaying…' : 'Replay'}
@@ -260,6 +349,15 @@ function App(): React.JSX.Element {
                   title="Export as Playwright test"
                 >
                   {'</>'} Export
+                </button>
+                <button
+                  className="clear-btn"
+                  onClick={handleClearSteps}
+                  disabled={isReplaying || isRecording}
+                  title="Clear all steps and start over"
+                  aria-label="Clear all steps"
+                >
+                  🗑
                 </button>
               </div>
             )}
@@ -275,31 +373,101 @@ function App(): React.JSX.Element {
             </p>
           ) : (
             <ol className="steps-list">
-              {steps.map((step, i) => (
-                <li
-                  key={i}
-                  className={`step-item${
-                    i === failedIndex
-                      ? ' failed'
-                      : i === replayingIndex
-                        ? ' running'
-                        : doneIndices.has(i)
-                          ? ' done'
-                          : ''
-                  }`}
-                >
-                  <span className="step-num">{doneIndices.has(i) ? '✓' : i + 1}</span>
-                  <div className="step-body">
-                    <span className="step-text">{stepText(step)}</span>
-                    {step.selector && (
-                      <span className="step-selector" title={`stability ${step.candidates?.[0]?.score ?? '?'}/100`}>
-                        <span className={`stability-dot ${stabilityClass(step.candidates?.[0]?.score)}`} />
-                        <code>{step.selector}</code>
-                      </span>
+              {steps.map((step, i) => {
+                const editable = editableValue(step) !== null
+                const canEdit = !isRecording && !isReplaying
+                return (
+                  <li
+                    key={i}
+                    className={`step-item${step.disabled ? ' disabled' : ''}${
+                      i === failedIndex
+                        ? ' failed'
+                        : i === replayingIndex
+                          ? ' running'
+                          : doneIndices.has(i)
+                            ? ' done'
+                            : ''
+                    }`}
+                  >
+                    <span className="step-num">{doneIndices.has(i) ? '✓' : i + 1}</span>
+                    <div className="step-body">
+                      {editingIndex === i ? (
+                        <input
+                          className="step-edit-input"
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          onBlur={handleCommitEdit}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleCommitEdit()
+                            else if (e.key === 'Escape') setEditingIndex(null)
+                          }}
+                          autoFocus
+                          spellCheck={false}
+                        />
+                      ) : (
+                        <span className="step-text">{stepText(step)}</span>
+                      )}
+                      {step.selector && (
+                        <span
+                          className="step-selector"
+                          title={`stability ${step.candidates?.[0]?.score ?? '?'}/100`}
+                        >
+                          <span className={`stability-dot ${stabilityClass(step.candidates?.[0]?.score)}`} />
+                          <code>{step.selector}</code>
+                        </span>
+                      )}
+                    </div>
+                    {canEdit && editingIndex !== i && (
+                      <div className="step-actions">
+                        <button
+                          className="step-action"
+                          onClick={() => handleMoveStep(i, -1)}
+                          disabled={i === 0}
+                          title="Move up"
+                          aria-label="Move up"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          className="step-action"
+                          onClick={() => handleMoveStep(i, 1)}
+                          disabled={i === steps.length - 1}
+                          title="Move down"
+                          aria-label="Move down"
+                        >
+                          ↓
+                        </button>
+                        {editable && (
+                          <button
+                            className="step-action"
+                            onClick={() => handleStartEdit(i)}
+                            title="Edit value"
+                            aria-label="Edit value"
+                          >
+                            ✎
+                          </button>
+                        )}
+                        <button
+                          className="step-action"
+                          onClick={() => handleToggleDisabled(i)}
+                          title={step.disabled ? 'Enable step' : 'Disable step'}
+                          aria-label={step.disabled ? 'Enable step' : 'Disable step'}
+                        >
+                          {step.disabled ? '↺' : '⊘'}
+                        </button>
+                        <button
+                          className="step-action danger"
+                          onClick={() => handleDeleteStep(i)}
+                          title="Delete step"
+                          aria-label="Delete step"
+                        >
+                          ✕
+                        </button>
+                      </div>
                     )}
-                  </div>
-                </li>
-              ))}
+                  </li>
+                )
+              })}
             </ol>
           )}
         </aside>

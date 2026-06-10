@@ -33,6 +33,12 @@ export interface SelectorCandidate {
   score: number
   locator: string // a Playwright-style expression (used by Day 5 export)
   css: string | null // a CSS selector when expressible (used by Day 6 replay)
+  // Semantic info for replay to find role/text candidates IN the page — these
+  // have no CSS form, so Day 10 replay resolves them by ARIA role + accessible
+  // name, or by visible text, the same way Playwright's getByRole/getByText do.
+  role?: string // for kind 'role' — the ARIA role
+  name?: string // for kind 'role' — the accessible name
+  text?: string // for kind 'text' — the visible text
 }
 
 export interface BuiltSelector {
@@ -94,7 +100,9 @@ export function buildSelectors(facts: ElementFacts): BuiltSelector {
       kind: 'role',
       score: 80,
       locator: `getByRole('${facts.role}', { name: '${esc(name)}' })`,
-      css: null // not expressible as plain CSS
+      css: null, // not expressible as plain CSS — replay resolves it semantically
+      role: facts.role,
+      name
     })
   }
 
@@ -124,7 +132,8 @@ export function buildSelectors(facts: ElementFacts): BuiltSelector {
       kind: 'text',
       score: 50,
       locator: `getByText('${esc(name)}')`,
-      css: null
+      css: null, // replay resolves this by matching visible text
+      text: name
     })
   }
 

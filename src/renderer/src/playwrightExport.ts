@@ -24,6 +24,8 @@ export function stepText(step: RecorderStep): string {
       return `Type "${step.secret ? '••••••••' : step.value}" into ${step.label}`
     case 'select':
       return `Select "${step.value}" in ${step.label}`
+    case 'press':
+      return `Press ${step.key ?? 'Enter'} in ${step.label}`
     default:
       return JSON.stringify(step)
   }
@@ -50,6 +52,9 @@ function actionFor(step: RecorderStep): string | null {
     case 'select':
       // We stored the option's VISIBLE text, so select by label.
       return `await ${locator}.selectOption({ label: ${quote(step.value ?? '')} })`
+    case 'press':
+      // Playwright's .press() is a real key press — it triggers form submit.
+      return `await ${locator}.press(${quote(step.key ?? 'Enter')})`
     default:
       return null
   }
@@ -58,6 +63,8 @@ function actionFor(step: RecorderStep): string | null {
 // Build the whole test file from the recorded steps.
 export function generatePlaywrightTest(steps: RecorderStep[]): string {
   const body = steps
+    // Steps turned off in the editor are left out of the exported test entirely.
+    .filter((step) => !step.disabled)
     .map((step) => {
       const action = actionFor(step)
       if (!action) return null

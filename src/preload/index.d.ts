@@ -23,7 +23,7 @@ interface ReplayResult {
 }
 
 interface RecorderAPI {
-  toggle: () => Promise<boolean>
+  toggle: (resume?: boolean) => Promise<boolean>
   onStep: (callback: (step: RecorderStep) => void) => () => void
   exportTest: (code: string) => Promise<string | null>
   replay: (steps: RecorderStep[]) => Promise<ReplayResult>
@@ -42,6 +42,9 @@ declare global {
     score: number
     locator: string // Playwright-style expression (Day 5 export)
     css: string | null // CSS selector when expressible (Day 6 replay)
+    role?: string // for kind 'role' — ARIA role (Day 10 replay-by-role)
+    name?: string // for kind 'role' — accessible name
+    text?: string // for kind 'text' — visible text
   }
 
   // One recorded action (the canonical step model). `navigate` carries `url`;
@@ -49,10 +52,12 @@ declare global {
   // (`selector` is the primary; `candidates` are the fallbacks). `type`/
   // `select` also carry the entered/chosen `value`.
   interface RecorderStep {
-    type: 'navigate' | 'click' | 'type' | 'select'
+    type: 'navigate' | 'click' | 'type' | 'select' | 'press'
     label?: string
     value?: string
+    key?: string // for `press` steps — the key pressed (e.g. 'Enter')
     secret?: boolean // password field — value masked on screen / in export
+    disabled?: boolean // turned off in the editor — skipped by replay + export
     url?: string
     selector?: string
     candidates?: SelectorCandidate[]

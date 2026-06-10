@@ -14,6 +14,12 @@ import { ipcRenderer } from 'electron'
 
 let recording = false
 
+// Timestamp (ms) until which the next click should be ignored. Pressing Enter
+// in a form makes the browser auto-fire a click on the submit button (implicit
+// form submission); we record the Enter as a `press` step, so we suppress that
+// synthesized click to avoid recording the same gesture twice.
+let suppressClickUntil = 0
+
 // The app flips this on/off when the user presses the Record button.
 ipcRenderer.on('recorder:set-active', (_event, active: boolean): void => {
   recording = active
@@ -98,8 +104,14 @@ function collectFacts(el: Element): Record<string, string> {
   // ("Name (A to Z)Name (Z to A)Price…") — useless as a name/label. Skip it
   // and let the selector engine fall back to testId / name / aria instead.
   if (el.tagName.toLowerCase() !== 'select') {
-    const text = (el.textContent || '').trim().replace(/\s+/g, ' ')
-    if (text && text.length <= 80) facts.text = text
+    // Prefer a heading INSIDE the element if there is one: a search-result link
+    // wraps an <h3> title plus a long URL + description, so the whole link's
+    // text is too long to use — but the <h3> alone is a clean, usable name.
+    const heading = el.querySelector('h1, h2, h3, h4, h5, h6')
+    const text = ((heading && heading.textContent) || el.textContent || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+    if (text && text.length <= 100) facts.text = text
   }
 
   // An image's alt text — covers clicking a product/cart image.
@@ -125,6 +137,11 @@ document.addEventListener(
   'click',
   (event) => {
     if (!recording) return
+    // Skip the implicit-submission click that follows an Enter we just recorded.
+    if (Date.now() < suppressClickUntil) {
+      suppressClickUntil = 0
+      return
+    }
     const target = event.target as Element | null
     if (!target) return
     const el = meaningfulTarget(target)
@@ -164,6 +181,14 @@ document.addEventListener(
     if (tag !== 'input' && tag !== 'textarea') return
     const field = el as HTMLInputElement
 
+    // If this change is the trailing one fired by an Enter we already handled
+    // below, skip it — we recorded the value from the keydown to keep order
+    // (fill → press), so recording it again here would duplicate the step.
+    if (enterHandled.has(field)) {
+      enterHandled.delete(field)
+      return
+    }
+
     // Mark passwords as secret. We keep the real value (so replay can log in),
     // but it stays in memory only — shown masked on screen and exported as an
     // env var, never written to disk. (QA secrets hygiene.)
@@ -173,6 +198,81 @@ document.addEventListener(
       value: field.value,
       secret: field.type === 'password'
     })
+  },
+  true
+)
+
+// --- Capture ENTER-to-submit (keyboard) ---
+// Many real sites submit a search with the Enter key, not a button click
+// (Google, most search bars). 'change' alone can't see that. We watch for Enter
+// in single-line text fields and record it as a `press` step.
+//
+// Single-line text-like inputs where Enter means "submit" — NOT textareas
+// (Enter = newline there) nor buttons/checkboxes (Enter = a click).
+const SUBMITTING_INPUT_TYPES = new Set([
+  'text',
+  'search',
+  'email',
+  'tel',
+  'url',
+  'number',
+  'password'
+])
+
+// Fields whose value we already recorded from an Enter keydown, so the 'change'
+// listener above can skip the duplicate trailing change.
+const enterHandled = new WeakSet<EventTarget>()
+
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (!recording) return
+    // Plain Enter only — Shift+Enter is a newline, not a submit.
+    if (event.key !== 'Enter' || event.shiftKey) return
+
+    const el = event.target as (HTMLInputElement & HTMLTextAreaElement) | null
+    if (!el) return
+    const tag = el.tagName.toLowerCase()
+    if (tag !== 'input' && tag !== 'textarea') return
+
+    // Which fields treat Enter as "submit" (so it's worth recording)?
+    //  - single-line text inputs (search bars, login fields), AND
+    //  - search-style boxes — IMPORTANT: Google's search box is a
+    //    <textarea role="combobox">, where Enter submits instead of inserting a
+    //    newline. A plain multiline textarea (a comment box) is left alone.
+    const role = (el.getAttribute('role') || '').toLowerCase()
+    const hint = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('name') || ''} ${
+      el.getAttribute('placeholder') || ''
+    }`.toLowerCase()
+    const isSubmitInput = tag === 'input' && SUBMITTING_INPUT_TYPES.has(el.type)
+    const isSearchBox =
+      role === 'combobox' || role === 'searchbox' || (tag === 'textarea' && hint.includes('search'))
+    if (!isSubmitInput && !isSearchBox) return
+
+    // Order matters: a user FILLS the field, THEN presses Enter. The field's own
+    // 'change' fires AFTER this keydown, so we record the value here first (and
+    // suppress that trailing change), then record the Enter press.
+    if (el.value) {
+      enterHandled.add(el)
+      ipcRenderer.send('recorder:event', {
+        type: 'type',
+        facts: collectFacts(el),
+        value: el.value,
+        secret: el.type === 'password'
+      })
+    }
+    ipcRenderer.send('recorder:event', { type: 'press', facts: collectFacts(el), key: 'Enter' })
+
+    // If this field is in a form WITH a submit button, the browser is about to
+    // auto-click that button (implicit submission). We've already recorded the
+    // Enter press, so suppress the click that's coming next.
+    const form = el.form || (el.closest && el.closest('form'))
+    if (
+      form &&
+      form.querySelector('button:not([type=button]):not([type=reset]), input[type=submit], input[type=image]')
+    ) {
+      suppressClickUntil = Date.now() + 500
+    }
   },
   true
 )
