@@ -58,6 +58,26 @@ const api = {
       const listener = (_event: unknown, progress: unknown): void => callback(progress)
       ipcRenderer.on('recorder:replay-progress', listener)
       return () => ipcRenderer.removeListener('recorder:replay-progress', listener)
+    },
+
+    // === Element picker (Day 9) ===
+    // Turn pick mode on/off in the embedded page.
+    setPicking: (active: boolean): Promise<void> =>
+      ipcRenderer.invoke('recorder:setPicking', active),
+
+    // A picked element arrives with its built selector ladder + live state
+    // (text / input value / disabled) for prefitting assertion expectations.
+    onPicked: (callback: (picked: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, picked: unknown): void => callback(picked)
+      ipcRenderer.on('recorder:picked', listener)
+      return () => ipcRenderer.removeListener('recorder:picked', listener)
+    },
+
+    // The user pressed Esc in the page — pick mode ended without a pick.
+    onPickCancel: (callback: () => void): (() => void) => {
+      const listener = (): void => callback()
+      ipcRenderer.on('recorder:pick-cancel', listener)
+      return () => ipcRenderer.removeListener('recorder:pick-cancel', listener)
     }
   }
 }

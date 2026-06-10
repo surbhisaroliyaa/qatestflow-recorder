@@ -29,6 +29,7 @@ export interface ReplayStep {
   url?: string
   value?: string
   key?: string // for `press` steps — the key pressed (e.g. 'Enter')
+  assertKind?: string // for `assert` steps — which check to make (Day 9)
   secret?: boolean
   disabled?: boolean // turned off in the editor — skipped during replay
   selector?: string
@@ -225,6 +226,44 @@ export function buildActionScript(step: ReplayStep): string {
       break
     }
 
+    case 'assert': {
+      // A check, not an action. Conditions are POLLED for up to 3s (pages
+      // settle asynchronously — same reason Playwright's expect() retries),
+      // and a failure reports expected vs ACTUAL — the evidence a human (or
+      // Day 13's AI translator) needs to understand what went wrong.
+      const want = JSON.stringify(step.value ?? '')
+      const kind = JSON.stringify(step.assertKind ?? 'visible')
+      action = `
+        const want = ${want};
+        const kind = ${kind};
+        const read = () => {
+          if (kind === 'visible') return { pass: isVisible(el), actual: isVisible(el) ? 'visible' : 'hidden' };
+          if (kind === 'enabled') return { pass: !el.disabled, actual: el.disabled ? 'disabled' : 'enabled' };
+          if (kind === 'disabled') return { pass: !!el.disabled, actual: el.disabled ? 'disabled' : 'enabled' };
+          if (kind === 'value') { const v = el.value !== undefined ? String(el.value) : ''; return { pass: v === want, actual: v }; }
+          const t = norm(el.textContent);
+          if (kind === 'text-contains') return { pass: t.includes(want), actual: t };
+          return { pass: t === want, actual: t }; // text-equals
+        };
+        const checkUntil = Date.now() + 3000;
+        let last = read();
+        while (!last.pass && Date.now() < checkUntil) {
+          await new Promise((r) => setTimeout(r, 150));
+          last = read();
+        }
+        if (last.pass) return { ok: true };
+        const wants = {
+          'visible': 'be visible',
+          'enabled': 'be enabled',
+          'disabled': 'be disabled',
+          'value': 'have value "' + want + '"',
+          'text-equals': 'have text "' + want + '"',
+          'text-contains': 'contain text "' + want + '"'
+        }[kind] || kind;
+        return { ok: false, error: 'Expected element to ' + wants + ' — actual: "' + String(last.actual).slice(0, 120) + '"' };`
+      break
+    }
+
     case 'press': {
       const k = JSON.stringify(step.key ?? 'Enter')
       // We can't drive the real keyboard, so we (1) dispatch synthetic key
@@ -250,5 +289,9 @@ export function buildActionScript(step: ReplayStep): string {
       action = `return { ok: false, error: 'Unsupported step type: ' + ${JSON.stringify(step.type)} };`
   }
 
-  return `(async () => {${findPrelude(step.candidates ?? [], step.type === 'hover')}${action}\n})()`
+  // Hover triggers AND assertion targets may legitimately be hidden/disabled
+  // right now (you must be able to FIND a hidden element to report "it's
+  // hidden") — so both resolve tolerantly; the action itself judges the state.
+  const tolerant = step.type === 'hover' || step.type === 'assert'
+  return `(async () => {${findPrelude(step.candidates ?? [], tolerant)}${action}\n})()`
 }

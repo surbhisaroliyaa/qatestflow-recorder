@@ -3,6 +3,27 @@ import { generatePlaywrightTest, stepText } from './playwrightExport'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
+// Day 9: the checks offered by the assertion chooser, in display order.
+const ASSERT_KINDS: AssertKind[] = [
+  'visible',
+  'text-equals',
+  'text-contains',
+  'value',
+  'enabled',
+  'disabled'
+]
+const ASSERT_LABELS: Record<AssertKind, string> = {
+  visible: 'Visible',
+  'text-equals': 'Text =',
+  'text-contains': 'Contains',
+  value: 'Value',
+  enabled: 'Enabled',
+  disabled: 'Disabled'
+}
+// These kinds compare against an expected value the user can edit.
+const assertNeedsValue = (kind: AssertKind): boolean =>
+  kind === 'text-equals' || kind === 'text-contains' || kind === 'value'
+
 // The candidate the step's primary selector points at. After a hand-pick the
 // primary is no longer necessarily the top-scored candidates[0].
 function primaryCandidate(step: RecorderStep): SelectorCandidate | undefined {
@@ -38,6 +59,16 @@ function App(): React.JSX.Element {
   // Candidate transparency (Day 10c): which step's full selector ladder is
   // expanded under its row (null = all collapsed).
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null)
+  // Day 9: element picking + assertion authoring. `insertAt` is where the new
+  // step will land (null = append at the end); `pickedElement` being non-null
+  // opens the assertion chooser panel.
+  const [isPicking, setIsPicking] = useState(false)
+  const [pickedElement, setPickedElement] = useState<PickedElement | null>(null)
+  const [assertKind, setAssertKind] = useState<AssertKind>('visible')
+  const [assertValue, setAssertValue] = useState('')
+  const [insertAt, setInsertAt] = useState<number | null>(null)
+  // Which row's "insert here" mini-menu is open (null = none).
+  const [insertMenuIndex, setInsertMenuIndex] = useState<number | null>(null)
 
   // Steps left ON (disabled steps are skipped by replay + export).
   const enabledCount = steps.filter((s) => !s.disabled).length
@@ -49,10 +80,28 @@ function App(): React.JSX.Element {
       if (!url.startsWith('data:')) {
         setUrlInput(url)
         setHasNavigated(true)
+        // A navigation reloads the page — and with it, the observer's pick
+        // flag. Whatever we were pointing at no longer exists; end pick mode.
+        setIsPicking(false)
       }
     })
     return unsubscribe
   }, [])
+
+  // Day 9: a picked element arrives — close pick mode, open the assertion
+  // chooser prefilled with the element's live text.
+  useEffect(() => {
+    const unsubscribe = window.api.recorder.onPicked((picked) => {
+      setIsPicking(false)
+      setPickedElement(picked)
+      setAssertKind('visible')
+      setAssertValue(picked.text ?? '')
+    })
+    return unsubscribe
+  }, [])
+
+  // The user pressed Esc inside the page — pick mode ended without a pick.
+  useEffect(() => window.api.recorder.onPickCancel(() => setIsPicking(false)), [])
 
   // Append every recorded step to the live list as it arrives from main.
   useEffect(() => {
@@ -177,6 +226,7 @@ function App(): React.JSX.Element {
     setSteps(next)
     setEditingIndex(null)
     setExpandedIndex(null) // rows may have shifted — an open ladder would lie
+    setInsertMenuIndex(null) // same for an open insert-here menu
     setDoneIndices(new Set())
     setFailedIndex(null)
     setReplayError(null)
@@ -225,13 +275,72 @@ function App(): React.JSX.Element {
   }
 
   // The text an inline edit would change: a navigate edits its URL; a type /
-  // select edits its value. Clicks have nothing to edit; passwords are never
+  // select edits its value; a wait edits its seconds; a valued assertion edits
+  // its expected text. Clicks have nothing to edit; passwords are never
   // surfaced in a text box. Returns null when the step isn't editable.
   const editableValue = (step: RecorderStep): string | null => {
     if (step.type === 'navigate') return step.url ?? ''
     if (step.secret) return null
-    if (step.type === 'type' || step.type === 'select') return step.value ?? ''
+    if (step.type === 'type' || step.type === 'select' || step.type === 'wait') {
+      return step.value ?? ''
+    }
+    if (step.type === 'assert' && step.assertKind && assertNeedsValue(step.assertKind)) {
+      return step.value ?? ''
+    }
     return null
+  }
+
+  // === Day 9: picking + assertion authoring =========================
+  const handleStartPick = async (at: number | null): Promise<void> => {
+    setInsertMenuIndex(null)
+    setPickedElement(null)
+    setInsertAt(at)
+    setIsPicking(true)
+    await window.api.recorder.setPicking(true)
+  }
+
+  const handleCancelPick = async (): Promise<void> => {
+    setIsPicking(false)
+    await window.api.recorder.setPicking(false)
+  }
+
+  // Insert a finished step at the requested position (null = append).
+  const insertStep = (step: RecorderStep, at: number | null): void => {
+    const i = at ?? steps.length
+    editSteps([...steps.slice(0, i), step, ...steps.slice(i)])
+  }
+
+  // Switching check type re-prefills the expected value from the element's
+  // live state (its text for text checks, its value for the value check).
+  const handleChooseKind = (kind: AssertKind): void => {
+    setAssertKind(kind)
+    if (!pickedElement) return
+    if (kind === 'value') setAssertValue(pickedElement.inputValue ?? '')
+    else if (kind === 'text-equals' || kind === 'text-contains') {
+      setAssertValue(pickedElement.text ?? '')
+    }
+  }
+
+  const handleAddAssert = (): void => {
+    if (!pickedElement) return
+    insertStep(
+      {
+        type: 'assert',
+        assertKind,
+        label: pickedElement.label,
+        selector: pickedElement.selector,
+        candidates: pickedElement.candidates,
+        value: assertNeedsValue(assertKind) ? assertValue : undefined
+      },
+      insertAt
+    )
+    setPickedElement(null)
+    setInsertAt(null)
+  }
+
+  const handleAddWait = (at: number | null): void => {
+    setInsertMenuIndex(null)
+    insertStep({ type: 'wait', value: '2' }, at)
   }
 
   const handleStartEdit = (i: number): void => {
@@ -340,6 +449,18 @@ function App(): React.JSX.Element {
           </button>
         </form>
         <button
+          className={`check-btn${isPicking ? ' picking' : ''}`}
+          onClick={() => (isPicking ? handleCancelPick() : handleStartPick(null))}
+          disabled={isReplaying}
+          title={
+            isPicking
+              ? 'Cancel picking (or press Esc)'
+              : 'Add a check: pick an element on the page'
+          }
+        >
+          ✓ {isPicking ? 'Picking…' : 'Check'}
+        </button>
+        <button
           className={`record-btn${isRecording ? ' recording' : ''}`}
           onClick={handleRecordToggle}
           title={
@@ -397,6 +518,57 @@ function App(): React.JSX.Element {
           {replayBanner && (
             <div className={`replay-status ${replayBanner.tone}`}>{replayBanner.text}</div>
           )}
+          {isPicking && (
+            <div className="replay-status running">
+              Click an element in the page to check it (Esc cancels)
+            </div>
+          )}
+
+          {/* === Assertion chooser — opens when an element was picked === */}
+          {pickedElement && (
+            <div className="assert-panel">
+              <div className="assert-target">
+                <span className="assert-title">Add check:</span>
+                <span className="assert-label">{pickedElement.label}</span>
+              </div>
+              <code className="assert-selector">{pickedElement.selector}</code>
+              <div className="assert-kinds">
+                {ASSERT_KINDS.map((kind) => (
+                  <button
+                    key={kind}
+                    type="button"
+                    className={`assert-kind${assertKind === kind ? ' chosen' : ''}`}
+                    onClick={() => handleChooseKind(kind)}
+                  >
+                    {ASSERT_LABELS[kind]}
+                  </button>
+                ))}
+              </div>
+              {assertNeedsValue(assertKind) && (
+                <input
+                  className="assert-value"
+                  value={assertValue}
+                  onChange={(e) => setAssertValue(e.target.value)}
+                  placeholder="expected value…"
+                  spellCheck={false}
+                />
+              )}
+              <div className="assert-actions">
+                <button
+                  className="modal-btn"
+                  onClick={() => {
+                    setPickedElement(null)
+                    setInsertAt(null)
+                  }}
+                >
+                  Cancel
+                </button>
+                <button className="modal-btn primary" onClick={handleAddAssert}>
+                  Add check
+                </button>
+              </div>
+            </div>
+          )}
           {steps.length === 0 ? (
             <p className="steps-empty">
               {isRecording
@@ -452,6 +624,16 @@ function App(): React.JSX.Element {
                           <code>{step.selector}</code>
                           <span className="selector-caret">{expandedIndex === i ? '▾' : '▸'}</span>
                         </button>
+                      )}
+                      {insertMenuIndex === i && canEdit && (
+                        <div className="insert-menu">
+                          <button type="button" onClick={() => handleStartPick(i + 1)}>
+                            ✓ Add check here
+                          </button>
+                          <button type="button" onClick={() => handleAddWait(i + 1)}>
+                            ⏱ Add 2s wait here
+                          </button>
+                        </div>
                       )}
                       {expandedIndex === i && step.candidates && step.candidates.length > 0 && (
                         <ul className="candidate-list">
@@ -524,6 +706,14 @@ function App(): React.JSX.Element {
                           aria-label={step.disabled ? 'Enable step' : 'Disable step'}
                         >
                           {step.disabled ? '↺' : '⊘'}
+                        </button>
+                        <button
+                          className="step-action"
+                          onClick={() => setInsertMenuIndex(insertMenuIndex === i ? null : i)}
+                          title="Insert a step below this one"
+                          aria-label="Insert below"
+                        >
+                          ＋
                         </button>
                         <button
                           className="step-action danger"

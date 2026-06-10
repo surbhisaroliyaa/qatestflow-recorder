@@ -28,6 +28,65 @@ ipcRenderer.on('recorder:set-active', (_event, active: boolean): void => {
   recording = active
 })
 
+// === Day 9: ELEMENT PICKER ==========================================
+// Pick mode turns the next click into pure POINTING: we highlight what's
+// under the cursor, and on click we stop the event dead (capture phase, so
+// the page never reacts and no click step is recorded) and just report the
+// element's facts. Used for assertions today; reused by Recovery on Day 12.
+
+let picking = false
+
+// One reusable highlight box, drawn over whatever the cursor is on.
+let highlightBox: HTMLDivElement | null = null
+
+function moveHighlight(el: Element): void {
+  if (!highlightBox) {
+    highlightBox = document.createElement('div')
+    highlightBox.style.cssText =
+      'position:fixed;z-index:2147483647;pointer-events:none;' +
+      'border:2px solid #58a6ff;background:rgba(88,166,255,0.15);border-radius:2px;'
+    document.documentElement.appendChild(highlightBox)
+  }
+  const r = el.getBoundingClientRect()
+  highlightBox.style.left = `${r.left - 2}px`
+  highlightBox.style.top = `${r.top - 2}px`
+  highlightBox.style.width = `${r.width}px`
+  highlightBox.style.height = `${r.height}px`
+}
+
+function clearHighlight(): void {
+  highlightBox?.remove()
+  highlightBox = null
+}
+
+ipcRenderer.on('recorder:set-picking', (_event, active: boolean): void => {
+  picking = active
+  if (!picking) clearHighlight()
+})
+
+document.addEventListener(
+  'mouseover',
+  (event) => {
+    if (!picking) return
+    const target = event.target as Element | null
+    if (target) moveHighlight(meaningfulTarget(target))
+  },
+  true
+)
+
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (!picking || event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    picking = false
+    clearHighlight()
+    ipcRenderer.send('recorder:pick-cancel')
+  },
+  true
+)
+
 // Map an <input type> to its ARIA role so the engine can offer a role locator.
 function inputRole(type: string): string | undefined {
   switch (type) {
@@ -357,6 +416,26 @@ function findHoverTrigger(el: Element): Element | null {
 document.addEventListener(
   'click',
   (event) => {
+    // Pick mode: this click is pure POINTING. Stop it before the page (or our
+    // own recording below) can react, and report the element instead.
+    if (picking) {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      const pickTarget = event.target as Element | null
+      if (!pickTarget) return
+      const el = meaningfulTarget(pickTarget)
+      picking = false
+      clearHighlight()
+      const field = el as HTMLInputElement
+      ipcRenderer.send('recorder:picked', {
+        facts: collectFacts(el),
+        // Live state, so the assertion UI can prefill sensible expectations:
+        text: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+        inputValue: typeof field.value === 'string' ? field.value : undefined,
+        disabled: !!field.disabled
+      })
+      return
+    }
     if (!recording) return
     // Skip the implicit-submission click that follows an Enter we just recorded.
     if (Date.now() < suppressClickUntil) {

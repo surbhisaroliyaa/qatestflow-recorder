@@ -28,6 +28,9 @@ interface RecorderAPI {
   exportTest: (code: string) => Promise<string | null>
   replay: (steps: RecorderStep[]) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
+  setPicking: (active: boolean) => Promise<void>
+  onPicked: (callback: (picked: PickedElement) => void) => () => void
+  onPickCancel: (callback: () => void) => () => void
 }
 
 interface API {
@@ -36,6 +39,20 @@ interface API {
 }
 
 declare global {
+  // The checks an assertion step can make (Day 9).
+  type AssertKind = 'visible' | 'text-equals' | 'text-contains' | 'value' | 'enabled' | 'disabled'
+
+  // What the element picker hands back: the built selector ladder plus the
+  // element's LIVE state, used to prefill assertion expectations (Day 9).
+  interface PickedElement {
+    label: string
+    selector: string
+    candidates: SelectorCandidate[]
+    text?: string
+    inputValue?: string
+    disabled?: boolean
+  }
+
   // One ranked way to locate an element, with a 0–100 stability score.
   interface SelectorCandidate {
     kind: 'testId' | 'id' | 'role' | 'name' | 'placeholder' | 'text' | 'css'
@@ -54,10 +71,13 @@ declare global {
   // (`selector` is the primary; `candidates` are the fallbacks). `type`/
   // `select` also carry the entered/chosen `value`.
   interface RecorderStep {
-    type: 'navigate' | 'click' | 'type' | 'select' | 'press' | 'hover'
+    type: 'navigate' | 'click' | 'type' | 'select' | 'press' | 'hover' | 'assert' | 'wait'
     label?: string
+    // For type/select: the entered value. For assert text/value kinds: the
+    // EXPECTED value. For wait: the seconds, as text (editable like any value).
     value?: string
     key?: string // for `press` steps — the key pressed (e.g. 'Enter')
+    assertKind?: AssertKind // for `assert` steps — which check to make
     secret?: boolean // password field — value masked on screen / in export
     disabled?: boolean // turned off in the editor — skipped by replay + export
     url?: string

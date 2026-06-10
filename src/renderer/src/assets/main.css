@@ -233,6 +233,40 @@ body {
   transition: background 120ms ease;
 }
 
+/* "✓ Check" — enter pick mode to add an assertion (Day 9). */
+.check-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 120ms ease;
+}
+
+.check-btn:hover:not(:disabled) {
+  background: #4a4a4a;
+}
+
+.check-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* While picking: blue, like the highlight box in the page. */
+.check-btn.picking {
+  background: #173a5e;
+  border-color: #58a6ff;
+  color: #cce4ff;
+}
+
 .record-btn:hover {
   background: #4a4a4a;
 }
@@ -629,6 +663,134 @@ body {
   flex: none;
   font-size: 11px;
   color: #58a6ff;
+}
+
+/* ===================================================
+   ASSERTION CHOOSER + INSERT MENU (Day 9)
+   =================================================== */
+
+/* Panel that opens at the top of the steps panel after picking an element.
+   Deliberately NOT a modal: the embedded browser is a native pane that would
+   cover any popup (Day 5 lesson) — the steps panel is always visible. */
+.assert-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 10px;
+  padding: 10px;
+  background: #161d26;
+  border: 1px solid #2c4a66;
+  border-radius: 8px;
+}
+
+.assert-target {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.assert-title {
+  flex: none;
+  font-size: 11px;
+  color: #8ab4dd;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.assert-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e0e0e0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assert-selector {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #8aa;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assert-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.assert-kind {
+  padding: 4px 9px;
+  background: transparent;
+  border: 1px solid #3a3a3a;
+  border-radius: 12px;
+  color: #bbb;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.assert-kind:hover {
+  border-color: #58a6ff;
+  color: #ddd;
+}
+
+.assert-kind.chosen {
+  background: #173a5e;
+  border-color: #58a6ff;
+  color: #cce4ff;
+}
+
+.assert-value {
+  height: 28px;
+  padding: 0 8px;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.assert-value:focus {
+  border-color: #58a6ff;
+}
+
+.assert-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* The "insert here" mini-menu under a step row. */
+.insert-menu {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.insert-menu button {
+  padding: 4px 10px;
+  background: #222;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  color: #bbb;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.insert-menu button:hover {
+  border-color: #58a6ff;
+  color: #ddd;
 }
 
 /* ===================================================

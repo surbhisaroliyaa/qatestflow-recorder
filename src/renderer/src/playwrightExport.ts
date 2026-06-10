@@ -28,6 +28,23 @@ export function stepText(step: RecorderStep): string {
       return `Press ${step.key ?? 'Enter'} in ${step.label}`
     case 'hover':
       return `Hover over ${step.label}`
+    case 'assert':
+      switch (step.assertKind) {
+        case 'text-equals':
+          return `Check ${step.label} text is "${step.value}"`
+        case 'text-contains':
+          return `Check ${step.label} contains "${step.value}"`
+        case 'value':
+          return `Check ${step.label} value is "${step.value}"`
+        case 'enabled':
+          return `Check ${step.label} is enabled`
+        case 'disabled':
+          return `Check ${step.label} is disabled`
+        default:
+          return `Check ${step.label} is visible`
+      }
+    case 'wait':
+      return `Wait ${step.value ?? '1'}s`
     default:
       return JSON.stringify(step)
   }
@@ -39,8 +56,31 @@ function actionFor(step: RecorderStep): string | null {
     return `await page.goto(${quote(step.url ?? '')})`
   }
 
+  if (step.type === 'wait') {
+    const ms = Math.max(0, (parseFloat(step.value ?? '0') || 0) * 1000)
+    return `await page.waitForTimeout(${ms})`
+  }
+
   if (!step.selector) return null
   const locator = `page.${step.selector}`
+
+  // Assertions translate 1:1 to Playwright's expect() matchers.
+  if (step.type === 'assert') {
+    switch (step.assertKind) {
+      case 'text-equals':
+        return `await expect(${locator}).toHaveText(${quote(step.value ?? '')})`
+      case 'text-contains':
+        return `await expect(${locator}).toContainText(${quote(step.value ?? '')})`
+      case 'value':
+        return `await expect(${locator}).toHaveValue(${quote(step.value ?? '')})`
+      case 'enabled':
+        return `await expect(${locator}).toBeEnabled()`
+      case 'disabled':
+        return `await expect(${locator}).toBeDisabled()`
+      default:
+        return `await expect(${locator}).toBeVisible()`
+    }
+  }
 
   switch (step.type) {
     case 'click':
@@ -67,9 +107,8 @@ function actionFor(step: RecorderStep): string | null {
 
 // Build the whole test file from the recorded steps.
 export function generatePlaywrightTest(steps: RecorderStep[]): string {
-  const body = steps
-    // Steps turned off in the editor are left out of the exported test entirely.
-    .filter((step) => !step.disabled)
+  const enabled = steps.filter((step) => !step.disabled)
+  const body = enabled
     .map((step) => {
       const action = actionFor(step)
       if (!action) return null
@@ -78,7 +117,11 @@ export function generatePlaywrightTest(steps: RecorderStep[]): string {
     .filter((line): line is string => line !== null)
     .join('\n\n')
 
-  return `import { test } from '@playwright/test'
+  // Only import expect when an assertion actually uses it.
+  const hasAssert = enabled.some((step) => step.type === 'assert')
+  const imports = hasAssert ? '{ test, expect }' : '{ test }'
+
+  return `import ${imports} from '@playwright/test'
 
 test('recorded flow', async ({ page }) => {
 ${body}

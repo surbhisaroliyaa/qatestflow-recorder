@@ -222,6 +222,36 @@ function createWindow(): void {
     if (isRecording) embeddedBrowser.webContents.send('recorder:set-active', true)
   })
 
+  // === Element picker (Day 9) ========================================
+  // The renderer turns pick mode on/off; the observer in the page does the
+  // pointing. A picked element comes back as raw facts — run them through the
+  // selector engine (same as recorded steps) before handing to the UI.
+  ipcMain.handle('recorder:setPicking', (_event, active: boolean) => {
+    embeddedBrowser.webContents.send('recorder:set-picking', active)
+  })
+
+  ipcMain.on(
+    'recorder:picked',
+    (
+      _event,
+      raw: { facts: ElementFacts; text?: string; inputValue?: string; disabled?: boolean }
+    ) => {
+      const { primary, candidates } = buildSelectors(raw.facts)
+      mainWindow.webContents.send('recorder:picked', {
+        label: labelFrom(raw.facts),
+        selector: primary,
+        candidates,
+        text: raw.text,
+        inputValue: raw.inputValue,
+        disabled: raw.disabled
+      })
+    }
+  )
+
+  ipcMain.on('recorder:pick-cancel', () => {
+    mainWindow.webContents.send('recorder:pick-cancel')
+  })
+
   // === Replay ========================================================
   // Run the recorded steps one-by-one inside the embedded browser. We report
   // progress per step so React can highlight the current/failed step, and stop
@@ -290,6 +320,10 @@ function createWindow(): void {
             hasNavigated = true
             resizeEmbedded()
             await embeddedBrowser.webContents.loadURL(step.url ?? '')
+          } else if (step.type === 'wait') {
+            // An explicit pause — no element involved, just time (Day 9).
+            const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
+            await wait(seconds * 1000)
           } else {
             // The injected finder resolves the element through the full
             // candidate ladder (role / text / CSS), strongest-first.
