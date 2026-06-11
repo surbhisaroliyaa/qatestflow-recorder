@@ -83,6 +83,19 @@ const api = {
       ipcRenderer.on('recorder:pick-cancel', listener)
       return () => ipcRenderer.removeListener('recorder:pick-cancel', listener)
     }
+  },
+
+  // === Test library (Day 11) — saved tests as JSON files on disk. ===
+  // (Shapes typed structurally as unknown here; the renderer gets the named
+  // types from index.d.ts — same pattern as recorder.onStep.)
+  library: {
+    save: (input: { name: string; baseURL: string; steps: unknown[] }): Promise<unknown> =>
+      ipcRenderer.invoke('library:save', input),
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('library:list'),
+    load: (fileName: string): Promise<unknown> => ipcRenderer.invoke('library:load', fileName),
+    remove: (fileName: string): Promise<void> => ipcRenderer.invoke('library:delete', fileName),
+    recordRun: (fileName: string, run: unknown): Promise<void> =>
+      ipcRenderer.invoke('library:recordRun', fileName, run)
   }
 }
 

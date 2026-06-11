@@ -100,9 +100,39 @@ function App(): React.JSX.Element {
   const [insertAt, setInsertAt] = useState<number | null>(null)
   // Which row's "insert here" mini-menu is open (null = none).
   const [insertMenuIndex, setInsertMenuIndex] = useState<number | null>(null)
+  // Day 11 — test library. The current test's identity (empty/null = an
+  // unsaved recording) + the saved-tests list shown on the welcome screen.
+  const [savedTests, setSavedTests] = useState<SavedTestSummary[]>([])
+  const [testName, setTestName] = useState('')
+  const [testFileName, setTestFileName] = useState<string | null>(null)
+  const [baseURL, setBaseURL] = useState('')
+  const [savePanelOpen, setSavePanelOpen] = useState(false)
+  const [saveNameInput, setSaveNameInput] = useState('')
+  // Inline editing of the test's base URL (the environment switch).
+  const [editingBase, setEditingBase] = useState(false)
+  const [baseEditValue, setBaseEditValue] = useState('')
 
   // Steps left ON (disabled steps are skipped by replay + export).
   const enabledCount = steps.filter((s) => !s.disabled).length
+
+  // The test's base URL when none was set yet: the ORIGIN of the first
+  // navigation (https://site.com/login -> https://site.com).
+  const deriveBaseURL = (list: RecorderStep[]): string => {
+    const nav = list.find((s) => s.type === 'navigate' && s.url)
+    if (!nav?.url) return ''
+    try {
+      return new URL(nav.url).origin
+    } catch {
+      return ''
+    }
+  }
+
+  // Refresh the library list whenever the welcome screen shows.
+  useEffect(() => {
+    if (!hasNavigated) {
+      window.api.library.list().then(setSavedTests)
+    }
+  }, [hasNavigated])
 
   // Sync the URL bar whenever the embedded browser navigates.
   // Mark hasNavigated true so we switch from welcome -> chrome view.
@@ -215,12 +245,24 @@ function App(): React.JSX.Element {
     setUrlInput('')
     setIsRecording(false)
     setSteps([])
+    // Fresh start drops the current test identity too (steps are gone).
+    setTestName('')
+    setTestFileName(null)
+    setBaseURL('')
+    setSavePanelOpen(false)
   }
 
-  // Export: generate the Playwright code and open the preview modal.
+  // Export: generate the Playwright code and open the preview modal. The
+  // test's name becomes the test title; its base URL becomes test.use({...})
+  // (derived from the first navigation when the test was never saved).
   const handleExport = (): void => {
     setSavedPath(null)
-    setExportCode(generatePlaywrightTest(steps))
+    setExportCode(
+      generatePlaywrightTest(steps, {
+        name: testName || undefined,
+        baseURL: baseURL || deriveBaseURL(steps) || undefined
+      })
+    )
   }
 
   // Save the previewed code to a .ts file (main shows the OS save dialog).
@@ -248,6 +290,92 @@ function App(): React.JSX.Element {
       setFailedIndex(result.failedAt ?? null)
       setReplayError(result.error ?? 'Replay failed')
     }
+    // A SAVED test remembers its latest outcome — the library list shows it
+    // as a green/red dot (a mini run-history, like a CI dashboard).
+    if (testFileName) {
+      window.api.library.recordRun(testFileName, {
+        status: result.ok ? 'passed' : 'failed',
+        at: new Date().toISOString(),
+        failedAt: result.failedAt,
+        error: result.error
+      })
+    }
+  }
+
+  // === Day 11: test library =========================================
+  const handleOpenSavePanel = (): void => {
+    const base = baseURL || deriveBaseURL(steps)
+    let suggested = testName
+    if (!suggested && base) {
+      try {
+        suggested = `${new URL(base).hostname.replace(/^www\./, '')} flow`
+      } catch {
+        suggested = ''
+      }
+    }
+    setSaveNameInput(suggested)
+    setSavePanelOpen(true)
+  }
+
+  const handleSaveTest = async (): Promise<void> => {
+    const name = saveNameInput.trim()
+    if (!name) return
+    const base = baseURL || deriveBaseURL(steps)
+    const summary = await window.api.library.save({ name, baseURL: base, steps })
+    setTestName(name)
+    setTestFileName(summary.fileName)
+    setBaseURL(base)
+    setSavePanelOpen(false)
+  }
+
+  // Open a saved test: its steps become the working list (the single source
+  // of truth, same as after recording), and the browser shows its start page.
+  const handleLoadTest = async (fileName: string): Promise<void> => {
+    const test = await window.api.library.load(fileName)
+    if (!test) return
+    editSteps(test.steps)
+    setTestName(test.name)
+    setTestFileName(fileName)
+    setBaseURL(test.baseURL)
+    setHasNavigated(true)
+    const firstNav = test.steps.find((s) => s.type === 'navigate' && s.url)
+    if (firstNav?.url) {
+      setUrlInput(firstNav.url)
+      window.api.browser.navigate(firstNav.url)
+    }
+  }
+
+  const handleDeleteTest = async (test: SavedTestSummary): Promise<void> => {
+    if (!window.confirm(`Delete "${test.name}"? This cannot be undone.`)) return
+    await window.api.library.remove(test.fileName)
+    setSavedTests(await window.api.library.list())
+  }
+
+  // Retarget the test at another environment: rewrite every navigation that
+  // lives under the OLD base so it lives under the NEW one. Visible in the
+  // step list immediately — no hidden state.
+  const handleCommitBaseURL = (): void => {
+    setEditingBase(false)
+    let next = baseEditValue.trim().replace(/\/+$/, '')
+    if (!next) return
+    if (!/^https?:\/\//i.test(next)) next = `https://${next}`
+    try {
+      new URL(next)
+    } catch {
+      return // not a usable URL — keep the old base
+    }
+    const old = baseURL
+    if (next === old) return
+    if (old) {
+      editSteps(
+        steps.map((s) =>
+          s.type === 'navigate' && s.url?.startsWith(old)
+            ? { ...s, url: next + s.url.slice(old.length) }
+            : s
+        )
+      )
+    }
+    setBaseURL(next)
   }
 
   // === No-code step editor ==========================================
@@ -426,7 +554,11 @@ function App(): React.JSX.Element {
     const i = editingIndex
     editSteps(
       steps.map((s, idx) =>
-        idx !== i ? s : s.type === 'navigate' ? { ...s, url: editValue } : { ...s, value: editValue }
+        idx !== i
+          ? s
+          : s.type === 'navigate'
+            ? { ...s, url: editValue }
+            : { ...s, value: editValue }
       )
     )
   }
@@ -475,6 +607,47 @@ function App(): React.JSX.Element {
               </button>
             ))}
           </div>
+
+          {/* === Day 11: saved-test library === */}
+          {savedTests.length > 0 && (
+            <div className="test-library">
+              <div className="library-title">Your tests</div>
+              <ul className="library-list">
+                {savedTests.map((test) => (
+                  <li key={test.fileName} className="library-item">
+                    <button
+                      type="button"
+                      className="library-row"
+                      onClick={() => handleLoadTest(test.fileName)}
+                      title={`Open "${test.name}"`}
+                    >
+                      <span
+                        className={`run-dot ${test.lastRun?.status ?? 'none'}`}
+                        title={
+                          test.lastRun
+                            ? `Last replay ${test.lastRun.status} — ${new Date(test.lastRun.at).toLocaleString()}`
+                            : 'Never replayed'
+                        }
+                      />
+                      <span className="library-name">{test.name}</span>
+                      <span className="library-meta">
+                        {test.stepCount} steps · {new Date(test.updatedAt).toLocaleDateString()}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="library-delete"
+                      onClick={() => handleDeleteTest(test)}
+                      title="Delete test"
+                      aria-label={`Delete ${test.name}`}
+                    >
+                      ✕
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       </div>
     )
@@ -524,9 +697,7 @@ function App(): React.JSX.Element {
           onClick={() => (isPicking ? handleCancelPick() : handleStartPick(null))}
           disabled={isReplaying}
           title={
-            isPicking
-              ? 'Cancel picking (or press Esc)'
-              : 'Add a check: pick an element on the page'
+            isPicking ? 'Cancel picking (or press Esc)' : 'Add a check: pick an element on the page'
           }
         >
           ✓ {isPicking ? 'Picking…' : 'Check'}
@@ -552,6 +723,40 @@ function App(): React.JSX.Element {
       <div className="workspace">
         <div className="browser-area" />
         <aside className="steps-panel">
+          {/* === Day 11: current test identity (name + editable base URL) === */}
+          {testName && (
+            <div className="test-bar">
+              <span className="test-name" title={testName}>
+                {testName}
+              </span>
+              {editingBase ? (
+                <input
+                  className="test-base-input"
+                  value={baseEditValue}
+                  onChange={(e) => setBaseEditValue(e.target.value)}
+                  onBlur={handleCommitBaseURL}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleCommitBaseURL()
+                    else if (e.key === 'Escape') setEditingBase(false)
+                  }}
+                  autoFocus
+                  spellCheck={false}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="test-base"
+                  onClick={() => {
+                    setBaseEditValue(baseURL)
+                    setEditingBase(true)
+                  }}
+                  title="Base URL — click to edit. Changing it retargets every navigation step (e.g. staging vs production)."
+                >
+                  {baseURL || 'no base URL'}
+                </button>
+              )}
+            </div>
+          )}
           <div className="steps-header">
             <span className="steps-title">
               Steps
@@ -575,6 +780,15 @@ function App(): React.JSX.Element {
                   {'</>'} Export
                 </button>
                 <button
+                  className="save-test-btn"
+                  onClick={handleOpenSavePanel}
+                  disabled={isReplaying || isRecording}
+                  title={testName ? `Save changes to "${testName}"` : 'Save test to library'}
+                  aria-label="Save test"
+                >
+                  💾
+                </button>
+                <button
                   className="clear-btn"
                   onClick={handleClearSteps}
                   disabled={isReplaying || isRecording}
@@ -588,6 +802,40 @@ function App(): React.JSX.Element {
           </div>
           {replayBanner && (
             <div className={`replay-status ${replayBanner.tone}`}>{replayBanner.text}</div>
+          )}
+
+          {/* === Day 11: save panel (reuses the assert-panel look) === */}
+          {savePanelOpen && (
+            <div className="assert-panel">
+              <div className="assert-target">
+                <span className="assert-title">Save test</span>
+              </div>
+              <input
+                className="assert-value"
+                value={saveNameInput}
+                onChange={(e) => setSaveNameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveTest()
+                  else if (e.key === 'Escape') setSavePanelOpen(false)
+                }}
+                placeholder="test name…"
+                autoFocus
+                spellCheck={false}
+              />
+              <code className="assert-selector">
+                {baseURL || deriveBaseURL(steps)
+                  ? `base URL: ${baseURL || deriveBaseURL(steps)}`
+                  : 'no base URL detected'}
+              </code>
+              <div className="assert-actions">
+                <button className="modal-btn" onClick={() => setSavePanelOpen(false)}>
+                  Cancel
+                </button>
+                <button className="modal-btn primary" onClick={handleSaveTest}>
+                  Save
+                </button>
+              </div>
+            </div>
           )}
           {isPicking && (
             <div className="replay-status running">
@@ -840,7 +1088,11 @@ function App(): React.JSX.Element {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <span className="modal-title">Playwright test</span>
-              <button className="modal-close" onClick={() => setExportCode(null)} aria-label="Close">
+              <button
+                className="modal-close"
+                onClick={() => setExportCode(null)}
+                aria-label="Close"
+              >
                 ✕
               </button>
             </div>

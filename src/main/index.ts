@@ -5,6 +5,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
 import { buildActionScript, type ReplayStep } from './replay'
+import { saveTest, listTests, loadTest, deleteTest, recordRun, type RunInfo } from './library'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -387,6 +388,20 @@ function createWindow(): void {
       }
       return finish({ ok: true })
     }
+  )
+
+  // === Test library (Day 11) =========================================
+  // Thin IPC wrappers — all the real logic (paths, slugs, safety) lives in
+  // library.ts where it's testable without Electron wiring.
+  ipcMain.handle(
+    'library:save',
+    (_event, input: { name: string; baseURL: string; steps: unknown[] }) => saveTest(input)
+  )
+  ipcMain.handle('library:list', () => listTests())
+  ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))
+  ipcMain.handle('library:delete', (_event, fileName: string) => deleteTest(fileName))
+  ipcMain.handle('library:recordRun', (_event, fileName: string, run: RunInfo) =>
+    recordRun(fileName, run)
   )
 
   // === Export ========================================================

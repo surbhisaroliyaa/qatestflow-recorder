@@ -35,12 +35,56 @@ interface RecorderAPI {
   onPickCancel: (callback: () => void) => () => void
 }
 
+interface LibraryAPI {
+  save: (input: {
+    name: string
+    baseURL: string
+    steps: RecorderStep[]
+  }) => Promise<SavedTestSummary>
+  list: () => Promise<SavedTestSummary[]>
+  load: (fileName: string) => Promise<SavedTestData | null>
+  remove: (fileName: string) => Promise<void>
+  recordRun: (fileName: string, run: RunInfo) => Promise<void>
+}
+
 interface API {
   browser: BrowserAPI
   recorder: RecorderAPI
+  library: LibraryAPI
 }
 
 declare global {
+  // === Test library (Day 11) ===
+  // Outcome of a test's most recent replay — drives the green/red dot in the
+  // library list.
+  interface RunInfo {
+    status: 'passed' | 'failed'
+    at: string
+    failedAt?: number
+    error?: string
+  }
+
+  // One row in the library list (no steps — kept light for listing).
+  interface SavedTestSummary {
+    fileName: string
+    name: string
+    baseURL: string
+    updatedAt: string
+    stepCount: number
+    lastRun?: RunInfo
+  }
+
+  // A fully loaded test: the step model plus its metadata.
+  interface SavedTestData {
+    version: number
+    name: string
+    baseURL: string
+    createdAt: string
+    updatedAt: string
+    lastRun?: RunInfo
+    steps: RecorderStep[]
+  }
+
   // The checks an assertion step can make (Day 9). 'checked'/'unchecked' are
   // element checks for checkboxes/radios; 'url-contains'/'title' are PAGE
   // checks — they have no element, so no selector/candidates (Day 11).

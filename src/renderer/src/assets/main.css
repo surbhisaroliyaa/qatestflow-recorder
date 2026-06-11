@@ -493,6 +493,194 @@ body {
   color: #8ff0a8;
 }
 
+/* ===================================================
+   TEST LIBRARY (Day 11)
+   =================================================== */
+
+/* Welcome screen: the saved-tests list under the URL input */
+.test-library {
+  margin-top: 36px;
+  text-align: left;
+}
+
+.library-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #888;
+  margin-bottom: 8px;
+}
+
+.library-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.library-item {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.library-row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 12px;
+  background: #20262e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  color: #ddd;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.library-row:hover {
+  border-color: #58a6ff;
+  background: #232c38;
+}
+
+.library-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.library-meta {
+  flex: none;
+  color: #888;
+  font-size: 11px;
+}
+
+.library-delete {
+  flex: none;
+  width: 30px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #666;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.library-delete:hover {
+  color: #ffb3ae;
+  border-color: #4a2422;
+  background: #2a1715;
+}
+
+/* Last-replay outcome dot (mini CI dashboard) */
+.run-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.run-dot.passed {
+  background: #3fb950;
+}
+
+.run-dot.failed {
+  background: #e0524d;
+}
+
+.run-dot.none {
+  background: #555;
+}
+
+/* Steps panel: current test identity bar (name + editable base URL) */
+.test-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 16px;
+  background: #1b222b;
+  border-bottom: 1px solid #3a3a3a;
+  min-width: 0;
+}
+
+.test-name {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+  color: #cce4ff;
+}
+
+.test-base {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: #8aa3c0;
+  font-size: 11px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  cursor: pointer;
+  text-align: left;
+}
+
+.test-base:hover {
+  border-color: #3a4a5e;
+  color: #aac4e4;
+}
+
+.test-base-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  background: #1e1e1e;
+  border: 1px solid #58a6ff;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 11px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  outline: none;
+}
+
+/* Save-to-library button in the steps header */
+.save-test-btn {
+  padding: 5px 8px;
+  background: transparent;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.save-test-btn:hover:not(:disabled) {
+  border-color: #58a6ff;
+}
+
+.save-test-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Day 11: page-level check shortcuts inside the picking banner */
 .page-checks {
   display: flex;

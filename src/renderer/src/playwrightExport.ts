@@ -81,9 +81,16 @@ export function stepText(step: RecorderStep): string {
 }
 
 // The actual Playwright action for one step (without the leading comment).
-function actionFor(step: RecorderStep): string | null {
+// `baseURL`: when a navigate's URL lives under it, emit just the PATH —
+// `test.use({ baseURL })` (added by the generator) resolves it at runtime, so
+// retargeting the suite at another environment means editing ONE line.
+function actionFor(step: RecorderStep, baseURL?: string): string | null {
   if (step.type === 'navigate') {
-    return `await page.goto(${quote(step.url ?? '')})`
+    let url = step.url ?? ''
+    if (baseURL && url.startsWith(baseURL)) {
+      url = url.slice(baseURL.length) || '/'
+    }
+    return `await page.goto(${quote(url)})`
   }
 
   if (step.type === 'wait') {
@@ -172,12 +179,18 @@ function actionFor(step: RecorderStep): string | null {
   }
 }
 
-// Build the whole test file from the recorded steps.
-export function generatePlaywrightTest(steps: RecorderStep[]): string {
+// Build the whole test file from the recorded steps. Day 11: a saved test
+// contributes its NAME (the test title) and its BASE URL (emitted once as
+// test.use — the single line to edit when pointing at another environment).
+export function generatePlaywrightTest(
+  steps: RecorderStep[],
+  options?: { name?: string; baseURL?: string }
+): string {
+  const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const enabled = steps.filter((step) => !step.disabled)
   const body = enabled
     .map((step) => {
-      const action = actionFor(step)
+      const action = actionFor(step, baseURL)
       if (!action) return null
       return `  // ${stepText(step)}\n  ${action}`
     })
@@ -187,10 +200,11 @@ export function generatePlaywrightTest(steps: RecorderStep[]): string {
   // Only import expect when an assertion actually uses it.
   const hasAssert = enabled.some((step) => step.type === 'assert')
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
+  const use = baseURL ? `\ntest.use({ baseURL: ${quote(baseURL)} })\n` : ''
 
   return `import ${imports} from '@playwright/test'
-
-test('recorded flow', async ({ page }) => {
+${use}
+test(${quote(options?.name || 'recorded flow')}, async ({ page }) => {
 ${body}
 })
 `
