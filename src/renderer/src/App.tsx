@@ -4,25 +4,54 @@ import { generatePlaywrightTest, stepText } from './playwrightExport'
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
 // Day 9: the checks offered by the assertion chooser, in display order.
+// checked/unchecked only make sense on a checkbox/radio — the chooser hides
+// them unless the picked element reported a live `checked` state (Day 11).
 const ASSERT_KINDS: AssertKind[] = [
   'visible',
+  'hidden',
   'text-equals',
   'text-contains',
   'value',
+  'empty',
+  'count',
   'enabled',
-  'disabled'
+  'disabled',
+  'editable',
+  'focused',
+  'checked',
+  'unchecked',
+  'attribute',
+  'class'
 ]
 const ASSERT_LABELS: Record<AssertKind, string> = {
   visible: 'Visible',
+  hidden: 'Hidden',
   'text-equals': 'Text =',
   'text-contains': 'Contains',
   value: 'Value',
+  empty: 'Empty',
+  count: 'Count',
   enabled: 'Enabled',
-  disabled: 'Disabled'
+  disabled: 'Disabled',
+  editable: 'Editable',
+  focused: 'Focused',
+  checked: 'Checked',
+  unchecked: 'Unchecked',
+  attribute: 'Attribute',
+  class: 'Has class',
+  'url-contains': 'URL contains',
+  title: 'Page title'
 }
 // These kinds compare against an expected value the user can edit.
 const assertNeedsValue = (kind: AssertKind): boolean =>
-  kind === 'text-equals' || kind === 'text-contains' || kind === 'value'
+  kind === 'text-equals' ||
+  kind === 'text-contains' ||
+  kind === 'value' ||
+  kind === 'count' ||
+  kind === 'attribute' ||
+  kind === 'class' ||
+  kind === 'url-contains' ||
+  kind === 'title'
 
 // The candidate the step's primary selector points at. After a hand-pick the
 // primary is no longer necessarily the top-scored candidates[0].
@@ -66,6 +95,8 @@ function App(): React.JSX.Element {
   const [pickedElement, setPickedElement] = useState<PickedElement | null>(null)
   const [assertKind, setAssertKind] = useState<AssertKind>('visible')
   const [assertValue, setAssertValue] = useState('')
+  // For the two-part 'attribute' check: WHICH attribute to read (e.g. href).
+  const [assertAttr, setAssertAttr] = useState('')
   const [insertAt, setInsertAt] = useState<number | null>(null)
   // Which row's "insert here" mini-menu is open (null = none).
   const [insertMenuIndex, setInsertMenuIndex] = useState<number | null>(null)
@@ -96,6 +127,7 @@ function App(): React.JSX.Element {
       setPickedElement(picked)
       setAssertKind('visible')
       setAssertValue(picked.text ?? '')
+      setAssertAttr('')
     })
     return unsubscribe
   }, [])
@@ -318,11 +350,49 @@ function App(): React.JSX.Element {
     if (kind === 'value') setAssertValue(pickedElement.inputValue ?? '')
     else if (kind === 'text-equals' || kind === 'text-contains') {
       setAssertValue(pickedElement.text ?? '')
+    } else if (kind === 'count') {
+      // How many elements the primary selector matched at pick time.
+      setAssertValue(String(pickedElement.groupCount ?? 1))
+    } else if (kind === 'attribute' || kind === 'class') {
+      // No live prefill for these — clear the stale text prefill so the user
+      // isn't asserting the element's text as an attribute value by accident.
+      setAssertValue('')
     }
+  }
+
+  // === Day 11: PAGE-level checks (no element to pick) =================
+  // Offered as shortcuts inside the picking banner: they end pick mode and
+  // insert directly at the position picking was started for.
+
+  // URL check, prefilled with the current page's PATH — the stable, meaningful
+  // part (the full URL would make "contains" behave like "equals").
+  const handleAddUrlCheck = async (): Promise<void> => {
+    await handleCancelPick()
+    let prefill = urlInput
+    try {
+      const u = new URL(urlInput)
+      prefill = u.pathname !== '/' ? u.pathname : u.host
+    } catch {
+      // not a parseable URL — keep the raw text, the user can edit it
+    }
+    insertStep({ type: 'assert', assertKind: 'url-contains', value: prefill }, insertAt)
+    setInsertAt(null)
+  }
+
+  // Title check, prefilled with the live page title (only main can read it —
+  // the title lives inside the native browser view).
+  const handleAddTitleCheck = async (): Promise<void> => {
+    await handleCancelPick()
+    const info = await window.api.browser.getPageInfo()
+    insertStep({ type: 'assert', assertKind: 'title', value: info.title }, insertAt)
+    setInsertAt(null)
   }
 
   const handleAddAssert = (): void => {
     if (!pickedElement) return
+    // An attribute check without an attribute name can never pass — hold the
+    // panel open until one is entered.
+    if (assertKind === 'attribute' && !assertAttr.trim()) return
     insertStep(
       {
         type: 'assert',
@@ -330,7 +400,8 @@ function App(): React.JSX.Element {
         label: pickedElement.label,
         selector: pickedElement.selector,
         candidates: pickedElement.candidates,
-        value: assertNeedsValue(assertKind) ? assertValue : undefined
+        value: assertNeedsValue(assertKind) ? assertValue : undefined,
+        attrName: assertKind === 'attribute' ? assertAttr.trim() : undefined
       },
       insertAt
     )
@@ -521,6 +592,15 @@ function App(): React.JSX.Element {
           {isPicking && (
             <div className="replay-status running">
               Click an element in the page to check it (Esc cancels)
+              <div className="page-checks">
+                <span className="page-checks-label">or check the page itself:</span>
+                <button type="button" className="page-check-chip" onClick={handleAddUrlCheck}>
+                  URL
+                </button>
+                <button type="button" className="page-check-chip" onClick={handleAddTitleCheck}>
+                  Title
+                </button>
+              </div>
             </div>
           )}
 
@@ -533,7 +613,11 @@ function App(): React.JSX.Element {
               </div>
               <code className="assert-selector">{pickedElement.selector}</code>
               <div className="assert-kinds">
-                {ASSERT_KINDS.map((kind) => (
+                {ASSERT_KINDS.filter(
+                  (kind) =>
+                    (kind !== 'checked' && kind !== 'unchecked') ||
+                    pickedElement.checked !== undefined
+                ).map((kind) => (
                   <button
                     key={kind}
                     type="button"
@@ -544,12 +628,29 @@ function App(): React.JSX.Element {
                   </button>
                 ))}
               </div>
+              {assertKind === 'attribute' && (
+                <input
+                  className="assert-value"
+                  value={assertAttr}
+                  onChange={(e) => setAssertAttr(e.target.value)}
+                  placeholder="attribute name (e.g. href, src, alt)…"
+                  spellCheck={false}
+                />
+              )}
               {assertNeedsValue(assertKind) && (
                 <input
                   className="assert-value"
                   value={assertValue}
                   onChange={(e) => setAssertValue(e.target.value)}
-                  placeholder="expected value…"
+                  placeholder={
+                    assertKind === 'count'
+                      ? 'expected number of matches…'
+                      : assertKind === 'class'
+                        ? 'class name (one token, e.g. error)…'
+                        : assertKind === 'attribute'
+                          ? 'expected attribute value…'
+                          : 'expected value…'
+                  }
                   spellCheck={false}
                 />
               )}

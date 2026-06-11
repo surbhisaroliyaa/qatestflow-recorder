@@ -8,6 +8,8 @@ interface BrowserAPI {
   home: () => Promise<void>
   setOverlay: (open: boolean) => Promise<void>
   onUrlChange: (callback: (url: string) => void) => () => void
+  // Live URL + title of the embedded page — prefills page-level checks (Day 11).
+  getPageInfo: () => Promise<{ url: string; title: string }>
 }
 
 interface ReplayProgress {
@@ -39,8 +41,31 @@ interface API {
 }
 
 declare global {
-  // The checks an assertion step can make (Day 9).
-  type AssertKind = 'visible' | 'text-equals' | 'text-contains' | 'value' | 'enabled' | 'disabled'
+  // The checks an assertion step can make (Day 9). 'checked'/'unchecked' are
+  // element checks for checkboxes/radios; 'url-contains'/'title' are PAGE
+  // checks — they have no element, so no selector/candidates (Day 11).
+  // 'hidden' passes when the element is invisible OR gone from the DOM;
+  // 'count' asserts how many elements the selector matches (group check).
+  // 'attribute' is the only two-part check: WHICH attribute (step.attrName)
+  // plus its expected value (step.value).
+  type AssertKind =
+    | 'visible'
+    | 'hidden'
+    | 'text-equals'
+    | 'text-contains'
+    | 'value'
+    | 'empty'
+    | 'count'
+    | 'enabled'
+    | 'disabled'
+    | 'editable'
+    | 'focused'
+    | 'checked'
+    | 'unchecked'
+    | 'attribute'
+    | 'class'
+    | 'url-contains'
+    | 'title'
 
   // What the element picker hands back: the built selector ladder plus the
   // element's LIVE state, used to prefill assertion expectations (Day 9).
@@ -51,6 +76,12 @@ declare global {
     text?: string
     inputValue?: string
     disabled?: boolean
+    // Only present when the picked element is a checkbox/radio — its live
+    // ticked state. Absence means "not checkable" (hide the checked kinds).
+    checked?: boolean
+    // How many elements the primary selector strategy matched at pick time
+    // (1 = unique) — prefills the expected number for a 'count' check.
+    groupCount?: number
   }
 
   // One ranked way to locate an element, with a 0–100 stability score.
@@ -78,6 +109,7 @@ declare global {
     value?: string
     key?: string // for `press` steps — the key pressed (e.g. 'Enter')
     assertKind?: AssertKind // for `assert` steps — which check to make
+    attrName?: string // for `attribute` asserts — WHICH attribute to check
     secret?: boolean // password field — value masked on screen / in export
     disabled?: boolean // turned off in the editor — skipped by replay + export
     url?: string

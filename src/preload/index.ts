@@ -19,6 +19,10 @@ const api = {
     // Hide/show the embedded browser so React overlays (modals) aren't covered.
     setOverlay: (open: boolean): Promise<void> => ipcRenderer.invoke('browser:setOverlay', open),
 
+    // The embedded page's live URL + title, for prefilling page-level checks.
+    getPageInfo: (): Promise<{ url: string; title: string }> =>
+      ipcRenderer.invoke('browser:getPageInfo'),
+
     // Subscribe to URL changes from the embedded browser.
     // Returns an unsubscribe function so React effects can clean up.
     onUrlChange: (callback: (url: string) => void): (() => void) => {

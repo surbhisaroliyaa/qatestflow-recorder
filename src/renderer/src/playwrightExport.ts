@@ -11,6 +11,14 @@ function quote(value: string): string {
   return JSON.stringify(value)
 }
 
+// Playwright's toHaveURL(string) demands the FULL exact URL — too brittle for
+// a "URL contains" check (query params, session ids). A regex does partial
+// matching, so we export one — with the user's text escaped, or "/inventory.html"
+// would treat its dot as "any character".
+function regexContains(value: string): string {
+  return `new RegExp(${quote(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))})`
+}
+
 // One readable line describing a step — used both in the live panel and as a
 // comment above each generated line of code. Secret (password) values are
 // shown masked so they never appear on screen or in code comments.
@@ -40,6 +48,28 @@ export function stepText(step: RecorderStep): string {
           return `Check ${step.label} is enabled`
         case 'disabled':
           return `Check ${step.label} is disabled`
+        case 'checked':
+          return `Check ${step.label} is checked`
+        case 'unchecked':
+          return `Check ${step.label} is not checked`
+        case 'hidden':
+          return `Check ${step.label} is hidden`
+        case 'count':
+          return `Check ${step.label} matches ${step.value} element(s)`
+        case 'focused':
+          return `Check ${step.label} is focused`
+        case 'editable':
+          return `Check ${step.label} is editable`
+        case 'empty':
+          return `Check ${step.label} is empty`
+        case 'attribute':
+          return `Check ${step.label} attribute ${step.attrName} is "${step.value}"`
+        case 'class':
+          return `Check ${step.label} has class "${step.value}"`
+        case 'url-contains':
+          return `Check URL contains "${step.value}"`
+        case 'title':
+          return `Check page title is "${step.value}"`
         default:
           return `Check ${step.label} is visible`
       }
@@ -61,6 +91,15 @@ function actionFor(step: RecorderStep): string | null {
     return `await page.waitForTimeout(${ms})`
   }
 
+  // Page-level checks assert on `page` itself — no element, so they must run
+  // BEFORE the no-selector bail-out below.
+  if (step.type === 'assert' && step.assertKind === 'url-contains') {
+    return `await expect(page).toHaveURL(${regexContains(step.value ?? '')})`
+  }
+  if (step.type === 'assert' && step.assertKind === 'title') {
+    return `await expect(page).toHaveTitle(${quote(step.value ?? '')})`
+  }
+
   if (!step.selector) return null
   const locator = `page.${step.selector}`
 
@@ -77,6 +116,34 @@ function actionFor(step: RecorderStep): string | null {
         return `await expect(${locator}).toBeEnabled()`
       case 'disabled':
         return `await expect(${locator}).toBeDisabled()`
+      case 'checked':
+        return `await expect(${locator}).toBeChecked()`
+      case 'unchecked':
+        // No toBeUnchecked() exists — Playwright negates any matcher with .not
+        return `await expect(${locator}).not.toBeChecked()`
+      case 'hidden':
+        // Passes for invisible AND for not-in-DOM (unlike not.toBeVisible's
+        // stricter cousin patterns) — matches our replay semantics.
+        return `await expect(${locator}).toBeHidden()`
+      case 'focused':
+        return `await expect(${locator}).toBeFocused()`
+      case 'editable':
+        return `await expect(${locator}).toBeEditable()`
+      case 'empty':
+        return `await expect(${locator}).toBeEmpty()`
+      case 'attribute':
+        return `await expect(${locator}).toHaveAttribute(${quote(step.attrName ?? '')}, ${quote(step.value ?? '')})`
+      case 'class':
+        // toContainClass matches ONE class token (Playwright ≥1.52) — unlike
+        // toHaveClass, which demands the element's ENTIRE class string.
+        return `await expect(${locator}).toContainClass(${quote(step.value ?? '')})`
+      case 'count': {
+        // The recorded selector pinpoints ONE element (maybe via .nth) — a
+        // count check is about the GROUP, so assert on the selector minus nth.
+        const group = (step.selector ?? '').replace(/\.nth\(\d+\)$/, '')
+        const n = Math.max(0, parseInt(step.value ?? '0', 10) || 0)
+        return `await expect(page.${group}).toHaveCount(${n})`
+      }
       default:
         return `await expect(${locator}).toBeVisible()`
     }

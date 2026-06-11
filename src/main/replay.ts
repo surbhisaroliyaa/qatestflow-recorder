@@ -30,6 +30,7 @@ export interface ReplayStep {
   value?: string
   key?: string // for `press` steps — the key pressed (e.g. 'Enter')
   assertKind?: string // for `assert` steps — which check to make (Day 9)
+  attrName?: string // for `attribute` asserts — which attribute to check (Day 11)
   secret?: boolean
   disabled?: boolean // turned off in the editor — skipped during replay
   selector?: string
@@ -130,23 +131,33 @@ function resolverHelpers(): string {
 // you'd need the hover to find the hover. So after a short grace period we
 // accept a hidden match too; the hover action then climbs to its nearest
 // VISIBLE ancestor and points the mouse there, like a human would.
-function findPrelude(candidates: ReplayCandidate[], allowHidden = false): string {
+// The candidate ladder, ready to search: resolver helpers + the sorted,
+// bare-tag-filtered `cands` list. Shared by the element finder below AND the
+// checks that judge the ladder differently (hidden / count, Day 11).
+function ladderPrelude(candidates: ReplayCandidate[]): string {
   return (
     resolverHelpers() +
     `
     const raw = ${JSON.stringify(candidates ?? [])};
-    const ALLOW_HIDDEN = ${allowHidden ? 'true' : 'false'};
     // Drop the bare-tag last resort (css 'a' / 'div' / 'button' on its own): it
     // matches the FIRST such element on the page, almost never the recorded one.
-    // Failing honestly beats clicking the wrong element and reporting success.
+    // Failing honestly beats acting on the wrong element and reporting success.
     const isBareTag = (c) => !!(c.css && /^[a-zA-Z][a-zA-Z0-9]*$/.test(c.css.trim()));
     // Hand-picked (pinned) candidate first, then strongest score (Day 10c).
     const cands = raw.filter((c) => !isBareTag(c)).sort(
       (a, b) => ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)) || ((b.score || 0) - (a.score || 0))
     );
     if (raw.length && !cands.length) {
-      return { ok: false, error: 'No reliable selector for this element (no stable id / role / text was captured) — skipped to avoid clicking the wrong thing' };
-    }
+      return { ok: false, error: 'No reliable selector for this element (no stable id / role / text was captured) — skipped to avoid acting on the wrong thing' };
+    }`
+  )
+}
+
+function findPrelude(candidates: ReplayCandidate[], allowHidden = false): string {
+  return (
+    ladderPrelude(candidates) +
+    `
+    const ALLOW_HIDDEN = ${allowHidden ? 'true' : 'false'};
     const deadline = Date.now() + 8000;
     let el = null, everFound = false, hidden = null, hiddenAt = 0;
     while (Date.now() < deadline) {
@@ -176,6 +187,85 @@ function findPrelude(candidates: ReplayCandidate[], allowHidden = false): string
 
 // Build the full injectable script (an async IIFE returning {ok, error?}).
 export function buildActionScript(step: ReplayStep): string {
+  // PAGE-level checks (Day 11) have NO element — they read location.href /
+  // document.title directly, so they skip the whole find-the-element prelude.
+  // Same polling idea as element checks: pages settle asynchronously.
+  if (
+    step.type === 'assert' &&
+    (step.assertKind === 'url-contains' || step.assertKind === 'title')
+  ) {
+    const want = JSON.stringify(step.value ?? '')
+    const isUrl = step.assertKind === 'url-contains'
+    const read = isUrl
+      ? `({ pass: location.href.includes(want), actual: location.href })`
+      : `({ pass: document.title.replace(/\\s+/g, ' ').trim() === want, actual: document.title })`
+    const wants = isUrl ? `'URL to contain "'` : `'page title to be "'`
+    return `(async () => {
+      const want = ${want};
+      const read = () => ${read};
+      const deadline = Date.now() + 3000;
+      let last = read();
+      while (!last.pass && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 150));
+        last = read();
+      }
+      if (last.pass) return { ok: true };
+      return { ok: false, error: 'Expected ' + ${wants} + want + '" — actual: "' + String(last.actual).slice(0, 120) + '"' };
+    })()`
+  }
+
+  // HIDDEN check (Day 11): inverted logic, so it can't share the normal
+  // finder — that one WAITS for the element to become visible, which is the
+  // exact opposite of what we're asserting. Pass = no candidate resolves to a
+  // visible element; "not in the DOM at all" counts as hidden too (same
+  // semantics as Playwright's toBeHidden()).
+  if (step.type === 'assert' && step.assertKind === 'hidden') {
+    return `(async () => {${ladderPrelude(step.candidates ?? [])}
+      const read = () => {
+        for (const c of cands) {
+          const el = findByCandidate(c);
+          if (el && isVisible(el)) return false;
+        }
+        return true;
+      };
+      const deadline = Date.now() + 3000;
+      let pass = read();
+      while (!pass && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 150));
+        pass = read();
+      }
+      if (pass) return { ok: true };
+      return { ok: false, error: 'Expected element to be hidden — it is still visible' };
+    })()`
+  }
+
+  // COUNT check (Day 11): a GROUP check, not a single-element one. Count ALL
+  // matches of the strongest candidate, ignoring its .nth — nth answers
+  // "which one is ours", but here the group size IS the assertion.
+  if (step.type === 'assert' && step.assertKind === 'count') {
+    const want = Math.max(0, parseInt(step.value ?? '0', 10) || 0)
+    return `(async () => {${ladderPrelude(step.candidates ?? [])}
+      const want = ${want};
+      const countAll = (c) => {
+        try {
+          if (c.css) return document.querySelectorAll(c.css).length;
+          if (c.kind === 'role' && c.role) return byRoleAll(c.role, c.name).length;
+          if (c.kind === 'text' && c.text) return byTextAll(c.text).length;
+        } catch (e) { /* malformed selector — count as zero */ }
+        return 0;
+      };
+      const read = () => (cands.length ? countAll(cands[0]) : 0);
+      const deadline = Date.now() + 3000;
+      let actual = read();
+      while (actual !== want && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 150));
+        actual = read();
+      }
+      if (actual === want) return { ok: true };
+      return { ok: false, error: 'Expected ' + want + ' matching element(s) — actual: ' + actual };
+    })()`
+  }
+
   let action: string
 
   switch (step.type) {
@@ -233,13 +323,41 @@ export function buildActionScript(step: ReplayStep): string {
       // Day 13's AI translator) needs to understand what went wrong.
       const want = JSON.stringify(step.value ?? '')
       const kind = JSON.stringify(step.assertKind ?? 'visible')
+      const attr = JSON.stringify(step.attrName ?? '')
       action = `
         const want = ${want};
         const kind = ${kind};
+        const attr = ${attr};
         const read = () => {
           if (kind === 'visible') return { pass: isVisible(el), actual: isVisible(el) ? 'visible' : 'hidden' };
           if (kind === 'enabled') return { pass: !el.disabled, actual: el.disabled ? 'disabled' : 'enabled' };
           if (kind === 'disabled') return { pass: !!el.disabled, actual: el.disabled ? 'disabled' : 'enabled' };
+          if (kind === 'checked') return { pass: !!el.checked, actual: el.checked ? 'checked' : 'unchecked' };
+          if (kind === 'unchecked') return { pass: !el.checked, actual: el.checked ? 'checked' : 'unchecked' };
+          if (kind === 'focused') return { pass: document.activeElement === el, actual: document.activeElement === el ? 'focused' : 'not focused' };
+          if (kind === 'editable') {
+            const tag = el.tagName;
+            // "Editable" only means something for elements a user can type in.
+            if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT' && !el.isContentEditable) {
+              return { pass: false, actual: 'not an editable element type (' + tag.toLowerCase() + ')' };
+            }
+            const pass = !el.disabled && !el.readOnly;
+            return { pass, actual: el.disabled ? 'disabled' : el.readOnly ? 'readonly' : 'editable' };
+          }
+          if (kind === 'empty') {
+            // A field is empty when its VALUE is empty; anything else when it
+            // has no visible text (same idea as Playwright's toBeEmpty()).
+            const tag = el.tagName;
+            const v = (tag === 'INPUT' || tag === 'TEXTAREA') ? String(el.value || '') : norm(el.textContent);
+            return { pass: v === '', actual: v === '' ? 'empty' : v };
+          }
+          if (kind === 'attribute') {
+            const a = el.getAttribute(attr);
+            return { pass: a === want, actual: a === null ? '(attribute missing)' : a };
+          }
+          if (kind === 'class') {
+            return { pass: el.classList.contains(want), actual: el.className || '(no classes)' };
+          }
           if (kind === 'value') { const v = el.value !== undefined ? String(el.value) : ''; return { pass: v === want, actual: v }; }
           const t = norm(el.textContent);
           if (kind === 'text-contains') return { pass: t.includes(want), actual: t };
@@ -256,6 +374,13 @@ export function buildActionScript(step: ReplayStep): string {
           'visible': 'be visible',
           'enabled': 'be enabled',
           'disabled': 'be disabled',
+          'checked': 'be checked',
+          'unchecked': 'be unchecked',
+          'focused': 'be focused',
+          'editable': 'be editable',
+          'empty': 'be empty',
+          'attribute': 'have attribute ' + attr + ' = "' + want + '"',
+          'class': 'have class "' + want + '"',
           'value': 'have value "' + want + '"',
           'text-equals': 'have text "' + want + '"',
           'text-contains': 'contain text "' + want + '"'

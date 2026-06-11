@@ -145,6 +145,13 @@ function createWindow(): void {
     resizeEmbedded()
   })
 
+  // The embedded page's live URL + title — the renderer can't see inside the
+  // native browser view, so page-level checks (Day 11) ask main for prefills.
+  ipcMain.handle('browser:getPageInfo', (): { url: string; title: string } => ({
+    url: embeddedBrowser.webContents.getURL(),
+    title: embeddedBrowser.webContents.getTitle()
+  }))
+
   // "Home" — jump straight back to the welcome screen in one click, instead of
   // walking Back through the whole history. A fresh start: also stop recording
   // (disarm the observer) so nothing is captured on the way out. Hide the
@@ -234,16 +241,29 @@ function createWindow(): void {
     'recorder:picked',
     (
       _event,
-      raw: { facts: ElementFacts; text?: string; inputValue?: string; disabled?: boolean }
+      raw: {
+        facts: ElementFacts
+        text?: string
+        inputValue?: string
+        disabled?: boolean
+        checked?: boolean
+      }
     ) => {
       const { primary, candidates } = buildSelectors(raw.facts)
+      // For 'count' checks: how many elements the primary strategy matched.
+      // The observer already counted duplicates at pick time (Day 10b) — dup
+      // info is only recorded when count > 1, so its absence means unique.
+      const prim = candidates.find((c) => c.locator === primary)
+      const groupCount = prim && prim.kind !== 'css' ? (raw.facts.dup?.[prim.kind]?.count ?? 1) : 1
       mainWindow.webContents.send('recorder:picked', {
         label: labelFrom(raw.facts),
         selector: primary,
         candidates,
         text: raw.text,
         inputValue: raw.inputValue,
-        disabled: raw.disabled
+        disabled: raw.disabled,
+        checked: raw.checked,
+        groupCount
       })
     }
   )

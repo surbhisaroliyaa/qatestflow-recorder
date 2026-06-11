@@ -493,6 +493,37 @@ body {
   color: #8ff0a8;
 }
 
+/* Day 11: page-level check shortcuts inside the picking banner */
+.page-checks {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.page-checks-label {
+  font-weight: 400;
+  color: #9db4e8;
+  font-size: 11px;
+}
+
+.page-check-chip {
+  padding: 2px 10px;
+  background: transparent;
+  border: 1px solid #4a6ea8;
+  border-radius: 12px;
+  color: #cdd8ff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.page-check-chip:hover {
+  border-color: #58a6ff;
+  background: #173a5e;
+}
+
 .replay-status.failed {
   background: #4a2422;
   color: #ffb3ae;

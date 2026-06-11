@@ -427,12 +427,18 @@ document.addEventListener(
       picking = false
       clearHighlight()
       const field = el as HTMLInputElement
+      // `checked` exists on EVERY input (false on a text box, meaninglessly) —
+      // only report it where checking makes sense, so the assertion UI can use
+      // its absence to hide the checked/unchecked kinds.
+      const isCheckable =
+        el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')
       ipcRenderer.send('recorder:picked', {
         facts: collectFacts(el),
         // Live state, so the assertion UI can prefill sensible expectations:
         text: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200),
         inputValue: typeof field.value === 'string' ? field.value : undefined,
-        disabled: !!field.disabled
+        disabled: !!field.disabled,
+        checked: isCheckable ? field.checked : undefined
       })
       return
     }
