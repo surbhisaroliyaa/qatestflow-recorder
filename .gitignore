@@ -28,6 +28,11 @@ release/
 # Incremental compilation cache, machine-specific.
 *.tsbuildinfo
 
+# --- ESLint ---
+# `eslint --cache` skip-unchanged-files cache. Machine-specific
+# (absolute paths inside), regenerated on every lint run.
+.eslintcache
+
 # --- Environment & secrets ---
 # .env files often hold API keys, passwords, tokens.
 # NEVER commit — leak risk.
