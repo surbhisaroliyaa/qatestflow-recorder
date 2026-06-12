@@ -22,6 +22,7 @@ interface ReplayResult {
   ok: boolean
   failedAt?: number
   error?: string
+  screenshotPath?: string // captured at the failing step (Day 11.5)
 }
 
 interface RecorderAPI {
@@ -39,12 +40,15 @@ interface LibraryAPI {
   save: (input: {
     name: string
     baseURL: string
+    suite: string
     steps: RecorderStep[]
   }) => Promise<SavedTestSummary>
   list: () => Promise<SavedTestSummary[]>
+  listSuites: () => Promise<string[]>
   load: (fileName: string) => Promise<SavedTestData | null>
   remove: (fileName: string) => Promise<void>
   recordRun: (fileName: string, run: RunInfo) => Promise<void>
+  openScreenshot: (path: string) => Promise<void>
 }
 
 interface API {
@@ -62,16 +66,21 @@ declare global {
     at: string
     failedAt?: number
     error?: string
+    screenshotPath?: string // page capture at the failing step (Day 11.5)
   }
 
   // One row in the library list (no steps — kept light for listing).
   interface SavedTestSummary {
+    // Relative path within the library — includes the section subfolder
+    // when present (e.g. "E2E/login-flow.json").
     fileName: string
+    suite: string // the section — '' for legacy root files
     name: string
     baseURL: string
     updatedAt: string
     stepCount: number
     lastRun?: RunInfo
+    runs?: RunInfo[] // history, newest first, capped at 10
   }
 
   // A fully loaded test: the step model plus its metadata.

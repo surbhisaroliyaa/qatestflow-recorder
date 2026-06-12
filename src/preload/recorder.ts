@@ -221,7 +221,11 @@ function attrEsc(value: string): string {
 // MORE than one match are reported — absence means "unique".
 function collectDup(el: Element, facts: ElementFacts): void {
   const dup: NonNullable<ElementFacts['dup']> = {}
-  const note = (key: keyof NonNullable<ElementFacts['dup']>, list: Element[], index: number): void => {
+  const note = (
+    key: keyof NonNullable<ElementFacts['dup']>,
+    list: Element[],
+    index: number
+  ): void => {
     if (list.length > 1 && index >= 0) dup[key] = { count: list.length, index } satisfies DupInfo
   }
 
@@ -328,9 +332,7 @@ function collectFacts(el: Element): ElementFacts {
 
 // You often click the text/icon INSIDE a button — climb up to the real target.
 function meaningfulTarget(start: Element): Element {
-  return (
-    start.closest('a, button, input, select, textarea, [role="button"], [data-test]') || start
-  )
+  return start.closest('a, button, input, select, textarea, [role="button"], [data-test]') || start
 }
 
 // === Day 10(d): smart hover detection ================================
@@ -586,7 +588,9 @@ document.addEventListener(
     const form = el.form || (el.closest && el.closest('form'))
     if (
       form &&
-      form.querySelector('button:not([type=button]):not([type=reset]), input[type=submit], input[type=image]')
+      form.querySelector(
+        'button:not([type=button]):not([type=reset]), input[type=submit], input[type=image]'
+      )
     ) {
       suppressClickUntil = Date.now() + 500
     }

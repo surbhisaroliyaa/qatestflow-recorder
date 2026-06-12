@@ -89,13 +89,20 @@ const api = {
   // (Shapes typed structurally as unknown here; the renderer gets the named
   // types from index.d.ts — same pattern as recorder.onStep.)
   library: {
-    save: (input: { name: string; baseURL: string; steps: unknown[] }): Promise<unknown> =>
-      ipcRenderer.invoke('library:save', input),
+    save: (input: {
+      name: string
+      baseURL: string
+      suite: string
+      steps: unknown[]
+    }): Promise<unknown> => ipcRenderer.invoke('library:save', input),
     list: (): Promise<unknown[]> => ipcRenderer.invoke('library:list'),
+    listSuites: (): Promise<string[]> => ipcRenderer.invoke('library:listSuites'),
     load: (fileName: string): Promise<unknown> => ipcRenderer.invoke('library:load', fileName),
     remove: (fileName: string): Promise<void> => ipcRenderer.invoke('library:delete', fileName),
     recordRun: (fileName: string, run: unknown): Promise<void> =>
-      ipcRenderer.invoke('library:recordRun', fileName, run)
+      ipcRenderer.invoke('library:recordRun', fileName, run),
+    openScreenshot: (path: string): Promise<void> =>
+      ipcRenderer.invoke('library:openScreenshot', path)
   }
 }
 

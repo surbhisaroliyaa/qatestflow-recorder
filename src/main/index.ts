@@ -1,11 +1,20 @@
 import { app, shell, BrowserWindow, ipcMain, WebContentsView, dialog } from 'electron'
 import { join } from 'path'
-import { writeFile } from 'fs/promises'
+import { writeFile, mkdir } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
 import { buildActionScript, type ReplayStep } from './replay'
-import { saveTest, listTests, loadTest, deleteTest, recordRun, type RunInfo } from './library'
+import {
+  saveTest,
+  listTests,
+  listSuites,
+  loadTest,
+  deleteTest,
+  recordRun,
+  libraryDir,
+  type RunInfo
+} from './library'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -282,7 +291,7 @@ function createWindow(): void {
     async (
       _event,
       steps: ReplayStep[]
-    ): Promise<{ ok: boolean; failedAt?: number; error?: string }> => {
+    ): Promise<{ ok: boolean; failedAt?: number; error?: string; screenshotPath?: string }> => {
       overlayOpen = false // make sure the browser is visible while replaying
 
       // Test isolation: start EVERY replay from a clean state (fresh cookies +
@@ -319,7 +328,8 @@ function createWindow(): void {
         ok: boolean
         failedAt?: number
         error?: string
-      }): { ok: boolean; failedAt?: number; error?: string } => {
+        screenshotPath?: string
+      }): { ok: boolean; failedAt?: number; error?: string; screenshotPath?: string } => {
         if (cdpReady) {
           try {
             cdp.detach()
@@ -378,12 +388,25 @@ function createWindow(): void {
           await wait(450)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
+          // Day 11.5: photograph the page AT the moment of failure — evidence
+          // for a human now and required input for Day 13's AI translator.
+          // Best-effort: a screenshot problem must never mask the real error.
+          let screenshotPath: string | undefined
+          try {
+            const image = await embeddedBrowser.webContents.capturePage()
+            const dir = join(libraryDir(), '_failures')
+            await mkdir(dir, { recursive: true })
+            screenshotPath = join(dir, `failure-${Date.now()}.png`)
+            await writeFile(screenshotPath, image.toPNG())
+          } catch {
+            screenshotPath = undefined
+          }
           mainWindow.webContents.send('recorder:replay-progress', {
             index: i,
             status: 'error',
             error: message
           })
-          return finish({ ok: false, failedAt: i, error: message })
+          return finish({ ok: false, failedAt: i, error: message, screenshotPath })
         }
       }
       return finish({ ok: true })
@@ -395,14 +418,21 @@ function createWindow(): void {
   // library.ts where it's testable without Electron wiring.
   ipcMain.handle(
     'library:save',
-    (_event, input: { name: string; baseURL: string; steps: unknown[] }) => saveTest(input)
+    (_event, input: { name: string; baseURL: string; suite: string; steps: unknown[] }) =>
+      saveTest(input)
   )
   ipcMain.handle('library:list', () => listTests())
+  ipcMain.handle('library:listSuites', () => listSuites())
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))
   ipcMain.handle('library:delete', (_event, fileName: string) => deleteTest(fileName))
   ipcMain.handle('library:recordRun', (_event, fileName: string, run: RunInfo) =>
     recordRun(fileName, run)
   )
+  // Open a failure screenshot in the OS image viewer. Only paths inside the
+  // library folder are allowed — this is a viewer, not a general file opener.
+  ipcMain.handle('library:openScreenshot', (_event, path: string) => {
+    if (typeof path === 'string' && path.startsWith(libraryDir())) shell.openPath(path)
+  })
 
   // === Export ========================================================
   // React generates the Playwright code (it owns the steps); main just saves

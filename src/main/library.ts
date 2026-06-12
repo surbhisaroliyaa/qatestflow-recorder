@@ -15,14 +15,19 @@ import { app } from 'electron'
 import { mkdir, readdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
 
-// Outcome of the most recent replay — gives the library list its
-// green/red "mini CI dashboard" dots.
+// Outcome of one replay — gives the library list its green/red
+// "mini CI dashboard" dots.
 export interface RunInfo {
   status: 'passed' | 'failed'
   at: string // ISO timestamp
   failedAt?: number // step index of the first failure
   error?: string
+  screenshotPath?: string // page capture at the failing step (Day 11.5)
 }
+
+// How many past runs each test remembers (newest first). Enough to spot
+// "newly broken" vs "flaky all week" without growing files forever.
+const RUN_HISTORY_LIMIT = 10
 
 // The full on-disk shape. Steps are opaque to main (the renderer owns the
 // RecorderStep type) — main just stores and returns them.
@@ -32,24 +37,34 @@ export interface SavedTestFile {
   baseURL: string
   createdAt: string
   updatedAt: string
-  lastRun?: RunInfo
+  lastRun?: RunInfo // most recent outcome (= runs[0]; kept for older files)
+  runs?: RunInfo[] // run history, newest first, capped (Day 11.5)
   steps: unknown[]
 }
 
 // What the library LIST shows — everything except the steps themselves,
 // so listing 50 tests doesn't read 50 full step arrays into the UI.
 export interface SavedTestSummary {
+  // Path RELATIVE to the library folder — includes the section subfolder
+  // when the test lives in one (e.g. "E2E/login-flow.json").
   fileName: string
+  suite: string // the section (subfolder) — '' for legacy root files
   name: string
   baseURL: string
   updatedAt: string
   stepCount: number
   lastRun?: RunInfo
+  runs?: RunInfo[]
 }
 
 export function libraryDir(): string {
   return join(app.getPath('documents'), 'QATestFlow Tests')
 }
+
+// Sections that exist from the first launch (Surbhi's model: E2E = the
+// crown-jewel regression flows; Daily = the feature-under-test scratchpad).
+// Users can create more by typing a new name when saving.
+const DEFAULT_SUITES = ['E2E', 'Daily']
 
 // "Login flow (staging)" -> "login-flow-staging.json"
 export function slugify(name: string): string {
@@ -61,30 +76,43 @@ export function slugify(name: string): string {
   return slug || 'untitled'
 }
 
-// File names arrive from the renderer over IPC — strip any path separators so
-// a malformed name can never escape the library folder.
-function safeName(fileName: string): string {
-  return fileName.replace(/[\\/]/g, '')
+// One path segment (a suite folder name or a file name): no separators, no
+// Windows-reserved characters, no ".." — so nothing can escape the library.
+function safeSegment(segment: string): string {
+  const clean = segment.replace(/[\\/:*?"<>|]/g, '').trim()
+  return clean === '..' || clean === '.' ? '' : clean
+}
+
+// A relative path arriving over IPC: at most "suite/file.json". Each segment
+// sanitised independently, then rejoined.
+function safeRel(relPath: string): string {
+  return relPath.split(/[\\/]/).map(safeSegment).filter(Boolean).slice(0, 2).join('/')
 }
 
 async function ensureDir(): Promise<void> {
   await mkdir(libraryDir(), { recursive: true })
+  for (const suite of DEFAULT_SUITES) {
+    await mkdir(join(libraryDir(), suite), { recursive: true })
+  }
 }
 
 function toSummary(fileName: string, test: SavedTestFile): SavedTestSummary {
   return {
     fileName,
+    // The folder IS the suite — derived, never stored, so the two can't drift.
+    suite: fileName.includes('/') ? fileName.split('/')[0] : '',
     name: test.name,
     baseURL: test.baseURL,
     updatedAt: test.updatedAt,
     stepCount: Array.isArray(test.steps) ? test.steps.length : 0,
-    lastRun: test.lastRun
+    lastRun: test.lastRun,
+    runs: test.runs?.slice(0, RUN_HISTORY_LIMIT)
   }
 }
 
 async function readTestFile(fileName: string): Promise<SavedTestFile | null> {
   try {
-    const raw = await readFile(join(libraryDir(), safeName(fileName)), 'utf-8')
+    const raw = await readFile(join(libraryDir(), safeRel(fileName)), 'utf-8')
     const parsed = JSON.parse(raw)
     // Minimal sanity check — a corrupt/foreign JSON file is skipped, not fatal.
     if (!parsed || typeof parsed.name !== 'string' || !Array.isArray(parsed.steps)) return null
@@ -94,15 +122,18 @@ async function readTestFile(fileName: string): Promise<SavedTestFile | null> {
   }
 }
 
-// Save (create or update). createdAt and lastRun survive an overwrite —
-// re-saving a test edits its content, it doesn't erase its history.
+// Save (create or update) into a section subfolder. createdAt and run history
+// survive an overwrite — re-saving edits content, it doesn't erase history.
 export async function saveTest(input: {
   name: string
   baseURL: string
+  suite: string
   steps: unknown[]
 }): Promise<SavedTestSummary> {
   await ensureDir()
-  const fileName = `${slugify(input.name)}.json`
+  const suite = safeSegment(input.suite)
+  const fileName = suite ? `${suite}/${slugify(input.name)}.json` : `${slugify(input.name)}.json`
+  if (suite) await mkdir(join(libraryDir(), suite), { recursive: true })
   const now = new Date().toISOString()
   const previous = await readTestFile(fileName)
   const test: SavedTestFile = {
@@ -112,18 +143,40 @@ export async function saveTest(input: {
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
     lastRun: previous?.lastRun,
+    runs: previous?.runs,
     steps: input.steps
   }
   await writeFile(join(libraryDir(), fileName), JSON.stringify(test, null, 2), 'utf-8')
   return toSummary(fileName, test)
 }
 
-// Newest-updated first — the test you just worked on tops the list.
+// Every section folder, defaults first — shown even when empty (a fresh app
+// must still offer E2E and Daily as save targets).
+export async function listSuites(): Promise<string[]> {
+  await ensureDir()
+  const entries = await readdir(libraryDir(), { withFileTypes: true })
+  const found = entries.filter((e) => e.isDirectory() && !e.name.startsWith('_')).map((e) => e.name)
+  const rest = found.filter((s) => !DEFAULT_SUITES.includes(s)).sort()
+  return [...DEFAULT_SUITES, ...rest]
+}
+
+// All tests across all sections, newest-updated first within the list.
+// Reads the root too, so tests saved before sections existed still appear.
 export async function listTests(): Promise<SavedTestSummary[]> {
   await ensureDir()
-  const files = (await readdir(libraryDir())).filter((f) => f.endsWith('.json'))
+  const relPaths: string[] = []
+  const entries = await readdir(libraryDir(), { withFileTypes: true })
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith('.json')) relPaths.push(entry.name)
+    if (entry.isDirectory() && !entry.name.startsWith('_')) {
+      const inner = await readdir(join(libraryDir(), entry.name))
+      for (const f of inner) {
+        if (f.endsWith('.json')) relPaths.push(`${entry.name}/${f}`)
+      }
+    }
+  }
   const summaries: SavedTestSummary[] = []
-  for (const fileName of files) {
+  for (const fileName of relPaths) {
     const test = await readTestFile(fileName)
     if (test) summaries.push(toSummary(fileName, test))
   }
@@ -136,17 +189,20 @@ export async function loadTest(fileName: string): Promise<SavedTestFile | null> 
 
 export async function deleteTest(fileName: string): Promise<void> {
   try {
-    await unlink(join(libraryDir(), safeName(fileName)))
+    await unlink(join(libraryDir(), safeRel(fileName)))
   } catch {
     // already gone — deleting a missing file is not an error worth surfacing
   }
 }
 
-// Stamp the latest replay outcome onto the file. Deliberately does NOT touch
-// updatedAt: that field means "the test's CONTENT changed", not "it was run".
+// Stamp a replay outcome onto the file: push onto the capped history AND keep
+// lastRun as the newest (older files have only lastRun). Deliberately does
+// NOT touch updatedAt: that field means "the test's CONTENT changed",
+// not "it was run".
 export async function recordRun(fileName: string, run: RunInfo): Promise<void> {
   const test = await readTestFile(fileName)
   if (!test) return
   test.lastRun = run
-  await writeFile(join(libraryDir(), safeName(fileName)), JSON.stringify(test, null, 2), 'utf-8')
+  test.runs = [run, ...(test.runs ?? [])].slice(0, RUN_HISTORY_LIMIT)
+  await writeFile(join(libraryDir(), safeRel(fileName)), JSON.stringify(test, null, 2), 'utf-8')
 }

@@ -111,6 +111,32 @@ function App(): React.JSX.Element {
   // Inline editing of the test's base URL (the environment switch).
   const [editingBase, setEditingBase] = useState(false)
   const [baseEditValue, setBaseEditValue] = useState('')
+  // Day 11.5 — sections (suites). The section list, the current test's
+  // section, and the save panel's chosen/typed section.
+  const [suites, setSuites] = useState<string[]>([])
+  const [testSuite, setTestSuite] = useState('')
+  const [saveSuite, setSaveSuite] = useState('Daily')
+  const [newSuiteInput, setNewSuiteInput] = useState('')
+  // Day 11.5 — failure screenshot of the LAST replay (📷 in the banner).
+  const [lastScreenshotPath, setLastScreenshotPath] = useState<string | null>(null)
+  // Day 11.5 — suite runner: which section is running, per-test outcomes so
+  // far, and whether the run has finished (summary shows then).
+  interface SuiteRunEntry {
+    fileName: string
+    name: string
+    status: 'passed' | 'failed'
+    failedAt?: number
+    error?: string
+    screenshotPath?: string
+  }
+  const [suiteRun, setSuiteRun] = useState<{
+    suite: string
+    total: number
+    current: number // 1-based index of the test running now
+    currentName: string
+    results: SuiteRunEntry[]
+    running: boolean
+  } | null>(null)
 
   // Steps left ON (disabled steps are skipped by replay + export).
   const enabledCount = steps.filter((s) => !s.disabled).length
@@ -127,10 +153,11 @@ function App(): React.JSX.Element {
     }
   }
 
-  // Refresh the library list whenever the welcome screen shows.
+  // Refresh the library list + section list whenever the welcome screen shows.
   useEffect(() => {
     if (!hasNavigated) {
       window.api.library.list().then(setSavedTests)
+      window.api.library.listSuites().then(setSuites)
     }
   }, [hasNavigated])
 
@@ -173,11 +200,13 @@ function App(): React.JSX.Element {
     return unsubscribe
   }, [])
 
-  // The embedded browser is a native pane that paints over our UI, so while the
-  // export modal is open we ask main to hide it (else it covers the modal).
+  // The embedded browser is a native pane that paints over our UI, so while
+  // any full-window overlay is open (export modal, suite summary) we ask main
+  // to hide it (else it covers the modal).
+  const suiteSummaryOpen = suiteRun !== null && !suiteRun.running
   useEffect(() => {
-    window.api.browser.setOverlay(exportCode !== null)
-  }, [exportCode])
+    window.api.browser.setOverlay(exportCode !== null || suiteSummaryOpen)
+  }, [exportCode, suiteSummaryOpen])
 
   // Follow replay progress so we can highlight running / done / failed steps.
   useEffect(() => {
@@ -249,7 +278,10 @@ function App(): React.JSX.Element {
     setTestName('')
     setTestFileName(null)
     setBaseURL('')
+    setTestSuite('')
     setSavePanelOpen(false)
+    setSuiteRun(null)
+    setLastScreenshotPath(null)
   }
 
   // Export: generate the Playwright code and open the preview modal. The
@@ -276,34 +308,47 @@ function App(): React.JSX.Element {
     if (exportCode) navigator.clipboard.writeText(exportCode)
   }
 
-  // Replay: run all recorded steps in the embedded browser and watch them go.
-  const handleReplay = async (): Promise<void> => {
+  // One replay of one steps-list, with outcome recorded for saved tests.
+  // Shared by the single Replay button AND the Day 11.5 suite runner.
+  const runOnce = async (
+    list: RecorderStep[],
+    fileName: string | null
+  ): Promise<{ ok: boolean; failedAt?: number; error?: string; screenshotPath?: string }> => {
     setFailedIndex(null)
     setReplayError(null)
     setDoneIndices(new Set())
     setReplayingIndex(null)
+    setLastScreenshotPath(null)
     setIsReplaying(true)
-    const result = await window.api.recorder.replay(steps)
+    const result = await window.api.recorder.replay(list)
     setIsReplaying(false)
     setReplayingIndex(null)
     if (!result.ok) {
       setFailedIndex(result.failedAt ?? null)
       setReplayError(result.error ?? 'Replay failed')
+      setLastScreenshotPath(result.screenshotPath ?? null)
     }
-    // A SAVED test remembers its latest outcome — the library list shows it
-    // as a green/red dot (a mini run-history, like a CI dashboard).
-    if (testFileName) {
-      window.api.library.recordRun(testFileName, {
+    // A SAVED test remembers its outcomes — the library shows the latest as
+    // a green/red dot and the last 10 as a history row (mini CI dashboard).
+    if (fileName) {
+      window.api.library.recordRun(fileName, {
         status: result.ok ? 'passed' : 'failed',
         at: new Date().toISOString(),
         failedAt: result.failedAt,
-        error: result.error
+        error: result.error,
+        screenshotPath: result.screenshotPath
       })
     }
+    return result
+  }
+
+  // Replay: run all recorded steps in the embedded browser and watch them go.
+  const handleReplay = async (): Promise<void> => {
+    await runOnce(steps, testFileName)
   }
 
   // === Day 11: test library =========================================
-  const handleOpenSavePanel = (): void => {
+  const handleOpenSavePanel = async (): Promise<void> => {
     const base = baseURL || deriveBaseURL(steps)
     let suggested = testName
     if (!suggested && base) {
@@ -314,16 +359,27 @@ function App(): React.JSX.Element {
       }
     }
     setSaveNameInput(suggested)
+    setSaveSuite(testSuite || 'Daily')
+    setNewSuiteInput('')
+    setSuites(await window.api.library.listSuites())
     setSavePanelOpen(true)
   }
 
   const handleSaveTest = async (): Promise<void> => {
     const name = saveNameInput.trim()
     if (!name) return
+    // A typed new section name wins over the chosen chip.
+    const suite = newSuiteInput.trim() || saveSuite || 'Daily'
     const base = baseURL || deriveBaseURL(steps)
-    const summary = await window.api.library.save({ name, baseURL: base, steps })
+    const summary = await window.api.library.save({ name, baseURL: base, suite, steps })
+    // Renaming or re-sectioning = a MOVE: the save created the new file, so
+    // drop the old one (otherwise stale copies pile up under the old name).
+    if (testFileName && testFileName !== summary.fileName) {
+      await window.api.library.remove(testFileName)
+    }
     setTestName(name)
     setTestFileName(summary.fileName)
+    setTestSuite(summary.suite)
     setBaseURL(base)
     setSavePanelOpen(false)
   }
@@ -336,6 +392,7 @@ function App(): React.JSX.Element {
     editSteps(test.steps)
     setTestName(test.name)
     setTestFileName(fileName)
+    setTestSuite(fileName.includes('/') ? fileName.split('/')[0] : '')
     setBaseURL(test.baseURL)
     setHasNavigated(true)
     const firstNav = test.steps.find((s) => s.type === 'navigate' && s.url)
@@ -343,6 +400,55 @@ function App(): React.JSX.Element {
       setUrlInput(firstNav.url)
       window.api.browser.navigate(firstNav.url)
     }
+  }
+
+  // === Day 11.5: suite runner =======================================
+  // Run every test in a section, one after another, CONTINUING past failures
+  // (each test starts from a clean browser state, so one red can't poison the
+  // next) — then show the full picture, like a CI run.
+  const handleRunSuite = async (suite: string, tests: SavedTestSummary[]): Promise<void> => {
+    if (tests.length === 0) return
+    setHasNavigated(true)
+    setSuiteRun({
+      suite,
+      total: tests.length,
+      current: 0,
+      currentName: '',
+      results: [],
+      running: true
+    })
+    for (let i = 0; i < tests.length; i++) {
+      const t = tests[i]
+      setSuiteRun((prev) => (prev ? { ...prev, current: i + 1, currentName: t.name } : prev))
+      const data = await window.api.library.load(t.fileName)
+      let entry: SuiteRunEntry
+      if (!data) {
+        entry = {
+          fileName: t.fileName,
+          name: t.name,
+          status: 'failed',
+          error: 'Could not read the test file'
+        }
+      } else {
+        // Show this test in the panel while it runs (steps + live marks).
+        editSteps(data.steps)
+        setTestName(data.name)
+        setTestFileName(t.fileName)
+        setTestSuite(suite)
+        setBaseURL(data.baseURL)
+        const result = await runOnce(data.steps, t.fileName)
+        entry = {
+          fileName: t.fileName,
+          name: data.name,
+          status: result.ok ? 'passed' : 'failed',
+          failedAt: result.failedAt,
+          error: result.error,
+          screenshotPath: result.screenshotPath
+        }
+      }
+      setSuiteRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
+    }
+    setSuiteRun((prev) => (prev ? { ...prev, running: false } : prev))
   }
 
   const handleDeleteTest = async (test: SavedTestSummary): Promise<void> => {
@@ -608,44 +714,97 @@ function App(): React.JSX.Element {
             ))}
           </div>
 
-          {/* === Day 11: saved-test library === */}
-          {savedTests.length > 0 && (
+          {/* === Day 11 + 11.5: saved-test library, grouped into sections === */}
+          {(savedTests.length > 0 || suites.length > 0) && (
             <div className="test-library">
-              <div className="library-title">Your tests</div>
-              <ul className="library-list">
-                {savedTests.map((test) => (
-                  <li key={test.fileName} className="library-item">
-                    <button
-                      type="button"
-                      className="library-row"
-                      onClick={() => handleLoadTest(test.fileName)}
-                      title={`Open "${test.name}"`}
-                    >
-                      <span
-                        className={`run-dot ${test.lastRun?.status ?? 'none'}`}
-                        title={
-                          test.lastRun
-                            ? `Last replay ${test.lastRun.status} — ${new Date(test.lastRun.at).toLocaleString()}`
-                            : 'Never replayed'
-                        }
-                      />
-                      <span className="library-name">{test.name}</span>
-                      <span className="library-meta">
-                        {test.stepCount} steps · {new Date(test.updatedAt).toLocaleDateString()}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      className="library-delete"
-                      onClick={() => handleDeleteTest(test)}
-                      title="Delete test"
-                      aria-label={`Delete ${test.name}`}
-                    >
-                      ✕
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              {(() => {
+                // Sections in display order: E2E + Daily always shown (even
+                // empty, so they're discoverable), customs after, legacy
+                // root-level tests last under "Unsorted".
+                const groups = [...suites]
+                for (const t of savedTests) {
+                  if (t.suite && !groups.includes(t.suite)) groups.push(t.suite)
+                }
+                if (savedTests.some((t) => !t.suite)) groups.push('')
+                return groups.map((suite) => {
+                  const tests = savedTests.filter((t) => t.suite === suite)
+                  return (
+                    <div key={suite || '(unsorted)'} className="library-section">
+                      <div className="library-section-header">
+                        <span className="library-title">{suite || 'Unsorted'}</span>
+                        <span className="library-count">{tests.length}</span>
+                        <button
+                          type="button"
+                          className="run-suite-btn"
+                          onClick={() => handleRunSuite(suite || 'Unsorted', tests)}
+                          disabled={tests.length === 0}
+                          title={
+                            tests.length === 0
+                              ? 'No tests in this section yet'
+                              : `Replay all ${tests.length} test(s) in ${suite || 'Unsorted'}`
+                          }
+                        >
+                          ▶ Run all
+                        </button>
+                      </div>
+                      {tests.length === 0 ? (
+                        <p className="library-empty">No tests yet — save one with 💾</p>
+                      ) : (
+                        <ul className="library-list">
+                          {tests.map((test) => (
+                            <li key={test.fileName} className="library-item">
+                              <button
+                                type="button"
+                                className="library-row"
+                                onClick={() => handleLoadTest(test.fileName)}
+                                title={`Open "${test.name}"`}
+                              >
+                                <span
+                                  className={`run-dot ${test.lastRun?.status ?? 'none'}`}
+                                  title={
+                                    test.lastRun
+                                      ? `Last replay ${test.lastRun.status} — ${new Date(test.lastRun.at).toLocaleString()}`
+                                      : 'Never replayed'
+                                  }
+                                />
+                                <span className="library-name">{test.name}</span>
+                                {/* Day 11.5: last runs, oldest → newest — flakiness at a glance */}
+                                {test.runs && test.runs.length > 1 && (
+                                  <span className="history-dots">
+                                    {test.runs
+                                      .slice()
+                                      .reverse()
+                                      .map((run, i) => (
+                                        <span
+                                          key={i}
+                                          className={`history-dot ${run.status}`}
+                                          title={`${run.status} — ${new Date(run.at).toLocaleString()}`}
+                                        />
+                                      ))}
+                                  </span>
+                                )}
+                                <span className="library-meta">
+                                  {test.stepCount} steps ·{' '}
+                                  {new Date(test.updatedAt).toLocaleDateString()}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                className="library-delete"
+                                onClick={() => handleDeleteTest(test)}
+                                title="Delete test"
+                                aria-label={`Delete ${test.name}`}
+                              >
+                                ✕
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )
+                })
+              })()}
             </div>
           )}
         </div>
@@ -726,6 +885,7 @@ function App(): React.JSX.Element {
           {/* === Day 11: current test identity (name + editable base URL) === */}
           {testName && (
             <div className="test-bar">
+              {testSuite && <span className="test-suite-tag">{testSuite}</span>}
               <span className="test-name" title={testName}>
                 {testName}
               </span>
@@ -800,8 +960,28 @@ function App(): React.JSX.Element {
               </div>
             )}
           </div>
+          {/* Day 11.5: suite-run progress line ("test 2 of 5") */}
+          {suiteRun?.running && (
+            <div className="replay-status running">
+              Running section {suiteRun.suite} — test {suiteRun.current} of {suiteRun.total}
+              {suiteRun.currentName ? `: ${suiteRun.currentName}` : ''}
+            </div>
+          )}
           {replayBanner && (
-            <div className={`replay-status ${replayBanner.tone}`}>{replayBanner.text}</div>
+            <div className={`replay-status ${replayBanner.tone}`}>
+              {replayBanner.text}
+              {/* Day 11.5: the page photographed at the failing step */}
+              {replayBanner.tone === 'failed' && lastScreenshotPath && (
+                <button
+                  type="button"
+                  className="shot-link"
+                  onClick={() => window.api.library.openScreenshot(lastScreenshotPath)}
+                  title="Open the failure screenshot"
+                >
+                  📷 view screenshot
+                </button>
+              )}
+            </div>
           )}
 
           {/* === Day 11: save panel (reuses the assert-panel look) === */}
@@ -820,6 +1000,31 @@ function App(): React.JSX.Element {
                 }}
                 placeholder="test name…"
                 autoFocus
+                spellCheck={false}
+              />
+              {/* Day 11.5: which section this test belongs to */}
+              <div className="assert-kinds">
+                {suites.map((suite) => (
+                  <button
+                    key={suite}
+                    type="button"
+                    className={`assert-kind${
+                      saveSuite === suite && !newSuiteInput.trim() ? ' chosen' : ''
+                    }`}
+                    onClick={() => {
+                      setSaveSuite(suite)
+                      setNewSuiteInput('')
+                    }}
+                  >
+                    {suite}
+                  </button>
+                ))}
+              </div>
+              <input
+                className="assert-value"
+                value={newSuiteInput}
+                onChange={(e) => setNewSuiteInput(e.target.value)}
+                placeholder="…or type a new section name"
                 spellCheck={false}
               />
               <code className="assert-selector">
@@ -1081,6 +1286,52 @@ function App(): React.JSX.Element {
           )}
         </aside>
       </div>
+
+      {/* === Day 11.5: suite-run summary (shown when the run finishes) === */}
+      {suiteSummaryOpen && suiteRun && (
+        <div className="modal-backdrop" onClick={() => setSuiteRun(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">
+                {suiteRun.suite}: {suiteRun.results.filter((r) => r.status === 'passed').length}{' '}
+                passed, {suiteRun.results.filter((r) => r.status === 'failed').length} failed
+              </span>
+              <button className="modal-close" onClick={() => setSuiteRun(null)} aria-label="Close">
+                ✕
+              </button>
+            </div>
+            <ul className="suite-summary">
+              {suiteRun.results.map((r) => (
+                <li key={r.fileName} className="suite-result">
+                  <span className={`run-dot ${r.status}`} />
+                  <span className="suite-result-name">{r.name}</span>
+                  {r.status === 'failed' && (
+                    <span className="suite-result-error">
+                      {r.failedAt !== undefined ? `step ${r.failedAt + 1} — ` : ''}
+                      {r.error}
+                    </span>
+                  )}
+                  {r.screenshotPath && (
+                    <button
+                      type="button"
+                      className="shot-link"
+                      onClick={() => window.api.library.openScreenshot(r.screenshotPath!)}
+                      title="Open the failure screenshot"
+                    >
+                      📷
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="modal-footer">
+              <button className="modal-btn primary" onClick={() => setSuiteRun(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* === Export preview modal === */}
       {exportCode !== null && (
