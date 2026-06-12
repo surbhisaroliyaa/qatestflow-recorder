@@ -53,9 +53,25 @@ const api = {
       ipcRenderer.invoke('recorder:export', code),
 
     // Replay the given steps in the embedded browser. Resolves when done
-    // (or at the first failed step).
-    replay: (steps: unknown[]): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
-      ipcRenderer.invoke('recorder:replay', steps),
+    // (or at the first failed step). `interactive` true (Day 12) makes a
+    // failure PAUSE for a recovery decision instead of ending the run.
+    replay: (
+      steps: unknown[],
+      interactive?: boolean
+    ): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
+      ipcRenderer.invoke('recorder:replay', steps, interactive),
+
+    // === Recovery (Day 12) ===
+    // An interactive replay paused at a failed step — main's loop is holding,
+    // waiting for a decision.
+    onReplayPaused: (callback: (info: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, info: unknown): void => callback(info)
+      ipcRenderer.on('recorder:replay-paused', listener)
+      return () => ipcRenderer.removeListener('recorder:replay-paused', listener)
+    },
+
+    // Answer the pause: retry (optionally with a healed step), skip, or stop.
+    recovery: (decision: unknown): void => ipcRenderer.send('recorder:recovery', decision),
 
     // Subscribe to per-step replay progress. Returns an unsubscribe fn.
     onReplayProgress: (callback: (progress: unknown) => void): (() => void) => {

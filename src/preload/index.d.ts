@@ -14,7 +14,7 @@ interface BrowserAPI {
 
 interface ReplayProgress {
   index: number
-  status: 'running' | 'done' | 'error'
+  status: 'running' | 'done' | 'error' | 'skipped' // 'skipped' = recovery skip (Day 12)
   error?: string
 }
 
@@ -23,14 +23,17 @@ interface ReplayResult {
   failedAt?: number
   error?: string
   screenshotPath?: string // captured at the failing step (Day 11.5)
+  aborted?: boolean // ended by Home mid-recovery — show nothing (Day 12)
 }
 
 interface RecorderAPI {
   toggle: (resume?: boolean) => Promise<boolean>
   onStep: (callback: (step: RecorderStep) => void) => () => void
   exportTest: (code: string) => Promise<string | null>
-  replay: (steps: RecorderStep[]) => Promise<ReplayResult>
+  replay: (steps: RecorderStep[], interactive?: boolean) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
+  onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
+  recovery: (decision: RecoveryDecision) => void
   setPicking: (active: boolean) => Promise<void>
   onPicked: (callback: (picked: PickedElement) => void) => () => void
   onPickCancel: (callback: () => void) => () => void
@@ -120,6 +123,22 @@ declare global {
     | 'url-contains'
     | 'title'
 
+  // === Recovery (Day 12) ===
+  // An interactive replay is paused at a failed step, waiting for a decision.
+  interface ReplayPaused {
+    index: number
+    error: string
+    screenshotPath?: string
+  }
+
+  // The human's answer to a pause: retry the step (optionally swapped for a
+  // re-picked, healed version), skip it for this run only, or stop the run.
+  // 'abort' is internal — Home pressed mid-pause; the run ends silently.
+  interface RecoveryDecision {
+    action: 'retry' | 'skip' | 'stop' | 'abort'
+    step?: RecorderStep
+  }
+
   // What the element picker hands back: the built selector ladder plus the
   // element's LIVE state, used to prefill assertion expectations (Day 9).
   interface PickedElement {
@@ -135,6 +154,10 @@ declare global {
     // How many elements the primary selector strategy matched at pick time
     // (1 = unique) — prefills the expected number for a 'count' check.
     groupCount?: number
+    // Day 12: the element has NO stable hooks — its only candidate is the
+    // bare-tag last resort, which replay refuses. Warn instead of authoring
+    // a step that can never replay.
+    unreliable?: boolean
   }
 
   // One ranked way to locate an element, with a 0–100 stability score.

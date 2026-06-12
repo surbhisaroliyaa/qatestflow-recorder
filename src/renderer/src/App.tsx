@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { generatePlaywrightTest, stepText } from './playwrightExport'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
@@ -138,6 +138,25 @@ function App(): React.JSX.Element {
     running: boolean
   } | null>(null)
 
+  // Day 12 — recovery. Non-null while a replay is PAUSED at a failed step
+  // (main's loop is holding for our decision: retry / re-pick / skip / stop).
+  const [recovery, setRecovery] = useState<ReplayPaused | null>(null)
+  // Which step a re-pick is healing (null = the picker is for an assertion).
+  const [repickIndex, setRepickIndex] = useState<number | null>(null)
+  // Steps bypassed via Skip THIS run (amber rows) — cleared on the next run.
+  const [skippedIndices, setSkippedIndices] = useState<Set<number>>(new Set())
+  // Steps whose selector was healed by a re-pick and not yet saved (🔧 hint).
+  const [healedIndices, setHealedIndices] = useState<Set<number>>(new Set())
+  // A re-pick landed on an element with no stable hooks — explain why the
+  // heal was refused (shown inside the recovery panel).
+  const [recoveryWarning, setRecoveryWarning] = useState<string | null>(null)
+  // Mirrors for the onPicked subscription: it's registered once (empty deps),
+  // so it reads CURRENT values through refs instead of stale closed-over state.
+  const repickIndexRef = useRef<number | null>(null)
+  const stepsRef = useRef<RecorderStep[]>([])
+  repickIndexRef.current = repickIndex
+  stepsRef.current = steps
+
   // Steps left ON (disabled steps are skipped by replay + export).
   const enabledCount = steps.filter((s) => !s.disabled).length
 
@@ -178,9 +197,37 @@ function App(): React.JSX.Element {
 
   // Day 9: a picked element arrives — close pick mode, open the assertion
   // chooser prefilled with the element's live text.
+  // Day 12: unless this pick is a RE-PICK for a paused replay — then it heals
+  // the failed step's selector ladder and retries it, no chooser involved.
   useEffect(() => {
     const unsubscribe = window.api.recorder.onPicked((picked) => {
       setIsPicking(false)
+      const healIndex = repickIndexRef.current
+      if (healIndex !== null) {
+        setRepickIndex(null)
+        // A bare element can't heal anything — its ladder is the same bare
+        // tag replay just refused. Stay paused and explain.
+        if (picked.unreliable) {
+          setRecoveryWarning(
+            `"${picked.label}" has no stable hooks (no id / role / text) — ` +
+              'replay would refuse it too. Try a more specific element.'
+          )
+          return
+        }
+        // Same step, new eyes: keep what it DOES (type/value/check), replace
+        // how it FINDS the element (label + full candidate ladder, rebuilt
+        // from the freshly picked element).
+        const next = stepsRef.current.map((s, idx) =>
+          idx === healIndex
+            ? { ...s, label: picked.label, selector: picked.selector, candidates: picked.candidates }
+            : s
+        )
+        setSteps(next)
+        setHealedIndices((prev) => new Set(prev).add(healIndex))
+        setRecovery(null)
+        window.api.recorder.recovery({ action: 'retry', step: next[healIndex] })
+        return
+      }
       setPickedElement(picked)
       setAssertKind('visible')
       setAssertValue(picked.text ?? '')
@@ -190,7 +237,24 @@ function App(): React.JSX.Element {
   }, [])
 
   // The user pressed Esc inside the page — pick mode ended without a pick.
-  useEffect(() => window.api.recorder.onPickCancel(() => setIsPicking(false)), [])
+  // If it was a re-pick, fall back to the recovery panel's buttons.
+  useEffect(
+    () =>
+      window.api.recorder.onPickCancel(() => {
+        setIsPicking(false)
+        setRepickIndex(null)
+      }),
+    []
+  )
+
+  // Day 12: a replay hit a failed step and is now paused, waiting on us.
+  useEffect(() => {
+    const unsubscribe = window.api.recorder.onReplayPaused((info) => {
+      setRecovery(info)
+      setRecoveryWarning(null)
+    })
+    return unsubscribe
+  }, [])
 
   // Append every recorded step to the live list as it arrives from main.
   useEffect(() => {
@@ -211,9 +275,16 @@ function App(): React.JSX.Element {
   // Follow replay progress so we can highlight running / done / failed steps.
   useEffect(() => {
     const unsubscribe = window.api.recorder.onReplayProgress((p) => {
-      if (p.status === 'running') setReplayingIndex(p.index)
-      else if (p.status === 'done') setDoneIndices((prev) => new Set(prev).add(p.index))
+      if (p.status === 'running') {
+        setReplayingIndex(p.index)
+        // A recovery retry re-runs a step that just failed — drop its red mark.
+        setFailedIndex((prev) => (prev === p.index ? null : prev))
+      } else if (p.status === 'done') setDoneIndices((prev) => new Set(prev).add(p.index))
       else if (p.status === 'error') setFailedIndex(p.index)
+      else if (p.status === 'skipped') {
+        setSkippedIndices((prev) => new Set(prev).add(p.index))
+        setFailedIndex((prev) => (prev === p.index ? null : prev))
+      }
     })
     return unsubscribe
   }, [])
@@ -282,6 +353,13 @@ function App(): React.JSX.Element {
     setSavePanelOpen(false)
     setSuiteRun(null)
     setLastScreenshotPath(null)
+    // Day 12: main answers any paused replay with a silent abort on Home —
+    // mirror that here so no recovery UI survives the trip to welcome.
+    setRecovery(null)
+    setRecoveryWarning(null)
+    setRepickIndex(null)
+    setSkippedIndices(new Set())
+    setHealedIndices(new Set())
   }
 
   // Export: generate the Playwright code and open the preview modal. The
@@ -310,19 +388,34 @@ function App(): React.JSX.Element {
 
   // One replay of one steps-list, with outcome recorded for saved tests.
   // Shared by the single Replay button AND the Day 11.5 suite runner.
+  // `interactive` (Day 12): a failure pauses for Retry / Re-pick / Skip / Stop
+  // — only the single Replay button uses it; suite runs stay unattended.
   const runOnce = async (
     list: RecorderStep[],
-    fileName: string | null
-  ): Promise<{ ok: boolean; failedAt?: number; error?: string; screenshotPath?: string }> => {
+    fileName: string | null,
+    interactive = false
+  ): Promise<{
+    ok: boolean
+    failedAt?: number
+    error?: string
+    screenshotPath?: string
+    aborted?: boolean
+  }> => {
     setFailedIndex(null)
     setReplayError(null)
     setDoneIndices(new Set())
     setReplayingIndex(null)
     setLastScreenshotPath(null)
+    setSkippedIndices(new Set())
+    setRecovery(null)
     setIsReplaying(true)
-    const result = await window.api.recorder.replay(list)
+    const result = await window.api.recorder.replay(list, interactive)
     setIsReplaying(false)
     setReplayingIndex(null)
+    setRecovery(null)
+    // Aborted = Home was pressed mid-recovery. The run is moot — no failure
+    // banner, no run recorded.
+    if (result.aborted) return result
     if (!result.ok) {
       setFailedIndex(result.failedAt ?? null)
       setReplayError(result.error ?? 'Replay failed')
@@ -343,8 +436,32 @@ function App(): React.JSX.Element {
   }
 
   // Replay: run all recorded steps in the embedded browser and watch them go.
+  // Interactive — a failed step pauses for recovery instead of ending the run.
   const handleReplay = async (): Promise<void> => {
-    await runOnce(steps, testFileName)
+    await runOnce(steps, testFileName, true)
+  }
+
+  // === Day 12: recovery — answer a paused replay ====================
+  const answerRecovery = (action: 'retry' | 'skip' | 'stop'): void => {
+    setRecovery(null)
+    setRecoveryWarning(null)
+    window.api.recorder.recovery({ action })
+  }
+
+  // Re-pick: open the Day 9 element picker; the onPicked handler above heals
+  // the failed step with the fresh ladder and retries it.
+  const handleRecoveryRepick = async (): Promise<void> => {
+    if (!recovery) return
+    setRecoveryWarning(null)
+    setRepickIndex(recovery.index)
+    setIsPicking(true)
+    await window.api.recorder.setPicking(true)
+  }
+
+  const handleRecoveryRepickCancel = async (): Promise<void> => {
+    setRepickIndex(null)
+    setIsPicking(false)
+    await window.api.recorder.setPicking(false)
   }
 
   // === Day 11: test library =========================================
@@ -382,6 +499,7 @@ function App(): React.JSX.Element {
     setTestSuite(summary.suite)
     setBaseURL(base)
     setSavePanelOpen(false)
+    setHealedIndices(new Set()) // healed selectors are on disk now — hint done
   }
 
   // Open a saved test: its steps become the working list (the single source
@@ -497,6 +615,8 @@ function App(): React.JSX.Element {
     setFailedIndex(null)
     setReplayError(null)
     setReplayingIndex(null)
+    setSkippedIndices(new Set()) // skip marks describe the old order too
+    setHealedIndices(new Set()) // healed indices may have shifted — drop the hint
   }
 
   // Day 10(c): hand-pick a selector candidate as the step's primary. The pick
@@ -670,12 +790,20 @@ function App(): React.JSX.Element {
   }
 
   // A one-line summary of the last/current replay for the status banner.
+  // While PAUSED for recovery (Day 12), the recovery panel carries the story.
   const replayBanner = ((): { tone: string; text: string } | null => {
+    if (recovery) return null
     if (isReplaying) return { tone: 'running', text: 'Replaying…' }
     if (failedIndex !== null)
       return { tone: 'failed', text: `✗ Failed at step ${failedIndex + 1}: ${replayError}` }
-    if (doneIndices.size > 0 && doneIndices.size === enabledCount)
-      return { tone: 'passed', text: `✓ All ${enabledCount} steps passed` }
+    if (doneIndices.size > 0 && doneIndices.size + skippedIndices.size === enabledCount) {
+      return skippedIndices.size > 0
+        ? {
+            tone: 'passed',
+            text: `✓ Finished: ${doneIndices.size} passed, ${skippedIndices.size} skipped`
+          }
+        : { tone: 'passed', text: `✓ All ${enabledCount} steps passed` }
+    }
     return null
   })()
 
@@ -984,6 +1112,88 @@ function App(): React.JSX.Element {
             </div>
           )}
 
+          {/* === Day 12: recovery panel — the replay is paused on a failed
+              step, browser frozen at the scene. Not a modal: the page must
+              stay visible (and clickable, for Re-pick). === */}
+          {recovery && (
+            <div className="assert-panel recovery-panel">
+              <div className="assert-target">
+                <span className="assert-title recovery-title">
+                  ✗ Step {recovery.index + 1} failed — paused
+                </span>
+                {steps[recovery.index]?.label && (
+                  <span className="assert-label">{steps[recovery.index].label}</span>
+                )}
+              </div>
+              <code className="assert-selector recovery-error">{recovery.error}</code>
+              {recoveryWarning && <div className="pick-warning">⚠ {recoveryWarning}</div>}
+              {repickIndex !== null ? (
+                <div className="assert-actions recovery-actions">
+                  <span className="recovery-hint">
+                    Click the correct element in the page (Esc cancels)
+                  </span>
+                  <button className="modal-btn" onClick={handleRecoveryRepickCancel}>
+                    Cancel re-pick
+                  </button>
+                </div>
+              ) : (
+                <div className="assert-actions recovery-actions">
+                  {recovery.screenshotPath && (
+                    <button
+                      type="button"
+                      className="shot-link"
+                      onClick={() => window.api.library.openScreenshot(recovery.screenshotPath!)}
+                      title="Open the failure screenshot"
+                    >
+                      📷
+                    </button>
+                  )}
+                  <button
+                    className="modal-btn"
+                    onClick={() => answerRecovery('retry')}
+                    title="Run the same step again (maybe the page was just slow)"
+                  >
+                    🔁 Retry
+                  </button>
+                  <button
+                    className="modal-btn"
+                    onClick={handleRecoveryRepick}
+                    disabled={!steps[recovery.index]?.selector}
+                    title={
+                      steps[recovery.index]?.selector
+                        ? 'Point at the right element — heals the selector, then retries'
+                        : 'This step has no element to re-pick'
+                    }
+                  >
+                    🎯 Re-pick
+                  </button>
+                  <button
+                    className="modal-btn"
+                    onClick={() => answerRecovery('skip')}
+                    title="Skip this step for THIS run and continue"
+                  >
+                    ⏭ Skip
+                  </button>
+                  <button
+                    className="modal-btn danger"
+                    onClick={() => answerRecovery('stop')}
+                    title="End the run as failed"
+                  >
+                    ⏹ Stop
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Day 12: re-picked selectors live only in the panel until saved */}
+          {healedIndices.size > 0 && !isReplaying && (
+            <div className="replay-status healed">
+              🔧 {healedIndices.size} selector{healedIndices.size > 1 ? 's' : ''} healed by
+              re-pick — 💾 save to keep the fix
+            </div>
+          )}
+
           {/* === Day 11: save panel (reuses the assert-panel look) === */}
           {savePanelOpen && (
             <div className="assert-panel">
@@ -1042,7 +1252,7 @@ function App(): React.JSX.Element {
               </div>
             </div>
           )}
-          {isPicking && (
+          {isPicking && repickIndex === null && (
             <div className="replay-status running">
               Click an element in the page to check it (Esc cancels)
               <div className="page-checks">
@@ -1065,6 +1275,14 @@ function App(): React.JSX.Element {
                 <span className="assert-label">{pickedElement.label}</span>
               </div>
               <code className="assert-selector">{pickedElement.selector}</code>
+              {/* Day 12: warn NOW about an element replay will refuse later */}
+              {pickedElement.unreliable && (
+                <div className="pick-warning">
+                  ⚠ This element has no stable hooks (no id / role / text) — a check on it
+                  cannot replay reliably. Pick a more specific element instead (its label,
+                  or a container with an id).
+                </div>
+              )}
               <div className="assert-kinds">
                 {ASSERT_KINDS.filter(
                   (kind) =>
@@ -1117,7 +1335,16 @@ function App(): React.JSX.Element {
                 >
                   Cancel
                 </button>
-                <button className="modal-btn primary" onClick={handleAddAssert}>
+                <button
+                  className="modal-btn primary"
+                  onClick={handleAddAssert}
+                  disabled={pickedElement.unreliable}
+                  title={
+                    pickedElement.unreliable
+                      ? 'No reliable selector — this check would always fail on replay'
+                      : undefined
+                  }
+                >
                   Add check
                 </button>
               </div>
@@ -1142,12 +1369,16 @@ function App(): React.JSX.Element {
                         ? ' failed'
                         : i === replayingIndex
                           ? ' running'
-                          : doneIndices.has(i)
-                            ? ' done'
-                            : ''
+                          : skippedIndices.has(i)
+                            ? ' skipped'
+                            : doneIndices.has(i)
+                              ? ' done'
+                              : ''
                     }`}
                   >
-                    <span className="step-num">{doneIndices.has(i) ? '✓' : i + 1}</span>
+                    <span className="step-num">
+                      {doneIndices.has(i) ? '✓' : skippedIndices.has(i) ? '»' : i + 1}
+                    </span>
                     <div className="step-body">
                       {editingIndex === i ? (
                         <input
@@ -1178,6 +1409,14 @@ function App(): React.JSX.Element {
                           <code>{step.selector}</code>
                           <span className="selector-caret">{expandedIndex === i ? '▾' : '▸'}</span>
                         </button>
+                      )}
+                      {healedIndices.has(i) && (
+                        <span
+                          className="healed-tag"
+                          title="Selector healed by re-pick — 💾 save to keep it"
+                        >
+                          🔧 healed
+                        </span>
                       )}
                       {insertMenuIndex === i && canEdit && (
                         <div className="insert-menu">

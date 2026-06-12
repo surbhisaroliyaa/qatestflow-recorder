@@ -105,6 +105,21 @@ function createWindow(): void {
 
   // === IPC handlers — the React UI sends messages here ===
 
+  // loadURL() rejects with ERR_ABORTED whenever the original request is
+  // superseded — a server redirect, a retry, a second navigation while the
+  // first is in flight (Heroku cold starts trigger this constantly). The
+  // page that's actually loading still arrives via did-finish-load, so
+  // ERR_ABORTED is noise, not failure. Real load errors (DNS, refused,
+  // timeout) are swallowed too at this level: the embedded browser shows
+  // its own error page; an exception here would just crash the caller.
+  const loadUrlTolerantly = async (url: string): Promise<void> => {
+    try {
+      await embeddedBrowser.webContents.loadURL(url)
+    } catch {
+      // superseded or failed — either way the webContents tells the story
+    }
+  }
+
   // "Navigate to this URL" — adds https:// if user typed a bare domain
   ipcMain.handle('browser:navigate', async (_event, rawUrl: string) => {
     const url = normalizeUrl(rawUrl)
@@ -112,7 +127,7 @@ function createWindow(): void {
     resizeEmbedded() // unhide the embedded browser
     // Navigating via the URL bar is itself a step worth recording.
     if (isRecording) sendStep({ type: 'navigate', url })
-    await embeddedBrowser.webContents.loadURL(url)
+    await loadUrlTolerantly(url)
     return url
   })
 
@@ -169,6 +184,9 @@ function createWindow(): void {
   ipcMain.handle('browser:home', () => {
     hasNavigated = false
     isRecording = false
+    // A replay paused for recovery (Day 12) can't continue once we've left —
+    // answer it with a silent abort so its loop doesn't hang forever.
+    resolveRecovery({ action: 'abort' })
     embeddedBrowser.webContents.send('recorder:set-active', false)
     resizeEmbedded() // hide the embedded browser
     try {
@@ -265,7 +283,12 @@ function createWindow(): void {
       // info is only recorded when count > 1, so its absence means unique.
       const prim = candidates.find((c) => c.locator === primary)
       const groupCount = prim && prim.kind !== 'css' ? (raw.facts.dup?.[prim.kind]?.count ?? 1) : 1
+      // Day 12: a bare element (no id/role/text/etc) yields ONLY the bare-tag
+      // last resort — which replay refuses to act on (Day 10's honest-refusal
+      // rule). Flag it so the UI can warn at PICK time, not fail at replay time.
+      const unreliable = !candidates.some((c) => c.kind !== 'css')
       mainWindow.webContents.send('recorder:picked', {
+        unreliable,
         label: labelFrom(raw.facts),
         selector: primary,
         candidates,
@@ -282,16 +305,45 @@ function createWindow(): void {
     mainWindow.webContents.send('recorder:pick-cancel')
   })
 
+  // === Recovery (Day 12) =============================================
+  // When an INTERACTIVE replay fails a step, the loop below pauses and waits
+  // for the human's decision instead of returning. The pending pause is held
+  // as a promise; this resolver is how the answer (retry/skip/stop) gets in.
+  // 'abort' is the silent variant: Home was pressed, end with nothing to show.
+  interface RecoveryDecision {
+    action: 'retry' | 'skip' | 'stop' | 'abort'
+    step?: ReplayStep // a re-pick sends the healed step to retry with
+  }
+  let recoveryResolve: ((decision: RecoveryDecision) => void) | null = null
+  const resolveRecovery = (decision: RecoveryDecision): void => {
+    const pending = recoveryResolve
+    recoveryResolve = null
+    pending?.(decision)
+  }
+  ipcMain.on('recorder:recovery', (_event, decision: RecoveryDecision) =>
+    resolveRecovery(decision)
+  )
+
   // === Replay ========================================================
   // Run the recorded steps one-by-one inside the embedded browser. We report
-  // progress per step so React can highlight the current/failed step, and stop
-  // at the first failure (basic — smart waits/recovery come later).
+  // progress per step so React can highlight the current/failed step. A plain
+  // replay stops at the first failure; an `interactive` one (single Replay
+  // button, Day 12) pauses there and offers Retry / Re-pick / Skip / Stop.
   ipcMain.handle(
     'recorder:replay',
     async (
       _event,
-      steps: ReplayStep[]
-    ): Promise<{ ok: boolean; failedAt?: number; error?: string; screenshotPath?: string }> => {
+      steps: ReplayStep[],
+      interactive?: boolean
+    ): Promise<{
+      ok: boolean
+      failedAt?: number
+      error?: string
+      screenshotPath?: string
+      aborted?: boolean
+    }> => {
+      // A dangling pause from a previous replay can never be answered — clear it.
+      resolveRecovery({ action: 'abort' })
       overlayOpen = false // make sure the browser is visible while replaying
 
       // Test isolation: start EVERY replay from a clean state (fresh cookies +
@@ -329,7 +381,14 @@ function createWindow(): void {
         failedAt?: number
         error?: string
         screenshotPath?: string
-      }): { ok: boolean; failedAt?: number; error?: string; screenshotPath?: string } => {
+        aborted?: boolean
+      }): {
+        ok: boolean
+        failedAt?: number
+        error?: string
+        screenshotPath?: string
+        aborted?: boolean
+      } => {
         if (cdpReady) {
           try {
             cdp.detach()
@@ -340,8 +399,12 @@ function createWindow(): void {
         return outcome
       }
 
-      for (let i = 0; i < steps.length; i++) {
-        const step = steps[i]
+      // Local copy so a re-pick can swap in a healed step mid-run without
+      // mutating the renderer's array (it sends its own update separately).
+      const list = steps.slice()
+
+      for (let i = 0; i < list.length; i++) {
+        const step = list[i]
         // Steps turned off in the editor are skipped — leave their row neutral
         // (no running/done/error) so the UI shows them as inert, not run.
         if (step.disabled) continue
@@ -350,7 +413,16 @@ function createWindow(): void {
           if (step.type === 'navigate') {
             hasNavigated = true
             resizeEmbedded()
-            await embeddedBrowser.webContents.loadURL(step.url ?? '')
+            try {
+              await embeddedBrowser.webContents.loadURL(step.url ?? '')
+            } catch (err) {
+              // ERR_ABORTED = the request was superseded (redirect / retry) —
+              // a page IS loading, just not via the original request. Treat
+              // as success; the next step's smart-wait does the real
+              // verifying. Anything else (DNS, refused) fails honestly.
+              const message = err instanceof Error ? err.message : String(err)
+              if (!message.includes('ERR_ABORTED')) throw err
+            }
           } else if (step.type === 'wait') {
             // An explicit pause — no element involved, just time (Day 9).
             const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
@@ -406,6 +478,38 @@ function createWindow(): void {
             status: 'error',
             error: message
           })
+          // Day 12: in an interactive replay we PAUSE here instead of ending.
+          // The browser is sitting in the exact state where things broke —
+          // ideal for retrying or re-picking the element. The loop holds on
+          // this promise until the user's decision arrives over IPC.
+          if (interactive) {
+            mainWindow.webContents.send('recorder:replay-paused', {
+              index: i,
+              error: message,
+              screenshotPath
+            })
+            const decision = await new Promise<RecoveryDecision>((resolve) => {
+              recoveryResolve = resolve
+            })
+            if (decision.action === 'retry') {
+              // A re-pick rides along as a healed step — swap it in first.
+              if (decision.step) list[i] = decision.step
+              i-- // run the same index again
+              continue
+            }
+            if (decision.action === 'skip') {
+              mainWindow.webContents.send('recorder:replay-progress', {
+                index: i,
+                status: 'skipped'
+              })
+              continue
+            }
+            if (decision.action === 'abort') {
+              // Home was pressed mid-pause — end quietly, nothing to report.
+              return finish({ ok: false, failedAt: i, error: message, aborted: true })
+            }
+            // 'stop' falls through to the normal failure return below.
+          }
           return finish({ ok: false, failedAt: i, error: message, screenshotPath })
         }
       }
