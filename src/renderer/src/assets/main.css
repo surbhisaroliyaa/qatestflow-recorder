@@ -1527,3 +1527,162 @@ body {
   font-size: 12px;
   color: #666;
 }
+
+/* ===================================================
+   FAILURE TRANSLATOR + BUG REPORT (Day 13)
+   =================================================== */
+
+/* The 💡 explain button — same shape as the screenshot link, but blue:
+   "insight" rather than "evidence". */
+.explain-link {
+  border-color: #3a4a6e;
+  color: #aebfff;
+}
+
+.explain-link:hover {
+  border-color: #4a6cf7;
+  background: #1a2034;
+}
+
+/* The analysis view inside the modal. */
+.analysis-body {
+  padding: 16px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.analysis-waiting {
+  margin: 0;
+  font-size: 13px;
+  color: #9aa7c7;
+  animation: analysisPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes analysisPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.analysis-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The verdict chip — the headline of the diagnosis. Colors follow the
+   app's existing semantics: red = product broken, amber = test needs
+   maintenance, blue = timing/flaky, purple = environment, grey = unknown. */
+.verdict-chip {
+  padding: 3px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.verdict-chip.app-bug {
+  background: #4a2422;
+  color: #ffb3ae;
+  border: 1px solid #6e3331;
+}
+
+.verdict-chip.test-bug {
+  background: #3a3324;
+  color: #ffe8a3;
+  border: 1px solid #5c4a1d;
+}
+
+.verdict-chip.timing {
+  background: #2a3a5a;
+  color: #cdd8ff;
+  border: 1px solid #3a4a6e;
+}
+
+.verdict-chip.environment {
+  background: #32284a;
+  color: #d8c8ff;
+  border: 1px solid #4a3a6e;
+}
+
+.verdict-chip.unknown {
+  background: #333;
+  color: #bbb;
+  border: 1px solid #555;
+}
+
+.analysis-source {
+  font-size: 11px;
+  color: #8b9cdf;
+}
+
+.analysis-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #d8d8d8;
+}
+
+/* The "do this next" line — green, like a passing outcome. */
+.analysis-suggestion {
+  margin: 0;
+  padding: 8px 10px;
+  background: #1f3a28;
+  border: 1px solid #2c6646;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #8ff0a8;
+}
+
+.analysis-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.evidence-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #888;
+}
+
+.evidence-lines {
+  margin: 0;
+  padding: 8px 10px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #c8a8a6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 130px;
+  overflow: auto;
+}
+
+.analysis-noevidence {
+  margin: 0;
+  font-size: 12px;
+  color: #777;
+}
+
+/* Day 13 noise tagging: third-party network failures (analytics, crash
+   reporters) are shown but dimmed — visible evidence, de-emphasized eye. */
+.evidence-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.evidence-line.dim {
+  color: #6a6a6a;
+}

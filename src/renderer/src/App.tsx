@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { generatePlaywrightTest, stepText } from './playwrightExport'
+import { generateBugReport, bugReportFileName } from './bugReport'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
@@ -42,6 +43,24 @@ const ASSERT_LABELS: Record<AssertKind, string> = {
   'url-contains': 'URL contains',
   title: 'Page title'
 }
+// Day 13: network evidence lines carry [site] / [third-party] tags (whose
+// server failed — stamped at capture in main). Third-party noise is shown
+// DIMMED and sorted last, never hidden: the tag is a fact, not a judgment.
+// MIRROR WARNING: tag text + ordering must match relationTag (main/index.ts)
+// and siteFirst (main/translator.ts).
+const isThirdPartyLine = (l: string): boolean => l.includes('[third-party]')
+const siteFirstLines = (lines: string[]): string[] =>
+  [...lines].sort((a, b) => Number(isThirdPartyLine(a)) - Number(isThirdPartyLine(b)))
+
+// Day 13: how the analysis modal names each verdict.
+const VERDICT_LABELS: Record<FailureVerdict, string> = {
+  'app-bug': 'App bug',
+  'test-bug': 'Test bug',
+  timing: 'Timing',
+  environment: 'Environment',
+  unknown: 'Unclassified'
+}
+
 // These kinds compare against an expected value the user can edit.
 const assertNeedsValue = (kind: AssertKind): boolean =>
   kind === 'text-equals' ||
@@ -149,6 +168,21 @@ function App(): React.JSX.Element {
     setOpenSuites(next)
   }
 
+  // Day 13 — failure translator + bug report. Console/network evidence of the
+  // LAST failed run (from main's replay-time capture); the analysis modal's
+  // state: open, thinking, the diagnosis, and the generated report (non-null
+  // = the modal is showing the report view instead of the analysis view).
+  const [lastConsoleErrors, setLastConsoleErrors] = useState<string[]>([])
+  const [lastNetworkErrors, setLastNetworkErrors] = useState<string[]>([])
+  const [analysisOpen, setAnalysisOpen] = useState(false)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analysis, setAnalysis] = useState<FailureAnalysis | null>(null)
+  // The evidence bundle the open analysis was built from — the bug report
+  // generator reuses it so both documents describe the same failure.
+  const [lastEvidence, setLastEvidence] = useState<FailureEvidence | null>(null)
+  const [bugReport, setBugReport] = useState<string | null>(null)
+  const [reportSavedPath, setReportSavedPath] = useState<string | null>(null)
+
   // Day 12 — recovery. Non-null while a replay is PAUSED at a failed step
   // (main's loop is holding for our decision: retry / re-pick / skip / stop).
   const [recovery, setRecovery] = useState<ReplayPaused | null>(null)
@@ -165,8 +199,13 @@ function App(): React.JSX.Element {
   // so it reads CURRENT values through refs instead of stale closed-over state.
   const repickIndexRef = useRef<number | null>(null)
   const stepsRef = useRef<RecorderStep[]>([])
-  repickIndexRef.current = repickIndex
-  stepsRef.current = steps
+  // Mirror state into the refs AFTER render (React forbids touching refs
+  // during render). The onPicked subscriber only reads them when an IPC
+  // event arrives, which is always after the effect has run.
+  useEffect(() => {
+    repickIndexRef.current = repickIndex
+    stepsRef.current = steps
+  }, [repickIndex, steps])
 
   // Steps left ON (disabled steps are skipped by replay + export).
   const enabledCount = steps.filter((s) => !s.disabled).length
@@ -230,7 +269,12 @@ function App(): React.JSX.Element {
         // from the freshly picked element).
         const next = stepsRef.current.map((s, idx) =>
           idx === healIndex
-            ? { ...s, label: picked.label, selector: picked.selector, candidates: picked.candidates }
+            ? {
+                ...s,
+                label: picked.label,
+                selector: picked.selector,
+                candidates: picked.candidates
+              }
             : s
         )
         setSteps(next)
@@ -280,8 +324,8 @@ function App(): React.JSX.Element {
   // to hide it (else it covers the modal).
   const suiteSummaryOpen = suiteRun !== null && !suiteRun.running
   useEffect(() => {
-    window.api.browser.setOverlay(exportCode !== null || suiteSummaryOpen)
-  }, [exportCode, suiteSummaryOpen])
+    window.api.browser.setOverlay(exportCode !== null || suiteSummaryOpen || analysisOpen)
+  }, [exportCode, suiteSummaryOpen, analysisOpen])
 
   // Follow replay progress so we can highlight running / done / failed steps.
   useEffect(() => {
@@ -371,6 +415,11 @@ function App(): React.JSX.Element {
     setRepickIndex(null)
     setSkippedIndices(new Set())
     setHealedIndices(new Set())
+    // Day 13: the analysis described a run that no longer exists.
+    closeAnalysis()
+    setLastEvidence(null)
+    setLastConsoleErrors([])
+    setLastNetworkErrors([])
   }
 
   // Export: generate the Playwright code and open the preview modal. The
@@ -419,6 +468,8 @@ function App(): React.JSX.Element {
     setLastScreenshotPath(null)
     setSkippedIndices(new Set())
     setRecovery(null)
+    setLastConsoleErrors([])
+    setLastNetworkErrors([])
     setIsReplaying(true)
     const result = await window.api.recorder.replay(list, interactive)
     setIsReplaying(false)
@@ -431,6 +482,8 @@ function App(): React.JSX.Element {
       setFailedIndex(result.failedAt ?? null)
       setReplayError(result.error ?? 'Replay failed')
       setLastScreenshotPath(result.screenshotPath ?? null)
+      setLastConsoleErrors(result.consoleErrors ?? [])
+      setLastNetworkErrors(result.networkErrors ?? [])
     }
     // A SAVED test remembers its outcomes — the library shows the latest as
     // a green/red dot and the last 10 as a history row (mini CI dashboard).
@@ -473,6 +526,89 @@ function App(): React.JSX.Element {
     setRepickIndex(null)
     setIsPicking(false)
     await window.api.recorder.setPicking(false)
+  }
+
+  // === Day 13: failure translator + bug report ======================
+  // The renderer assembles the evidence bundle — it owns the steps and their
+  // human sentences; main contributed the console/network capture and the
+  // screenshot. Then main's translator turns it into a verdict + explanation
+  // (Claude CLI when available, built-in rules otherwise — same shape back).
+  const handleExplain = async (
+    index: number,
+    error: string,
+    screenshotPath: string | null | undefined,
+    consoleErrors: string[],
+    networkErrors: string[]
+  ): Promise<void> => {
+    setBugReport(null)
+    setReportSavedPath(null)
+    setAnalysis(null)
+    setAnalysisOpen(true)
+    setAnalyzing(true)
+    // The page's live URL + title live inside the native browser view — only
+    // main can read them (same reason as the Day 11 title-check prefill).
+    let pageUrl = urlInput
+    let pageTitle = ''
+    try {
+      const info = await window.api.browser.getPageInfo()
+      pageUrl = info.url || urlInput
+      pageTitle = info.title
+    } catch {
+      // keep the URL-bar fallback
+    }
+    const step = steps[index] as RecorderStep | undefined
+    const evidence: FailureEvidence = {
+      testName: testName || undefined,
+      pageUrl,
+      pageTitle,
+      stepIndex: index,
+      stepText: step ? stepText(step) : `Step ${index + 1}`,
+      stepType: step?.type ?? 'unknown',
+      selector: step?.selector,
+      error,
+      consoleErrors,
+      networkErrors,
+      screenshotPath: screenshotPath ?? undefined,
+      allSteps: steps.map((s) => stepText(s))
+    }
+    setLastEvidence(evidence)
+    try {
+      setAnalysis(await window.api.translator.explain(evidence))
+    } catch {
+      setAnalysis({
+        source: 'rules',
+        verdict: 'unknown',
+        explanation: 'The translator could not run — see the raw evidence below.',
+        suggestion: ''
+      })
+    }
+    setAnalyzing(false)
+  }
+
+  const closeAnalysis = (): void => {
+    setAnalysisOpen(false)
+    setAnalyzing(false)
+    setAnalysis(null)
+    setBugReport(null)
+    setReportSavedPath(null)
+  }
+
+  // Bug report = the SAME evidence formatted for humans (plus the verdict,
+  // when an analysis ran). Generated in place, inside the analysis modal.
+  const handleGenerateReport = (): void => {
+    if (!lastEvidence) return
+    setBugReport(generateBugReport(lastEvidence, analysis))
+    setReportSavedPath(null)
+  }
+
+  const handleCopyReport = (): void => {
+    if (bugReport) navigator.clipboard.writeText(bugReport)
+  }
+
+  const handleSaveReport = async (): Promise<void> => {
+    if (!bugReport || !lastEvidence) return
+    const path = await window.api.translator.saveReport(bugReport, bugReportFileName(lastEvidence))
+    if (path) setReportSavedPath(path)
   }
 
   // === Day 11: test library =========================================
@@ -1157,6 +1293,25 @@ function App(): React.JSX.Element {
                   📷 view screenshot
                 </button>
               )}
+              {/* Day 13: turn the failure into a plain-English diagnosis */}
+              {replayBanner.tone === 'failed' && failedIndex !== null && replayError && (
+                <button
+                  type="button"
+                  className="shot-link explain-link"
+                  onClick={() =>
+                    handleExplain(
+                      failedIndex,
+                      replayError,
+                      lastScreenshotPath,
+                      lastConsoleErrors,
+                      lastNetworkErrors
+                    )
+                  }
+                  title="Explain this failure: app bug, test bug, or just timing?"
+                >
+                  💡 explain
+                </button>
+              )}
             </div>
           )}
 
@@ -1196,6 +1351,23 @@ function App(): React.JSX.Element {
                       📷
                     </button>
                   )}
+                  {/* Day 13: ask for a diagnosis while deciding what to do */}
+                  <button
+                    type="button"
+                    className="shot-link explain-link"
+                    onClick={() =>
+                      handleExplain(
+                        recovery.index,
+                        recovery.error,
+                        recovery.screenshotPath,
+                        recovery.consoleErrors ?? [],
+                        recovery.networkErrors ?? []
+                      )
+                    }
+                    title="Explain this failure: app bug, test bug, or just timing?"
+                  >
+                    💡
+                  </button>
                   <button
                     className="modal-btn"
                     onClick={() => answerRecovery('retry')}
@@ -1237,8 +1409,8 @@ function App(): React.JSX.Element {
           {/* Day 12: re-picked selectors live only in the panel until saved */}
           {healedIndices.size > 0 && !isReplaying && (
             <div className="replay-status healed">
-              🔧 {healedIndices.size} selector{healedIndices.size > 1 ? 's' : ''} healed by
-              re-pick — 💾 save to keep the fix
+              🔧 {healedIndices.size} selector{healedIndices.size > 1 ? 's' : ''} healed by re-pick
+              — 💾 save to keep the fix
             </div>
           )}
 
@@ -1326,9 +1498,9 @@ function App(): React.JSX.Element {
               {/* Day 12: warn NOW about an element replay will refuse later */}
               {pickedElement.unreliable && (
                 <div className="pick-warning">
-                  ⚠ This element has no stable hooks (no id / role / text) — a check on it
-                  cannot replay reliably. Pick a more specific element instead (its label,
-                  or a container with an id).
+                  ⚠ This element has no stable hooks (no id / role / text) — a check on it cannot
+                  replay reliably. Pick a more specific element instead (its label, or a container
+                  with an id).
                 </div>
               )}
               <div className="assert-kinds">
@@ -1615,6 +1787,124 @@ function App(): React.JSX.Element {
               <button className="modal-btn primary" onClick={() => setSuiteRun(null)}>
                 Close
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === Day 13: failure analysis + bug report modal. One overlay, two
+          views: the diagnosis first, the generated report after the button.
+          A modal is safe here even mid-recovery — setOverlay hides the
+          native pane while it's open and restores it on close. === */}
+      {analysisOpen && (
+        <div className="modal-backdrop" onClick={closeAnalysis}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">
+                {bugReport ? '🐞 Bug report' : '💡 Failure analysis'}
+              </span>
+              <button className="modal-close" onClick={closeAnalysis} aria-label="Close">
+                ✕
+              </button>
+            </div>
+            {bugReport ? (
+              <pre className="modal-code">
+                <code>{bugReport}</code>
+              </pre>
+            ) : analyzing ? (
+              <div className="analysis-body">
+                <p className="analysis-waiting">
+                  Analyzing the failure… asking Claude first — if it isn&apos;t available, this
+                  falls back to the built-in rules automatically.
+                </p>
+              </div>
+            ) : analysis ? (
+              <div className="analysis-body">
+                <div className="analysis-meta">
+                  <span className={`verdict-chip ${analysis.verdict}`}>
+                    {VERDICT_LABELS[analysis.verdict] ?? analysis.verdict}
+                  </span>
+                  <span className="analysis-source">
+                    {analysis.source === 'ai'
+                      ? 'analyzed by Claude'
+                      : 'built-in rules (Claude unavailable)'}
+                  </span>
+                </div>
+                <p className="analysis-text">{analysis.explanation}</p>
+                {analysis.suggestion && (
+                  <p className="analysis-suggestion">→ {analysis.suggestion}</p>
+                )}
+                {lastEvidence &&
+                (lastEvidence.consoleErrors.length > 0 || lastEvidence.networkErrors.length > 0) ? (
+                  <div className="analysis-evidence">
+                    {lastEvidence.consoleErrors.length > 0 && (
+                      <>
+                        <span className="evidence-title">
+                          Console errors ({lastEvidence.consoleErrors.length})
+                        </span>
+                        <pre className="evidence-lines">
+                          {lastEvidence.consoleErrors.slice(0, 6).join('\n')}
+                        </pre>
+                      </>
+                    )}
+                    {lastEvidence.networkErrors.length > 0 && (
+                      <>
+                        <span className="evidence-title">
+                          Network problems ({lastEvidence.networkErrors.length})
+                        </span>
+                        <div className="evidence-lines">
+                          {siteFirstLines(lastEvidence.networkErrors)
+                            .slice(0, 6)
+                            .map((line, li) => (
+                              <div
+                                key={li}
+                                className={`evidence-line${isThirdPartyLine(line) ? ' dim' : ''}`}
+                              >
+                                {line}
+                              </div>
+                            ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <p className="analysis-noevidence">
+                    No console or network errors were captured during this run.
+                  </p>
+                )}
+              </div>
+            ) : null}
+            <div className="modal-footer">
+              {bugReport ? (
+                <>
+                  {reportSavedPath && (
+                    <span className="saved-path">Saved to {reportSavedPath}</span>
+                  )}
+                  <button className="modal-btn" onClick={() => setBugReport(null)}>
+                    ← Analysis
+                  </button>
+                  <button className="modal-btn" onClick={handleCopyReport}>
+                    Copy
+                  </button>
+                  <button className="modal-btn primary" onClick={handleSaveReport}>
+                    Save .md
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button className="modal-btn" onClick={closeAnalysis}>
+                    Close
+                  </button>
+                  <button
+                    className="modal-btn primary"
+                    onClick={handleGenerateReport}
+                    disabled={analyzing || !lastEvidence}
+                    title="Turn this failure into a ready-to-paste markdown bug report"
+                  >
+                    🐞 Generate bug report
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

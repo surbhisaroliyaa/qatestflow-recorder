@@ -20,6 +20,7 @@ import {
   libraryDir,
   type RunInfo
 } from './library'
+import { explainFailure, type FailureEvidence } from './translator'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -325,9 +326,7 @@ function createWindow(): void {
     recoveryResolve = null
     pending?.(decision)
   }
-  ipcMain.on('recorder:recovery', (_event, decision: RecoveryDecision) =>
-    resolveRecovery(decision)
-  )
+  ipcMain.on('recorder:recovery', (_event, decision: RecoveryDecision) => resolveRecovery(decision))
 
   // === Replay ========================================================
   // Run the recorded steps one-by-one inside the embedded browser. We report
@@ -346,6 +345,8 @@ function createWindow(): void {
       error?: string
       screenshotPath?: string
       aborted?: boolean
+      consoleErrors?: string[]
+      networkErrors?: string[]
     }> => {
       // A dangling pause from a previous replay can never be answered — clear it.
       resolveRecovery({ action: 'abort' })
@@ -379,6 +380,97 @@ function createWindow(): void {
         // to sendInputEvent, which at least delivers JS mouse events.
       }
 
+      // === Failure evidence capture (Day 13) ==========================
+      // While the replay runs, quietly collect what a human debugging the
+      // failure would open DevTools for: the page's own JavaScript errors
+      // (console) and requests that failed or came back 4xx/5xx (network).
+      // Every line is tagged with the step that was running at the time, so
+      // the translator can tell fresh evidence from old noise. Capped — a
+      // page stuck in an error loop must not grow an unbounded array.
+      const consoleErrors: string[] = []
+      const networkErrors: string[] = []
+      let evidenceStep = 0 // index of the step currently running
+      const addEvidence = (arr: string[], line: string): void => {
+        if (arr.length < 30) arr.push(`[step ${evidenceStep + 1}] ${line}`)
+      }
+
+      // Electron 32+ delivers the console params on the event object
+      // (level is a string: 'error' | 'warning' | …); older versions used
+      // positional args with numeric levels. Accept both shapes.
+      const onConsoleMessage = (
+        event: unknown,
+        legacyLevel?: unknown,
+        legacyMessage?: unknown
+      ): void => {
+        const e = event as { level?: unknown; message?: unknown }
+        const level = typeof e?.level === 'string' ? e.level : legacyLevel === 3 ? 'error' : ''
+        if (level !== 'error') return
+        const message = typeof e?.message === 'string' ? e.message : String(legacyMessage ?? '')
+        if (message) addEvidence(consoleErrors, message.slice(0, 300))
+      }
+      embeddedBrowser.webContents.on('console-message', onConsoleMessage)
+
+      // Network watch rides the SAME CDP debugger the hover support attaches
+      // (best-effort: no CDP, no network evidence — never a failed replay).
+      // loadingFailed needs the request's URL, which only requestWillBeSent
+      // carries — so we remember requestId → url as requests start.
+      const requestUrls = new Map<string, string>()
+      const trimUrl = (u: string): string => (u.length > 120 ? u.slice(0, 120) + '…' : u)
+
+      // Day 13 noise tagging: pages talk to OTHER companies' servers too
+      // (analytics, crash reporters) and those fail constantly on real sites.
+      // Mark every captured request as [site] (the site under test) or
+      // [third-party] (someone else's server) — a FACT, not a judgment, so
+      // nothing is ever hidden; readers and the AI just see whose server it was.
+      // "Site" = the registrable domain, approximated as the host's last two
+      // labels (three when the middle one is a registrar label like co.uk's
+      // "co") — www.saucedemo.com and api.saucedemo.com both → saucedemo.com.
+      const GENERIC_SLD = new Set(['co', 'com', 'org', 'net', 'ac', 'gov', 'edu'])
+      const siteOf = (url: string): string => {
+        try {
+          const labels = new URL(url).hostname.split('.')
+          if (labels.length <= 2) return labels.join('.')
+          const take = GENERIC_SLD.has(labels[labels.length - 2]) ? 3 : 2
+          return labels.slice(-take).join('.')
+        } catch {
+          return ''
+        }
+      }
+      const relationTag = (requestUrl: string): string => {
+        const page = siteOf(embeddedBrowser.webContents.getURL())
+        const req = siteOf(requestUrl)
+        if (!page || !req) return ''
+        return req === page ? '[site] ' : '[third-party] '
+      }
+      const onCdpMessage = (_e: unknown, method: string, params: Record<string, unknown>): void => {
+        if (method === 'Network.requestWillBeSent') {
+          const req = params.request as { url?: string } | undefined
+          if (typeof params.requestId === 'string' && req?.url)
+            requestUrls.set(params.requestId, req.url)
+        } else if (method === 'Network.responseReceived') {
+          const res = params.response as { status?: number; url?: string } | undefined
+          if (res?.status && res.status >= 400) {
+            const url = res.url ?? ''
+            addEvidence(networkErrors, `${relationTag(url)}HTTP ${res.status} on ${trimUrl(url)}`)
+          }
+        } else if (method === 'Network.loadingFailed') {
+          // canceled / ERR_ABORTED = a request superseded by navigation —
+          // normal browsing noise, not evidence (same call as loadUrlTolerantly).
+          const errorText = String(params.errorText ?? '')
+          if (params.canceled || !errorText || errorText.includes('ERR_ABORTED')) return
+          const url = requestUrls.get(String(params.requestId)) ?? ''
+          addEvidence(networkErrors, `${relationTag(url)}${errorText} on ${trimUrl(url)}`)
+        }
+      }
+      if (cdpReady) {
+        cdp.on('message', onCdpMessage)
+        try {
+          await cdp.sendCommand('Network.enable')
+        } catch {
+          // network domain unavailable — console evidence still works
+        }
+      }
+
       // Every exit from the replay goes through here so the CDP debugger is
       // always released, pass or fail.
       const finish = (outcome: {
@@ -387,15 +479,21 @@ function createWindow(): void {
         error?: string
         screenshotPath?: string
         aborted?: boolean
+        consoleErrors?: string[]
+        networkErrors?: string[]
       }): {
         ok: boolean
         failedAt?: number
         error?: string
         screenshotPath?: string
         aborted?: boolean
+        consoleErrors?: string[]
+        networkErrors?: string[]
       } => {
+        embeddedBrowser.webContents.removeListener('console-message', onConsoleMessage)
         if (cdpReady) {
           try {
+            cdp.removeListener('message', onCdpMessage)
             cdp.detach()
           } catch {
             // already detached — fine
@@ -413,6 +511,7 @@ function createWindow(): void {
         // Steps turned off in the editor are skipped — leave their row neutral
         // (no running/done/error) so the UI shows them as inert, not run.
         if (step.disabled) continue
+        evidenceStep = i // tag captured console/network lines with this step
         mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
         try {
           if (step.type === 'navigate') {
@@ -508,7 +607,10 @@ function createWindow(): void {
             mainWindow.webContents.send('recorder:replay-paused', {
               index: i,
               error: message,
-              screenshotPath
+              screenshotPath,
+              // Day 13: evidence so far — the Explain button works mid-pause too
+              consoleErrors: consoleErrors.slice(),
+              networkErrors: networkErrors.slice()
             })
             const decision = await new Promise<RecoveryDecision>((resolve) => {
               recoveryResolve = resolve
@@ -532,7 +634,14 @@ function createWindow(): void {
             }
             // 'stop' falls through to the normal failure return below.
           }
-          return finish({ ok: false, failedAt: i, error: message, screenshotPath })
+          return finish({
+            ok: false,
+            failedAt: i,
+            error: message,
+            screenshotPath,
+            consoleErrors: consoleErrors.slice(),
+            networkErrors: networkErrors.slice()
+          })
         }
       }
       return finish({ ok: true })
@@ -559,6 +668,32 @@ function createWindow(): void {
   ipcMain.handle('library:openScreenshot', (_event, path: string) => {
     if (typeof path === 'string' && path.startsWith(libraryDir())) shell.openPath(path)
   })
+
+  // === Failure translator + bug report (Day 13) ======================
+  // The renderer assembles the evidence bundle (it owns the steps and their
+  // human sentences); main runs the translator because spawning the Claude
+  // CLI is an OS-process affair — backstage work, like all disk access.
+  // cwd = the library folder, so the CLI may read failure screenshots
+  // (they live under <library>/_failures) without extra permissions.
+  ipcMain.handle('translator:explain', (_event, evidence: FailureEvidence) =>
+    explainFailure(evidence, libraryDir())
+  )
+
+  // Save a generated bug report as a .md file the user picks a place for.
+  // Same pattern as recorder:export — main owns the disk.
+  ipcMain.handle(
+    'report:save',
+    async (_event, markdown: string, defaultName: string): Promise<string | null> => {
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: 'Save bug report',
+        defaultPath: defaultName || 'bug-report.md',
+        filters: [{ name: 'Markdown', extensions: ['md'] }]
+      })
+      if (result.canceled || !result.filePath) return null
+      await writeFile(result.filePath, markdown, 'utf-8')
+      return result.filePath
+    }
+  )
 
   // === Export ========================================================
   // React generates the Playwright code (it owns the steps); main just saves

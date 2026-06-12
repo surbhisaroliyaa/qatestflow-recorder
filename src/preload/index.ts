@@ -101,6 +101,17 @@ const api = {
     }
   },
 
+  // === Failure translator + bug report (Day 13) ===
+  // Evidence in, plain-English analysis out. Main decides which backend
+  // answers (Claude CLI when available, built-in rules otherwise).
+  translator: {
+    explain: (evidence: unknown): Promise<unknown> =>
+      ipcRenderer.invoke('translator:explain', evidence),
+    // Save a generated bug report; resolves to the path or null on cancel.
+    saveReport: (markdown: string, defaultName: string): Promise<string | null> =>
+      ipcRenderer.invoke('report:save', markdown, defaultName)
+  },
+
   // === Test library (Day 11) — saved tests as JSON files on disk. ===
   // (Shapes typed structurally as unknown here; the renderer gets the named
   // types from index.d.ts — same pattern as recorder.onStep.)

@@ -24,6 +24,8 @@ interface ReplayResult {
   error?: string
   screenshotPath?: string // captured at the failing step (Day 11.5)
   aborted?: boolean // ended by Home mid-recovery — show nothing (Day 12)
+  consoleErrors?: string[] // page JS errors during the run (Day 13)
+  networkErrors?: string[] // failed / 4xx / 5xx requests during the run (Day 13)
 }
 
 interface RecorderAPI {
@@ -54,10 +56,17 @@ interface LibraryAPI {
   openScreenshot: (path: string) => Promise<void>
 }
 
+// === Failure translator (Day 13) ===
+interface TranslatorAPI {
+  explain: (evidence: FailureEvidence) => Promise<FailureAnalysis>
+  saveReport: (markdown: string, defaultName: string) => Promise<string | null>
+}
+
 interface API {
   browser: BrowserAPI
   recorder: RecorderAPI
   library: LibraryAPI
+  translator: TranslatorAPI
 }
 
 declare global {
@@ -129,6 +138,38 @@ declare global {
     index: number
     error: string
     screenshotPath?: string
+    consoleErrors?: string[] // evidence so far — Explain works mid-pause (Day 13)
+    networkErrors?: string[]
+  }
+
+  // === Failure translator (Day 13) ===
+  // Everything known about a failure at the moment it happened — assembled by
+  // the renderer (which owns the steps and their human sentences), enriched
+  // with main's replay-time console/network capture.
+  // MIRROR: same shape as FailureEvidence in src/main/translator.ts.
+  interface FailureEvidence {
+    testName?: string
+    pageUrl: string
+    pageTitle: string
+    stepIndex: number
+    stepText: string
+    stepType: string
+    selector?: string
+    error: string
+    consoleErrors: string[]
+    networkErrors: string[]
+    screenshotPath?: string
+    allSteps: string[]
+  }
+
+  // The diagnosis: WHO is at fault (the verdict) + the story + next action.
+  // source says which backend answered — 'ai' (Claude CLI) or 'rules'.
+  type FailureVerdict = 'app-bug' | 'test-bug' | 'timing' | 'environment' | 'unknown'
+  interface FailureAnalysis {
+    source: 'ai' | 'rules'
+    verdict: FailureVerdict
+    explanation: string
+    suggestion: string
   }
 
   // The human's answer to a pause: retry the step (optionally swapped for a
