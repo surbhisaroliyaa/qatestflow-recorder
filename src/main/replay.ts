@@ -420,3 +420,65 @@ export function buildActionScript(step: ReplayStep): string {
   const tolerant = step.type === 'hover' || step.type === 'assert'
   return `(async () => {${findPrelude(step.candidates ?? [], tolerant)}${action}\n})()`
 }
+
+// === Failure screenshot annotation (Day 12.9, Surbhi's idea) =========
+// Drawn onto the page just before the failure screenshot is captured and
+// erased right after — the markings exist only inside the PNG, the live page
+// (which the Day 12 recovery pause shows) stays clean. Two layers:
+//  1. A red BANNER with the error text — every failure screenshot explains
+//     itself, even when there's no element to point at (not-found, page-level
+//     checks, navigate failures).
+//  2. A red OUTLINE around the culprit element, when the step's ladder can
+//     still resolve one (assert mismatches / wrong-state failures — the
+//     element exists, its state is just wrong). Scrolled into view first:
+//     capturePage photographs only the viewport.
+export function buildFailureMarkScript(step: ReplayStep, error: string): string {
+  const text = JSON.stringify('✗ ' + error.replace(/\s+/g, ' ').slice(0, 140))
+  const banner = `
+    if (document.body) {
+      const banner = document.createElement('div');
+      banner.id = '__qaflow_fail_banner';
+      banner.textContent = ${text};
+      banner.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;' +
+        'top:10px;left:50%;transform:translateX(-50%);max-width:85%;padding:8px 14px;' +
+        'background:#b2423e;color:#fff;border-radius:6px;' +
+        'font:600 13px/1.4 -apple-system,"Segoe UI",Roboto,sans-serif;' +
+        'box-shadow:0 2px 12px rgba(0,0,0,0.5);';
+      document.body.appendChild(banner);
+    }`
+  // No candidates = nothing to outline (navigate / wait / page-level checks).
+  // NOTE: banner comes FIRST — ladderPrelude can return early ("no reliable
+  // selector"), and the banner must already be on the page by then.
+  const outline = step.candidates?.length
+    ? `${ladderPrelude(step.candidates)}
+    let el = null;
+    for (const c of cands) { el = findByCandidate(c); if (el) break; }
+    if (el && document.body) {
+      el.scrollIntoView({ block: 'center' });
+      const r = el.getBoundingClientRect();
+      const box = document.createElement('div');
+      box.id = '__qaflow_fail_box';
+      box.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;' +
+        'left:' + (r.left - 4) + 'px;top:' + (r.top - 4) + 'px;' +
+        'width:' + (r.width + 8) + 'px;height:' + (r.height + 8) + 'px;' +
+        'border:3px solid #e0524d;border-radius:4px;' +
+        'box-shadow:0 0 0 3px rgba(224,82,77,0.35),0 0 18px rgba(224,82,77,0.6);';
+      document.body.appendChild(box);
+    }`
+    : ''
+  return `(() => { try {${banner}${outline}
+    } catch (e) { /* decoration only — never block the screenshot */ }
+    return { ok: true };
+  })()`
+}
+
+// Erase the markings after capture so the live page stays clean.
+export function removeFailureMarkScript(): string {
+  return `(() => {
+    for (const id of ['__qaflow_fail_banner', '__qaflow_fail_box']) {
+      const n = document.getElementById(id);
+      if (n) n.remove();
+    }
+    return { ok: true };
+  })()`
+}

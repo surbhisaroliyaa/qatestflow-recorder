@@ -4,7 +4,12 @@ import { writeFile, mkdir } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
-import { buildActionScript, type ReplayStep } from './replay'
+import {
+  buildActionScript,
+  buildFailureMarkScript,
+  removeFailureMarkScript,
+  type ReplayStep
+} from './replay'
 import {
   saveTest,
   listTests,
@@ -465,6 +470,18 @@ function createWindow(): void {
           // Best-effort: a screenshot problem must never mask the real error.
           let screenshotPath: string | undefined
           try {
+            // Day 12.9: annotate the evidence first — red error banner, plus
+            // an outline around the culprit element when it still resolves.
+            // Draw → capture → erase: the marks live only inside the PNG.
+            try {
+              await embeddedBrowser.webContents.executeJavaScript(
+                buildFailureMarkScript(step, message),
+                true
+              )
+              await wait(120) // let the scroll + overlay paint before capture
+            } catch {
+              // decoration failed — capture the plain screenshot anyway
+            }
             const image = await embeddedBrowser.webContents.capturePage()
             const dir = join(libraryDir(), '_failures')
             await mkdir(dir, { recursive: true })
@@ -472,6 +489,11 @@ function createWindow(): void {
             await writeFile(screenshotPath, image.toPNG())
           } catch {
             screenshotPath = undefined
+          }
+          try {
+            await embeddedBrowser.webContents.executeJavaScript(removeFailureMarkScript(), true)
+          } catch {
+            // page may be gone — nothing to clean
           }
           mainWindow.webContents.send('recorder:replay-progress', {
             index: i,
