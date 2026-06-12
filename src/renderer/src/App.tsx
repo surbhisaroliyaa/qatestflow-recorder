@@ -138,6 +138,17 @@ function App(): React.JSX.Element {
     running: boolean
   } | null>(null)
 
+  // Welcome-screen accordion: which sections are EXPANDED. Starts empty, so
+  // every launch begins compact — section headers only (Surbhi's call);
+  // whatever you open stays open for the rest of the session.
+  const [openSuites, setOpenSuites] = useState<Set<string>>(new Set())
+  const toggleSuite = (key: string): void => {
+    const next = new Set(openSuites)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    setOpenSuites(next)
+  }
+
   // Day 12 — recovery. Non-null while a replay is PAUSED at a failed step
   // (main's loop is holding for our decision: retry / re-pick / skip / stop).
   const [recovery, setRecovery] = useState<ReplayPaused | null>(null)
@@ -845,6 +856,14 @@ function App(): React.JSX.Element {
           {/* === Day 11 + 11.5: saved-test library, grouped into sections === */}
           {(savedTests.length > 0 || suites.length > 0) && (
             <div className="test-library">
+              <div className="library-heading">
+                <span className="library-heading-title">Test Library</span>
+                <span className="library-heading-sub">
+                  {savedTests.length === 0
+                    ? 'your saved test flows will appear here'
+                    : `${savedTests.length} saved test flow${savedTests.length === 1 ? '' : 's'}`}
+                </span>
+              </div>
               {(() => {
                 // Sections in display order: E2E + Daily always shown (even
                 // empty, so they're discoverable), customs after, legacy
@@ -856,11 +875,40 @@ function App(): React.JSX.Element {
                 if (savedTests.some((t) => !t.suite)) groups.push('')
                 return groups.map((suite) => {
                   const tests = savedTests.filter((t) => t.suite === suite)
+                  const suiteKey = suite || '(unsorted)'
+                  const isOpen = openSuites.has(suiteKey)
                   return (
-                    <div key={suite || '(unsorted)'} className="library-section">
+                    <div key={suiteKey} className="library-section">
                       <div className="library-section-header">
-                        <span className="library-title">{suite || 'Unsorted'}</span>
-                        <span className="library-count">{tests.length}</span>
+                        <button
+                          type="button"
+                          className="section-toggle"
+                          onClick={() => toggleSuite(suiteKey)}
+                          aria-expanded={isOpen}
+                          title={isOpen ? 'Collapse section' : 'Expand section'}
+                        >
+                          <span className="section-caret">{isOpen ? '▾' : '▸'}</span>
+                          <span className="library-title">
+                            {suite ? `${suite} test flows` : 'Unsorted'}
+                          </span>
+                          <span className="library-count">{tests.length}</span>
+                          {/* Collapsed: one dot per test — suite health at a
+                              glance without expanding */}
+                          {!isOpen && tests.length > 0 && (
+                            <span className="suite-health">
+                              {tests.slice(0, 10).map((t) => (
+                                <span
+                                  key={t.fileName}
+                                  className={`history-dot ${t.lastRun?.status ?? 'none'}`}
+                                  title={`${t.name}: ${t.lastRun ? `last replay ${t.lastRun.status}` : 'never replayed'}`}
+                                />
+                              ))}
+                              {tests.length > 10 && (
+                                <span className="suite-health-more">+{tests.length - 10}</span>
+                              )}
+                            </span>
+                          )}
+                        </button>
                         <button
                           type="button"
                           className="run-suite-btn"
@@ -875,7 +923,7 @@ function App(): React.JSX.Element {
                           ▶ Run all
                         </button>
                       </div>
-                      {tests.length === 0 ? (
+                      {!isOpen ? null : tests.length === 0 ? (
                         <p className="library-empty">No tests yet — save one with 💾</p>
                       ) : (
                         <ul className="library-list">

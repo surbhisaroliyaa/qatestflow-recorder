@@ -24,8 +24,9 @@ body {
 .welcome {
   height: 100vh;
   display: flex;
-  align-items: center;
   justify-content: center;
+  /* The library can outgrow the window — the page must scroll. */
+  overflow-y: auto;
   padding: 24px;
   text-align: center;
 }
@@ -33,6 +34,10 @@ body {
 .welcome-content {
   max-width: 560px;
   width: 100%;
+  /* margin:auto centers like align-items:center BUT stays reachable when
+     content overflows (a centered flex child clips its top edge
+     irretrievably — the scroll origin is the container's top). */
+  margin: auto;
 }
 
 .logo-text {
@@ -584,16 +589,33 @@ body {
   background: #2a1715;
 }
 
-/* Day 11.5: sections (suites) on the welcome screen */
+/* Day 11.5 sections — restyled as CARDS (Day 12.5 UI polish): each section
+   is a contained box; the header row is the accordion toggle, the test list
+   lives inside the card under a divider. */
 .library-section {
-  margin-bottom: 18px;
+  margin-bottom: 10px;
+  background: #1b212a;
+  border: 1px solid #2c333d;
+  border-radius: 10px;
+  overflow: hidden;
 }
 
 .library-section-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  padding: 6px 10px;
+}
+
+.library-section-header:hover {
+  background: #20262e;
+}
+
+/* The list / empty hint sit inside the card, under a divider. */
+.library-section .library-list,
+.library-section .library-empty {
+  border-top: 1px solid #2c333d;
+  padding: 8px;
 }
 
 .library-section-header .library-title {
@@ -1432,4 +1454,76 @@ body {
 .modal-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* ===================================================
+   WELCOME LIBRARY ACCORDION (Day 12.5 UI fix)
+   =================================================== */
+
+/* The section header is a toggle — click anywhere on it to fold/unfold.
+   flex:1 makes the whole header width clickable; Run all stays at the edge. */
+.section-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.section-toggle:hover .library-title {
+  color: #ccc;
+}
+
+.section-caret {
+  width: 12px;
+  color: #777;
+  font-size: 11px;
+}
+
+/* Collapsed header: one tiny dot per test = suite health at a glance. */
+.suite-health {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
+}
+
+.history-dot.none {
+  background: #555;
+}
+
+.suite-health-more {
+  font-size: 10px;
+  color: #777;
+}
+
+/* Heading above the section cards — names the whole area (Day 12.5). */
+.library-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* Softened version of the logo gradient — ties to the brand without
+   competing with it. */
+.library-heading-title {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  background: linear-gradient(135deg, #8b9cdf 0%, #b4a3d8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.library-heading-sub {
+  font-size: 12px;
+  color: #666;
 }
