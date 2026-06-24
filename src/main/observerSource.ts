@@ -38,7 +38,18 @@ export function observerProgram(): void {
     __qaflowInitPicking?: boolean
     __qaflow?: { setActive: (v: boolean) => void; setPicking: (v: boolean) => void }
   }
-  if (g.__qaflowInstalled) return
+  if (g.__qaflowInstalled) {
+    // Re-injected by main to push a fresh record/pick state. Main re-injects
+    // EVERY frame on a record/pick toggle, because that path reliably reaches
+    // deeply-nested frames that a one-off setActive call can silently miss.
+    // The listeners are already installed; just re-assert the armed state
+    // (baked into the init globals for this run) and bail.
+    if (g.__qaflow) {
+      g.__qaflow.setActive(!!g.__qaflowInitActive)
+      g.__qaflow.setPicking(!!g.__qaflowInitPicking)
+    }
+    return
+  }
   g.__qaflowInstalled = true
 
   // Identity + initial state handed in by main just before this ran.

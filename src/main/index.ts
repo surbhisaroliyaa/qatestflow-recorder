@@ -93,6 +93,20 @@ function createWindow(): void {
   // Re-find the live frame a step was recorded in, by matching the recorded URL
   // chain (ignoring the hash and a trailing slash, which churn harmlessly).
   // Returns the top frame when there's no frame ref (the normal case).
+  // framesInSubtree can momentarily be null / non-iterable while a frame is
+  // navigating or being torn down — which happens nonstop on ad-heavy pages
+  // that spin up and drop many iframes (LetCode's Google ads). Reading it
+  // unguarded crashed the main process. Treat any failure as "no frames now".
+  const subtreeFrames = (frame: Electron.WebFrameMain | null): Electron.WebFrameMain[] => {
+    if (!frame) return []
+    try {
+      const list = frame.framesInSubtree
+      return Array.isArray(list) ? list : []
+    } catch {
+      return []
+    }
+  }
+
   const findFrameNow = (
     ref?: { url: string; name?: string }[]
   ): Electron.WebFrameMain | null => {
@@ -100,14 +114,29 @@ function createWindow(): void {
     if (!ref || !ref.length) return main
     if (!main) return null
     const norm = (u: string): string => u.replace(/#.*$/, '').replace(/\/$/, '')
-    for (const frame of main.framesInSubtree) {
-      if (frame.parent === null) continue // skip the top frame
-      const chain: string[] = []
-      for (let f: Electron.WebFrameMain | null = frame; f && f.parent !== null; f = f.parent) {
-        chain.unshift(f.url)
-      }
-      if (chain.length === ref.length && chain.every((u, i) => norm(u) === norm(ref[i].url))) {
-        return frame
+    // Match a live frame to a recorded one by URL, falling back to the frame
+    // name when the recorded url is missing/blank (older recordings) or the
+    // live url hasn't committed yet — so a blank url can't strand replay.
+    const levelMatches = (
+      live: { url: string; name: string },
+      want: { url: string; name?: string }
+    ): boolean => {
+      if (want.url && norm(live.url) === norm(want.url)) return true
+      if (want.name && live.name === want.name) return true
+      return false
+    }
+    for (const frame of subtreeFrames(main)) {
+      try {
+        if (frame.parent === null) continue // skip the top frame
+        const chain: { url: string; name: string }[] = []
+        for (let f: Electron.WebFrameMain | null = frame; f && f.parent !== null; f = f.parent) {
+          chain.unshift({ url: f.url, name: f.name })
+        }
+        if (chain.length === ref.length && chain.every((c, i) => levelMatches(c, ref[i]))) {
+          return frame
+        }
+      } catch {
+        // frame went away mid-walk — skip it
       }
     }
     return null
@@ -155,11 +184,17 @@ function createWindow(): void {
       return // frame already gone
     }
     if (injectedFrames.has(id)) return
-    injectedFrames.add(id)
     // Bake in this frame's identity + the CURRENT record/pick state, so a frame
     // that loads mid-recording comes up already armed (no race).
     const ref = frameRefOf(frame)
     const url = frame.url
+    // Don't commit an identity until EVERY frame in the chain has a real url.
+    // A first injection that wins while a url is still uncommitted ('') would
+    // bake an empty-url FrameRef that replay could never re-find. Leaving it
+    // out of the injected set lets the next load event re-inject once the urls
+    // are in place. (Top frame has no ref — nothing to guard.)
+    if (ref && ref.some((r) => r.url === '')) return
+    injectedFrames.add(id)
     const boot =
       `window.__qaflowFrame=${JSON.stringify(ref ?? null)};` +
       `window.__qaflowInitActive=${isRecording};` +
@@ -177,22 +212,20 @@ function createWindow(): void {
   // (Re)inject every frame currently in the tree. Cheap to call often: already-
   // injected frames are skipped by the set.
   const injectAllFrames = (): void => {
-    const main = embeddedBrowser.webContents.mainFrame
-    if (!main) return
-    for (const frame of main.framesInSubtree) injectObserver(frame)
+    for (const frame of subtreeFrames(embeddedBrowser.webContents.mainFrame)) {
+      injectObserver(frame)
+    }
   }
 
-  // Push a record/pick state change into every live frame's observer.
-  const setObserverState = (key: 'setActive' | 'setPicking', value: boolean): void => {
-    const main = embeddedBrowser.webContents.mainFrame
-    if (!main) return
-    for (const frame of main.framesInSubtree) {
-      frame
-        .executeJavaScript(`window.__qaflow&&window.__qaflow.${key}(${value})`)
-        .catch(() => {
-          // frame may not be injected yet — it will boot into the baked state
-        })
-    }
+  // Push a record/pick state change into EVERY live frame's observer by
+  // re-injecting from scratch. Re-injection is the one channel that reliably
+  // reaches deeply-nested frames (a one-off setActive call via executeJavaScript
+  // silently missed grandchild frames). Each boot bakes in the current
+  // isRecording/isPicking, and the observer re-asserts that state when it sees
+  // it's already installed — so listeners are never registered twice.
+  const reinjectAllFrames = (): void => {
+    injectedFrames.clear()
+    injectAllFrames()
   }
 
   // Until the user navigates to a real URL, we keep the embedded browser
@@ -324,7 +357,7 @@ function createWindow(): void {
     // A replay paused for recovery (Day 12) can't continue once we've left —
     // answer it with a silent abort so its loop doesn't hang forever.
     resolveRecovery({ action: 'abort' })
-    setObserverState('setActive', false)
+    reinjectAllFrames() // disarm every frame (isRecording is now false)
     resizeEmbedded() // hide the embedded browser
     try {
       embeddedBrowser.webContents.navigationHistory.clear()
@@ -355,7 +388,7 @@ function createWindow(): void {
   ipcMain.handle('recorder:toggle', (_event, resume?: boolean): boolean => {
     isRecording = !isRecording
     // Arm or disarm the observer in every live frame (top page + all iframes).
-    setObserverState('setActive', isRecording)
+    reinjectAllFrames()
     // When a FRESH recording begins, log where we're starting from as step 1.
     if (isRecording && !resume) {
       const url = embeddedBrowser.webContents.getURL()
@@ -429,7 +462,7 @@ function createWindow(): void {
   // selector engine (same as recorded steps) before handing to the UI.
   ipcMain.handle('recorder:setPicking', (_event, active: boolean) => {
     isPicking = active
-    setObserverState('setPicking', active)
+    reinjectAllFrames()
   })
 
   ipcMain.on(
