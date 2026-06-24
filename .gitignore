@@ -72,3 +72,6 @@ Thumbs.db
 ehthumbs.db
 *.swp
 *.swo
+
+# Local test fixtures (Day 15.5 shadow DOM etc.) — not shipped
+fixtures/

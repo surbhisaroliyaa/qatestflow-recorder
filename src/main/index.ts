@@ -917,7 +917,9 @@ function createWindow(): void {
 // If the user types "google.com" we turn it into "https://google.com"
 function normalizeUrl(input: string): string {
   const trimmed = input.trim()
-  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  // Already has a scheme we support (http/https, or file:// for a local page,
+  // e.g. a test fixture) — leave it alone. Otherwise assume a bare domain.
+  if (/^(https?|file):\/\//i.test(trimmed)) return trimmed
   return `https://${trimmed}`
 }
 

@@ -112,7 +112,7 @@ export function observerProgram(): void {
     'mouseover',
     (event) => {
       if (!picking) return
-      const target = event.target as Element | null
+      const target = realTarget(event)
       if (target) moveHighlight(meaningfulTarget(target))
     },
     true
@@ -209,12 +209,41 @@ export function observerProgram(): void {
     return title ? norm(title) : ''
   }
 
-  function queryAll(selector: string): Element[] {
+  // Shadow-piercing querySelectorAll (Day 15.5): all matches in this root, in
+  // DOM order, then (recursively) matches inside every OPEN shadow root. On a
+  // page with no shadow DOM this returns exactly what a plain querySelectorAll
+  // would, so existing capture/dup behaviour is unchanged.
+  // MIRROR WARNING: identical traversal to deepQueryAll in src/main/replay.ts's
+  // resolverHelpers — capture-time dup counting and replay finding must walk in
+  // the SAME order or a recorded .nth(i) lands on the wrong element.
+  function deepQueryAll(selector: string, root: Document | ShadowRoot): Element[] {
+    let out: Element[]
     try {
-      return Array.from(document.querySelectorAll(selector))
+      out = Array.from(root.querySelectorAll(selector))
     } catch {
       return []
     }
+    const hosts = root.querySelectorAll('*')
+    for (const host of Array.from(hosts)) {
+      const sr = host.shadowRoot
+      if (sr) out.push(...deepQueryAll(selector, sr))
+    }
+    return out
+  }
+
+  function queryAll(selector: string): Element[] {
+    return deepQueryAll(selector, document)
+  }
+
+  // The real element under an event. event.target RETARGETS to the shadow host
+  // when the true target is inside an open shadow root; composedPath()[0] is the
+  // actual element. Falls back to event.target for plain (non-shadow) events.
+  // (Closed shadow roots are out of scope — composedPath can't pierce them.)
+  function realTarget(event: Event): Element | null {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : []
+    const first = path[0]
+    if (first instanceof Element) return first
+    return event.target as Element | null
   }
 
   function roleMatches(role: string, name: string): Element[] {
@@ -401,7 +430,7 @@ export function observerProgram(): void {
       if (picking) {
         event.preventDefault()
         event.stopImmediatePropagation()
-        const pickTarget = event.target as Element | null
+        const pickTarget = realTarget(event)
         if (!pickTarget) return
         const el = meaningfulTarget(pickTarget)
         picking = false
@@ -424,7 +453,7 @@ export function observerProgram(): void {
         suppressClickUntil = 0
         return
       }
-      const target = event.target as Element | null
+      const target = realTarget(event)
       if (!target) return
       const el = meaningfulTarget(target)
       const tag = el.tagName.toLowerCase()
@@ -447,44 +476,104 @@ export function observerProgram(): void {
   )
 
   // --- Capture TYPING / SELECTING ---
-  document.addEventListener(
-    'change',
-    (event) => {
-      if (!recording) return
-      const el = event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null
-      if (!el) return
-      const tag = el.tagName.toLowerCase()
+  const onChange = (event: Event): void => {
+    if (!recording) return
+    const el = realTarget(event) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null
+    if (!el) return
+    const tag = el.tagName.toLowerCase()
 
-      if (tag === 'select') {
-        const select = el as HTMLSelectElement
-        const chosen = select.options[select.selectedIndex]
-        postToHost('recorder:event', {
-          type: 'select',
-          facts: collectFacts(select),
-          value: (chosen && chosen.text.trim()) || select.value,
-          frame: FRAME
-        })
-        return
-      }
-
-      if (tag !== 'input' && tag !== 'textarea') return
-      const field = el as HTMLInputElement
-
-      if (enterHandled.has(field)) {
-        enterHandled.delete(field)
-        return
-      }
-
+    if (tag === 'select') {
+      const select = el as HTMLSelectElement
+      const chosen = select.options[select.selectedIndex]
       postToHost('recorder:event', {
-        type: 'type',
-        facts: collectFacts(field),
-        value: field.value,
-        secret: field.type === 'password',
+        type: 'select',
+        facts: collectFacts(select),
+        value: (chosen && chosen.text.trim()) || select.value,
         frame: FRAME
       })
-    },
-    true
-  )
+      return
+    }
+
+    if (tag !== 'input' && tag !== 'textarea') return
+    const field = el as HTMLInputElement
+
+    if (enterHandled.has(field)) {
+      enterHandled.delete(field)
+      return
+    }
+
+    postToHost('recorder:event', {
+      type: 'type',
+      facts: collectFacts(field),
+      value: field.value,
+      secret: field.type === 'password',
+      frame: FRAME
+    })
+  }
+  document.addEventListener('change', onChange, true)
+
+  // Day 15.5: 'change' is composed:false — unlike click/keydown/mouseover it
+  // does NOT cross an open shadow boundary, so the document listener above never
+  // sees typing/selecting INSIDE a shadow root. Attach the SAME handler to every
+  // open shadow root, present and future (each change then fires exactly one
+  // listener — the innermost root's). Closed roots are out of scope.
+  const armedRoots = new WeakSet<ShadowRoot>()
+  const armRoot = (root: ShadowRoot): void => {
+    if (armedRoots.has(root)) return
+    armedRoots.add(root)
+    root.addEventListener('change', onChange, true)
+  }
+  const scanShadowRoots = (root: Document | ShadowRoot | Element): void => {
+    for (const host of Array.from(root.querySelectorAll('*'))) {
+      const sr = host.shadowRoot
+      if (sr) {
+        armRoot(sr)
+        scanShadowRoots(sr)
+      }
+    }
+  }
+  scanShadowRoots(document)
+  // A shadow root created by UPGRADING an existing element (the common case for
+  // custom elements) adds no DOM nodes, so the MutationObserver below can't see
+  // it, and the one-time scan above may run before the page's scripts create
+  // it. Every open root is born via attachShadow, so hook that to arm roots the
+  // instant they appear, whatever the timing. (Patched once; open roots only —
+  // closed roots are out of scope and we can't reach their contents anyway.)
+  try {
+    const proto = Element.prototype as unknown as {
+      attachShadow: (init: ShadowRootInit) => ShadowRoot
+      __qaflowPatched?: boolean
+    }
+    if (!proto.__qaflowPatched) {
+      const original = proto.attachShadow
+      proto.attachShadow = function (this: Element, init: ShadowRootInit): ShadowRoot {
+        const root = original.call(this, init)
+        if (init && init.mode === 'open') armRoot(root)
+        return root
+      }
+      proto.__qaflowPatched = true
+    }
+  } catch {
+    // attachShadow not patchable — the scan + MutationObserver still cover roots
+    // that already exist or arrive as inserted, already-upgraded subtrees
+  }
+  try {
+    new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of Array.from(m.addedNodes)) {
+          if (!(node instanceof Element)) continue
+          if (node.shadowRoot) {
+            armRoot(node.shadowRoot)
+            scanShadowRoots(node.shadowRoot)
+          }
+          scanShadowRoots(node)
+        }
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true })
+  } catch {
+    // no documentElement / MutationObserver unavailable — the install-time scan
+    // still covers every shadow root that existed when we were injected
+  }
 
   // --- Capture ENTER-to-submit (keyboard) ---
   const SUBMITTING_INPUT_TYPES = new Set([
@@ -505,7 +594,7 @@ export function observerProgram(): void {
       if (!recording) return
       if (event.key !== 'Enter' || event.shiftKey) return
 
-      const el = event.target as (HTMLInputElement & HTMLTextAreaElement) | null
+      const el = realTarget(event) as (HTMLInputElement & HTMLTextAreaElement) | null
       if (!el) return
       const tag = el.tagName.toLowerCase()
       if (tag !== 'input' && tag !== 'textarea') return

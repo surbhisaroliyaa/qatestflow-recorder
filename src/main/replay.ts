@@ -50,6 +50,26 @@ function resolverHelpers(): string {
     const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
     const isVisible = (n) => !!(n && (n.offsetWidth || n.offsetHeight || n.getClientRects().length));
 
+    // Shadow-piercing querySelectorAll (Day 15.5): all matches in this root, in
+    // DOM order, then (recursively) matches inside every OPEN shadow root. On a
+    // page with no shadow DOM this returns exactly what a plain querySelectorAll
+    // would, so existing behaviour is unchanged.
+    // MIRROR WARNING: identical to deepQueryAll in src/main/observerSource.ts —
+    // capture-time dup counting and replay finding MUST traverse in the SAME
+    // order or a recorded .nth(i) lands on the wrong element.
+    const deepQueryAll = (sel, root) => {
+      root = root || document;
+      let out;
+      try { out = Array.prototype.slice.call(root.querySelectorAll(sel)); }
+      catch (e) { return []; }
+      const hosts = root.querySelectorAll('*');
+      for (let i = 0; i < hosts.length; i++) {
+        const sr = hosts[i].shadowRoot;
+        if (sr) { const inner = deepQueryAll(sel, sr); for (let j = 0; j < inner.length; j++) out.push(inner[j]); }
+      }
+      return out;
+    };
+
     // Approximate the elements that carry each ARIA role (explicit role="" or
     // the role implied by the tag), mirroring how getByRole searches.
     const ROLE_SELECTORS = {
@@ -80,15 +100,15 @@ function resolverHelpers(): string {
 
     // MIRROR WARNING (Day 10b): byRole/byText must walk the SAME match lists
     // that capture-time duplicate counting walks (collectDup in
-    // src/preload/recorder.ts) — otherwise a recorded .nth(i) lands on the
-    // wrong element. Change one → change both.
+    // src/main/observerSource.ts) — otherwise a recorded .nth(i) lands on the
+    // wrong element. Change one → change both. (Day 15.5: both now pierce
+    // shadow DOM via deepQueryAll — keep that identical on both sides too.)
 
     // All elements matching role + accessible name, in DOM order: exact-name
     // matches win; only if there are none, fall back to "name contains".
     const byRoleAll = (role, name) => {
       const sel = ROLE_SELECTORS[role] || ('[role=' + role + ']');
-      let nodes;
-      try { nodes = Array.from(document.querySelectorAll(sel)); } catch (e) { return []; }
+      const nodes = deepQueryAll(sel, document);
       const want = norm(name);
       if (!want) return nodes;
       const exact = nodes.filter((n) => accName(n) === want);
@@ -102,12 +122,10 @@ function resolverHelpers(): string {
     const byTextAll = (text) => {
       const want = norm(text);
       if (!want) return [];
-      let nodes;
-      try {
-        nodes = Array.from(document.querySelectorAll(
-          'a, button, [role=button], [role=link], label, span, li, p, td, th, h1, h2, h3, h4, h5, h6, div'
-        ));
-      } catch (e) { return []; }
+      const nodes = deepQueryAll(
+        'a, button, [role=button], [role=link], label, span, li, p, td, th, h1, h2, h3, h4, h5, h6, div',
+        document
+      );
       const matches = nodes.filter((n) => norm(n.textContent) === want);
       return matches.filter((m) => !matches.some((o) => o !== m && m.contains(o)));
     };
@@ -117,7 +135,7 @@ function resolverHelpers(): string {
     const findByCandidate = (c) => {
       const at = c.nth || 0;
       try {
-        if (c.css) return document.querySelectorAll(c.css)[at] || null;
+        if (c.css) return deepQueryAll(c.css, document)[at] || null;
         if (c.kind === 'role' && c.role) return byRoleAll(c.role, c.name)[at] || null;
         if (c.kind === 'text' && c.text) return byTextAll(c.text)[at] || null;
       } catch (e) { /* malformed selector — treat as no match */ }
