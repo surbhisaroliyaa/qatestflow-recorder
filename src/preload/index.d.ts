@@ -230,12 +230,28 @@ declare global {
   // (`selector` is the primary; `candidates` are the fallbacks). `type`/
   // `select` also carry the entered/chosen `value`.
   interface RecorderStep {
-    type: 'navigate' | 'click' | 'type' | 'select' | 'press' | 'hover' | 'assert' | 'wait'
+    type:
+      | 'navigate'
+      | 'click'
+      | 'type'
+      | 'select'
+      | 'press'
+      | 'hover'
+      | 'assert'
+      | 'wait'
+      | 'dialog'
+      | 'upload'
+      | 'download'
     label?: string
     // For type/select: the entered value. For assert text/value kinds: the
     // EXPECTED value. For wait: the seconds, as text (editable like any value).
+    // For dialog: the response — prompt's answer text, or 'accept'/'dismiss'
+    // for a confirm (alert has none).
     value?: string
     key?: string // for `press` steps — the key pressed (e.g. 'Enter')
+    // Day 16: which native dialog this step answers (alert/confirm/prompt). The
+    // dialog's message is carried in `label`.
+    dialogKind?: 'alert' | 'confirm' | 'prompt'
     assertKind?: AssertKind // for `assert` steps — which check to make
     attrName?: string // for `attribute` asserts — WHICH attribute to check
     secret?: boolean // password field — value masked on screen / in export

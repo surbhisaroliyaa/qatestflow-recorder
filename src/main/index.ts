@@ -156,6 +156,31 @@ function createWindow(): void {
     }
   }
 
+  // Day 16: tell a frame's injected dialog override how to answer the NEXT
+  // native dialog (when the upcoming step is a `dialog`), and flag that a replay
+  // is in progress so any UNEXPECTED dialog auto-accepts instead of blocking the
+  // run. `frame` is the frame whose action is about to fire the dialog.
+  const armNextDialog = async (
+    frame: Electron.WebFrameMain,
+    nextStep?: ReplayStep
+  ): Promise<void> => {
+    const next = nextStep && !nextStep.disabled && nextStep.type === 'dialog' ? nextStep : null
+    const pending = next
+      ? {
+          kind: next.dialogKind,
+          accept: next.dialogKind === 'confirm' ? next.value !== 'dismiss' : true,
+          text: next.dialogKind === 'prompt' ? next.value ?? '' : undefined
+        }
+      : null
+    try {
+      await frame.executeJavaScript(
+        `window.__qaflowReplaying=true;window.__qaflowNextDialog=${JSON.stringify(pending)};`
+      )
+    } catch {
+      // frame navigated away mid-step — the replay flag / safety net still apply
+    }
+  }
+
   // Recording on/off lives here in main, because main is the hub that merges
   // page events (from the observer) with navigation events (which main owns).
   let isRecording = false
@@ -428,6 +453,70 @@ function createWindow(): void {
     }
   )
 
+  // Day 16: a native dialog (alert/confirm/prompt) the page tried to open. The
+  // injected override auto-answered it; here we record it as a `dialog` step so
+  // it replays/exports as a pre-armed dialog handler. The default answer is
+  // accept (confirm) / the prompt's own default text — both editable after.
+  ipcMain.on(
+    'recorder:dialog',
+    (_event, raw: { kind: 'alert' | 'confirm' | 'prompt'; message?: string; value?: string }) => {
+      if (!isRecording) return
+      sendStep({
+        type: 'dialog',
+        dialogKind: raw.kind,
+        label: raw.message ?? '',
+        value: raw.kind === 'confirm' ? 'accept' : raw.kind === 'prompt' ? raw.value ?? '' : undefined
+      })
+    }
+  )
+
+  // Day 16: a file <input type=file> the user picked file(s) for. The relay
+  // preload resolved the real disk path(s) via webUtils (the page world can't)
+  // plus the input's identifying facts; build the selector with the normal
+  // engine and record an `upload` step. value = the path(s), one per line —
+  // replay sets them via CDP DOM.setFileInputFiles; export → .setInputFiles().
+  ipcMain.on(
+    'recorder:upload',
+    (_event, raw: { facts: ElementFacts; paths: string[]; names?: string[] }) => {
+      if (!isRecording) return
+      const { primary, candidates } = buildSelectors(raw.facts)
+      sendStep({
+        type: 'upload',
+        label: (raw.names ?? []).join(', ') || 'file',
+        value: (raw.paths ?? []).join('\n'),
+        selector: primary,
+        candidates
+      })
+    }
+  )
+
+  // Day 16: downloads — auto-save to a known folder so a download never stalls
+  // a run behind a native "Save as" dialog. Recorded as a `download` step for
+  // visibility; on replay the file simply re-downloads to the same folder.
+  const downloadsDir = join(libraryDir(), '_downloads')
+  mkdir(downloadsDir, { recursive: true }).catch(() => {})
+  embeddedBrowser.webContents.session.on('will-download', (_event, item) => {
+    try {
+      item.setSavePath(join(downloadsDir, item.getFilename()))
+    } catch {
+      // setSavePath rejected (called too late) — let Electron handle it
+    }
+    if (isRecording) sendStep({ type: 'download', label: item.getFilename() })
+  })
+
+  // Day 16: multi-tab / popups. When a page opens a new tab/window (window.open
+  // or a target="_blank" link), FOLLOW it in this same view instead of spawning
+  // a separate window. We DON'T record a navigate step for it — like any link
+  // navigation, it's a consequence of the click that opened it, so the recorded
+  // CLICK reproduces it on replay (recording a navigate here would also land
+  // out of order, since the click is relayed asynchronously). True simultaneous
+  // multi-tab with a tab strip is a much larger feature — parked as backlog.
+  embeddedBrowser.webContents.setWindowOpenHandler((details) => {
+    const url = details.url
+    if (url && url !== 'about:blank') loadUrlTolerantly(url)
+    return { action: 'deny' }
+  })
+
   // Day 15: inject the observer into every frame as pages/iframes load.
   // executeJavaScript reliably reaches any frame (unlike preload-into-sub-
   // frames), and injectObserver bakes in the current record/pick state so a
@@ -693,12 +782,22 @@ function createWindow(): void {
             // already detached — fine
           }
         }
+        // Day 16: replay is over — stop the dialog override from auto-answering
+        // so normal browsing gets its real native dialogs back.
+        embeddedBrowser.webContents
+          .executeJavaScript('window.__qaflowReplaying=false;window.__qaflowNextDialog=null;')
+          .catch(() => {})
         return outcome
       }
 
       // Local copy so a re-pick can swap in a healed step mid-run without
       // mutating the renderer's array (it sends its own update separately).
       const list = steps.slice()
+      // Day 16: flag replay up front so a dialog fired during the very first
+      // load is auto-answered too (armNextDialog re-sets it before each action).
+      embeddedBrowser.webContents
+        .executeJavaScript('window.__qaflowReplaying=true')
+        .catch(() => {})
 
       for (let i = 0; i < list.length; i++) {
         const step = list[i]
@@ -725,6 +824,31 @@ function createWindow(): void {
             // An explicit pause — no element involved, just time (Day 9).
             const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
             await wait(seconds * 1000)
+          } else if (step.type === 'dialog') {
+            // Day 16: a native dialog is answered by PRE-ARMING the page before
+            // the step that triggers it (see armNextDialog below) — by the time
+            // we reach this row the answer was already given. Nothing to do.
+          } else if (step.type === 'download') {
+            // Day 16: a download is a side effect of whatever step triggered it
+            // (session.will-download saved it to _downloads). Nothing to replay.
+          } else if (step.type === 'upload') {
+            // Day 16: set the file(s) on the input. JavaScript can't assign a
+            // file input (security), so use CDP DOM.setFileInputFiles — the same
+            // engine-level channel Playwright's setInputFiles uses.
+            const css = (step.candidates ?? []).map((c) => c.css).find((c): c is string => !!c)
+            const paths = (step.value ?? '').split('\n').filter(Boolean)
+            if (!css) throw new Error('Upload step has no CSS selector for the file input')
+            if (!paths.length) throw new Error('Upload step has no file to set')
+            if (!cdpReady) throw new Error('File upload needs the debugger (CDP), which did not attach')
+            const doc = (await cdp.sendCommand('DOM.getDocument', { depth: 0 })) as {
+              root: { nodeId: number }
+            }
+            const found = (await cdp.sendCommand('DOM.querySelector', {
+              nodeId: doc.root.nodeId,
+              selector: css
+            })) as { nodeId: number }
+            if (!found.nodeId) throw new Error('Could not find the file input on the page')
+            await cdp.sendCommand('DOM.setFileInputFiles', { files: paths, nodeId: found.nodeId })
           } else {
             // Day 15: route the action into the frame it was recorded in (or
             // the top frame for a normal step). The injected script is entirely
@@ -737,6 +861,11 @@ function createWindow(): void {
                 'Could not find the iframe for this step (it never appeared on the page)'
               )
             }
+            // Day 16: if the NEXT step is a dialog, this action is what triggers
+            // it — pre-arm the override in this frame so the dialog answers
+            // itself instead of blocking. Also flag replay so any UNEXPECTED
+            // dialog auto-accepts rather than hanging the run.
+            await armNextDialog(targetFrame, list[i + 1])
             const result = (await targetFrame.executeJavaScript(
               buildActionScript(step),
               true

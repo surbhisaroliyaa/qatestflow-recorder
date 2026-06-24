@@ -87,9 +87,39 @@ export function stepText(step: RecorderStep): string {
       }
     case 'wait':
       return `Wait ${step.value ?? '1'}s`
+    case 'dialog':
+      switch (step.dialogKind) {
+        case 'alert':
+          return `Dismiss alert "${step.label ?? ''}"`
+        case 'confirm':
+          return `${step.value === 'dismiss' ? 'Dismiss' : 'Accept'} confirm "${step.label ?? ''}"`
+        case 'prompt':
+          return `Answer prompt "${step.label ?? ''}" with "${step.value ?? ''}"`
+        default:
+          return 'Handle dialog'
+      }
+    case 'upload': {
+      const n = (step.value ?? '').split('\n').filter(Boolean).length
+      return `Upload ${n > 1 ? `${n} files` : `"${step.label ?? 'file'}"`}`
+    }
+    case 'download':
+      return `Download "${step.label ?? 'file'}"`
     default:
       return JSON.stringify(step)
   }
+}
+
+// Day 16: a dialog is answered by a handler REGISTERED BEFORE the action that
+// triggers it (Playwright's page.once('dialog', …)), so it's emitted just ahead
+// of its trigger by the generator — not as its own line here.
+function dialogHandler(step: RecorderStep): string {
+  if (step.dialogKind === 'confirm' && step.value === 'dismiss') {
+    return `page.once('dialog', (dialog) => dialog.dismiss())`
+  }
+  if (step.dialogKind === 'prompt') {
+    return `page.once('dialog', (dialog) => dialog.accept(${quote(step.value ?? '')}))`
+  }
+  return `page.once('dialog', (dialog) => dialog.accept())`
 }
 
 // The actual Playwright action for one step (without the leading comment).
@@ -187,6 +217,13 @@ function actionFor(step: RecorderStep, baseURL?: string): string | null {
     case 'hover':
       // Playwright's .hover() moves the real mouse — CSS :hover reveals work.
       return `await ${locator}.hover()`
+    case 'upload': {
+      // Day 16: Playwright sets a file input directly with setInputFiles.
+      const paths = (step.value ?? '').split('\n').filter(Boolean)
+      if (!paths.length) return null
+      const arg = paths.length === 1 ? quote(paths[0]) : `[${paths.map(quote).join(', ')}]`
+      return `await ${locator}.setInputFiles(${arg})`
+    }
     default:
       return null
   }
@@ -201,14 +238,29 @@ export function generatePlaywrightTest(
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const enabled = steps.filter((step) => !step.disabled)
-  const body = enabled
-    .map((step) => {
-      const action = actionFor(step, baseURL)
-      if (!action) return null
-      return `  // ${stepText(step)}\n  ${action}`
-    })
-    .filter((line): line is string => line !== null)
-    .join('\n\n')
+  const lines: string[] = []
+  for (let i = 0; i < enabled.length; i++) {
+    const step = enabled[i]
+    // A dialog step has no action of its own — its handler is emitted just
+    // before the action that triggers it (the previous loop iteration).
+    if (step.type === 'dialog') continue
+    // A download is handled by the browser (saved to disk), not a scripted
+    // action — leave a comment so the reader knows it happened.
+    if (step.type === 'download') {
+      lines.push(`  // ${stepText(step)} (saved by the browser — no scripted step)`)
+      continue
+    }
+    // Day 16: if the NEXT step is a dialog, register the handler BEFORE this
+    // action, because Playwright dialog handlers must be set up in advance.
+    const next = enabled[i + 1]
+    if (next && next.type === 'dialog') {
+      lines.push(`  // ${stepText(next)}\n  ${dialogHandler(next)}`)
+    }
+    const action = actionFor(step, baseURL)
+    if (!action) continue
+    lines.push(`  // ${stepText(step)}\n  ${action}`)
+  }
+  const body = lines.join('\n\n')
 
   // Only import expect when an assertion actually uses it.
   const hasAssert = enabled.some((step) => step.type === 'assert')

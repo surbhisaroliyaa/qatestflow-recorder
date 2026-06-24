@@ -69,6 +69,62 @@ export function observerProgram(): void {
     }
   }
 
+  // === Day 16: native dialog capture (alert / confirm / prompt) ========
+  // window.alert/confirm/prompt normally pop a BLOCKING native OS dialog that no
+  // recorder or replay can get past. Intercept them in the page:
+  //  - RECORDING  → record a `dialog` step (kind + message) and auto-respond so
+  //    the take never stalls (confirm→accept, prompt→its default);
+  //  - REPLAY     → answer with what main pre-armed for the next dialog
+  //    (__qaflowNextDialog), or a safe default while replaying so nothing blocks;
+  //  - otherwise (just browsing) → fall through to the real native dialog.
+  const gg = g as typeof g & {
+    __qaflowReplaying?: boolean
+    __qaflowNextDialog?: { kind: string; accept?: boolean; text?: string } | null
+  }
+  const origAlert = window.alert
+  const origConfirm = window.confirm
+  const origPrompt = window.prompt
+  const consumePending = (kind: string): { accept?: boolean; text?: string } | null => {
+    const p = gg.__qaflowNextDialog
+    if (p && p.kind === kind) {
+      gg.__qaflowNextDialog = null
+      return p
+    }
+    return null
+  }
+  window.alert = function (message?: unknown): void {
+    const msg = String(message == null ? '' : message)
+    if (recording) {
+      postToHost('recorder:dialog', { kind: 'alert', message: msg })
+      return
+    }
+    if (consumePending('alert') || gg.__qaflowReplaying) return
+    origAlert.call(window, msg)
+  }
+  window.confirm = function (message?: unknown): boolean {
+    const msg = String(message == null ? '' : message)
+    if (recording) {
+      postToHost('recorder:dialog', { kind: 'confirm', message: msg })
+      return true
+    }
+    const pend = consumePending('confirm')
+    if (pend) return pend.accept !== false
+    if (gg.__qaflowReplaying) return true
+    return origConfirm.call(window, msg)
+  }
+  window.prompt = function (message?: unknown, def?: unknown): string | null {
+    const msg = String(message == null ? '' : message)
+    const fallback = def == null ? '' : String(def)
+    if (recording) {
+      postToHost('recorder:dialog', { kind: 'prompt', message: msg, value: fallback })
+      return fallback
+    }
+    const pend = consumePending('prompt')
+    if (pend) return pend.accept === false ? null : pend.text ?? ''
+    if (gg.__qaflowReplaying) return fallback
+    return origPrompt.call(window, msg, def as string | undefined)
+  }
+
   // === Day 9: ELEMENT PICKER state ===================================
   let highlightBox: HTMLDivElement | null = null
 
@@ -496,6 +552,11 @@ export function observerProgram(): void {
 
     if (tag !== 'input' && tag !== 'textarea') return
     const field = el as HTMLInputElement
+
+    // Day 16: file inputs are handled by the relay preload (only it can resolve
+    // the real disk path, via webUtils — the page world can't). Don't record a
+    // bogus 'type' step carrying the browser's fake "C:\fakepath\…" value.
+    if (field.type === 'file') return
 
     if (enterHandled.has(field)) {
       enterHandled.delete(field)

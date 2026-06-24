@@ -1,4 +1,4 @@
-import { ipcRenderer } from 'electron'
+import { ipcRenderer, webUtils } from 'electron'
 
 // =====================================================================
 // THE RELAY (Day 15 rewrite)
@@ -23,3 +23,42 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (!data || data.__qaflow !== true || typeof data.channel !== 'string') return
   ipcRenderer.send(data.channel, data.payload)
 })
+
+// === Day 16: file upload capture (TOP frame only) ====================
+// The injected observer runs in the PAGE world, where Electron no longer
+// exposes a file's real disk path (File.path was removed). This relay preload
+// runs in an isolated world that DOES have `webUtils.getPathForFile`, so it
+// captures file-input changes itself: resolve the real path(s), gather a few
+// identifying facts (id / name / data-test) so MAIN can build the selector with
+// the normal engine, and forward an `recorder:upload` event. Main records it as
+// an `upload` step only while recording; replay sets the file via CDP.
+document.addEventListener(
+  'change',
+  (event: Event) => {
+    const el = event.target as HTMLInputElement | null
+    if (!el || el.tagName !== 'INPUT' || el.type !== 'file' || !el.files || !el.files.length) return
+    const files = Array.from(el.files)
+    const paths: string[] = []
+    for (const f of files) {
+      try {
+        const p = webUtils.getPathForFile(f)
+        if (p) paths.push(p)
+      } catch {
+        // not resolvable (e.g. a synthetic file) — skip it
+      }
+    }
+    if (!paths.length) return
+    const facts: { tag: string; id?: string; name?: string; testId?: string } = { tag: 'input' }
+    if (el.id) facts.id = el.id
+    const name = el.getAttribute('name')
+    if (name) facts.name = name
+    const testId = el.getAttribute('data-test') || el.getAttribute('data-testid')
+    if (testId) facts.testId = testId
+    ipcRenderer.send('recorder:upload', {
+      facts,
+      paths,
+      names: files.map((f) => f.name)
+    })
+  },
+  true
+)

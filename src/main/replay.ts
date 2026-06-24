@@ -29,6 +29,7 @@ export interface ReplayStep {
   url?: string
   value?: string
   key?: string // for `press` steps — the key pressed (e.g. 'Enter')
+  dialogKind?: string // Day 16: 'alert' | 'confirm' | 'prompt' for `dialog` steps
   assertKind?: string // for `assert` steps — which check to make (Day 9)
   attrName?: string // for `attribute` asserts — which attribute to check (Day 11)
   secret?: boolean
