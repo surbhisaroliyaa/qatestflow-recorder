@@ -199,7 +199,18 @@ declare global {
     // bare-tag last resort, which replay refuses. Warn instead of authoring
     // a step that can never replay.
     unreliable?: boolean
+    // Day 15: set when the picked element is inside an <iframe>, so the
+    // assertion step built from it replays in (and exports for) that frame.
+    frame?: FrameRef
   }
+
+  // === iframes (Day 15) ===
+  // Which (i)frame a step happened in. A chain of frame descriptors from the
+  // OUTERMOST iframe down to the target frame — one entry per nesting level
+  // (usually just one). Absent/empty = the top page (the normal case).
+  // `url` re-finds the frame at replay; `name` (the iframe's name/id) makes a
+  // cleaner frameLocator in the exported Playwright code.
+  type FrameRef = { url: string; name?: string }[]
 
   // One ranked way to locate an element, with a 0–100 stability score.
   interface SelectorCandidate {
@@ -232,6 +243,9 @@ declare global {
     url?: string
     selector?: string
     candidates?: SelectorCandidate[]
+    // Day 15: set when the element lives inside an <iframe> — tells replay
+    // which frame to run in, and export which frameLocator to wrap.
+    frame?: FrameRef
   }
 
   interface Window {

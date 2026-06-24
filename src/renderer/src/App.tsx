@@ -273,7 +273,10 @@ function App(): React.JSX.Element {
                 ...s,
                 label: picked.label,
                 selector: picked.selector,
-                candidates: picked.candidates
+                candidates: picked.candidates,
+                // Day 15: the re-picked element may now live in a different
+                // frame (or none) — carry its frame so replay routes correctly.
+                frame: picked.frame
               }
             : s
         )
@@ -902,7 +905,9 @@ function App(): React.JSX.Element {
         selector: pickedElement.selector,
         candidates: pickedElement.candidates,
         value: assertNeedsValue(assertKind) ? assertValue : undefined,
-        attrName: assertKind === 'attribute' ? assertAttr.trim() : undefined
+        attrName: assertKind === 'attribute' ? assertAttr.trim() : undefined,
+        // Day 15: assert in the same frame the element was picked from.
+        frame: pickedElement.frame
       },
       insertAt
     )

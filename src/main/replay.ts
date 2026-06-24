@@ -35,6 +35,10 @@ export interface ReplayStep {
   disabled?: boolean // turned off in the editor — skipped during replay
   selector?: string
   candidates?: ReplayCandidate[]
+  // Day 15: when set, the element lives inside an <iframe>. The action script
+  // is unchanged (it's all document-relative) — main just runs it in the
+  // matching frame's document instead of the top page. See FrameRef.
+  frame?: { url: string; name?: string }[]
 }
 
 // === The in-page resolver ===========================================

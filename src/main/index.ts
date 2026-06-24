@@ -1,4 +1,12 @@
-import { app, shell, BrowserWindow, ipcMain, WebContentsView, dialog } from 'electron'
+import {
+  app,
+  shell,
+  BrowserWindow,
+  ipcMain,
+  WebContentsView,
+  dialog,
+  webFrameMain
+} from 'electron'
 import { join } from 'path'
 import { writeFile, mkdir } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -21,6 +29,7 @@ import {
   type RunInfo
 } from './library'
 import { explainFailure, type FailureEvidence } from './translator'
+import { observerProgram } from './observerSource'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -50,8 +59,9 @@ function createWindow(): void {
   })
 
   // === The embedded browser — a real Chrome view that loads the website ===
-  // We inject the "recorder" observer preload into every page it loads, so it
-  // can watch for clicks/typing while recording is ON.
+  // The "recorder" preload below is now just a RELAY (it loads in the top frame
+  // only). The actual observer is INJECTED into every frame by main (see
+  // injectObserver), because Electron's preload-into-sub-frames was unreliable.
   const embeddedBrowser = new WebContentsView({
     webPreferences: {
       preload: join(__dirname, '../preload/recorder.js'),
@@ -60,9 +70,130 @@ function createWindow(): void {
   })
   mainWindow.contentView.addChildView(embeddedBrowser)
 
+  // === iframe plumbing (Day 15) ======================================
+  // The observer is injected into every frame and reports WHICH frame each
+  // event came from (a URL chain). These helpers describe a frame's identity
+  // and re-find it at replay time.
+
+  // Describe the frame an observer event arrived from, as a chain of
+  // { url, name } from the OUTERMOST iframe down to it. Returns undefined for
+  // the top page (its steps need no frame routing). Frame internal ids change
+  // on every load, so we record the stable URL (+ name) to re-find it later.
+  const frameRefOf = (
+    frame: Electron.WebFrameMain | null
+  ): { url: string; name?: string }[] | undefined => {
+    if (!frame || frame.parent === null) return undefined
+    const chain: { url: string; name?: string }[] = []
+    for (let f: Electron.WebFrameMain | null = frame; f && f.parent !== null; f = f.parent) {
+      chain.unshift({ url: f.url, name: f.name || undefined })
+    }
+    return chain.length ? chain : undefined
+  }
+
+  // Re-find the live frame a step was recorded in, by matching the recorded URL
+  // chain (ignoring the hash and a trailing slash, which churn harmlessly).
+  // Returns the top frame when there's no frame ref (the normal case).
+  const findFrameNow = (
+    ref?: { url: string; name?: string }[]
+  ): Electron.WebFrameMain | null => {
+    const main = embeddedBrowser.webContents.mainFrame
+    if (!ref || !ref.length) return main
+    if (!main) return null
+    const norm = (u: string): string => u.replace(/#.*$/, '').replace(/\/$/, '')
+    for (const frame of main.framesInSubtree) {
+      if (frame.parent === null) continue // skip the top frame
+      const chain: string[] = []
+      for (let f: Electron.WebFrameMain | null = frame; f && f.parent !== null; f = f.parent) {
+        chain.unshift(f.url)
+      }
+      if (chain.length === ref.length && chain.every((u, i) => norm(u) === norm(ref[i].url))) {
+        return frame
+      }
+    }
+    return null
+  }
+
+  // An iframe may still be loading when replay reaches its step, so poll for
+  // it (same idea as the element finder waiting for an element to appear).
+  const resolveFrame = async (
+    ref?: { url: string; name?: string }[]
+  ): Promise<Electron.WebFrameMain | null> => {
+    const deadline = Date.now() + 8000
+    for (;;) {
+      const frame = findFrameNow(ref)
+      if (frame) return frame
+      if (Date.now() > deadline) return null
+      await wait(150)
+    }
+  }
+
   // Recording on/off lives here in main, because main is the hub that merges
   // page events (from the observer) with navigation events (which main owns).
   let isRecording = false
+
+  // Pick mode on/off, mirrored here too so a frame can be injected already in
+  // the right state, and so toggling pick updates frames that are already live.
+  let isPicking = false
+
+  // === Observer injection (Day 15) ===================================
+  // We inject the observer into every frame ourselves (executeJavaScript is
+  // reliable on any frame, any origin — unlike preload-into-sub-frames). The
+  // observer runs in the page world and posts its events up to the top frame,
+  // where the relay preload forwards them to main. Arming + this frame's
+  // identity are handed in as globals set right before the program runs.
+  //
+  // Frames are tracked by frameTreeNodeId so we inject each one once; a frame
+  // that navigates (fresh document) is dropped from the set and re-injected.
+  const injectedFrames = new Set<number>()
+
+  const injectObserver = (frame: Electron.WebFrameMain | null): void => {
+    if (!frame) return
+    let id: number
+    try {
+      id = frame.frameTreeNodeId
+    } catch {
+      return // frame already gone
+    }
+    if (injectedFrames.has(id)) return
+    injectedFrames.add(id)
+    // Bake in this frame's identity + the CURRENT record/pick state, so a frame
+    // that loads mid-recording comes up already armed (no race).
+    const ref = frameRefOf(frame)
+    const url = frame.url
+    const boot =
+      `window.__qaflowFrame=${JSON.stringify(ref ?? null)};` +
+      `window.__qaflowInitActive=${isRecording};` +
+      `window.__qaflowInitPicking=${isPicking};` +
+      `(${observerProgram.toString()})();`
+    frame
+      .executeJavaScript(boot)
+      .then(() => console.log('[diag] injected →', ref ? JSON.stringify(ref) : 'TOP', url))
+      .catch(() => {
+        // injection can fail on a frame that's navigating — allow a retry later
+        injectedFrames.delete(id)
+      })
+  }
+
+  // (Re)inject every frame currently in the tree. Cheap to call often: already-
+  // injected frames are skipped by the set.
+  const injectAllFrames = (): void => {
+    const main = embeddedBrowser.webContents.mainFrame
+    if (!main) return
+    for (const frame of main.framesInSubtree) injectObserver(frame)
+  }
+
+  // Push a record/pick state change into every live frame's observer.
+  const setObserverState = (key: 'setActive' | 'setPicking', value: boolean): void => {
+    const main = embeddedBrowser.webContents.mainFrame
+    if (!main) return
+    for (const frame of main.framesInSubtree) {
+      frame
+        .executeJavaScript(`window.__qaflow&&window.__qaflow.${key}(${value})`)
+        .catch(() => {
+          // frame may not be injected yet — it will boot into the baked state
+        })
+    }
+  }
 
   // Until the user navigates to a real URL, we keep the embedded browser
   // hidden (zero size) so the React welcome page is visible across the
@@ -193,7 +324,7 @@ function createWindow(): void {
     // A replay paused for recovery (Day 12) can't continue once we've left —
     // answer it with a silent abort so its loop doesn't hang forever.
     resolveRecovery({ action: 'abort' })
-    embeddedBrowser.webContents.send('recorder:set-active', false)
+    setObserverState('setActive', false)
     resizeEmbedded() // hide the embedded browser
     try {
       embeddedBrowser.webContents.navigationHistory.clear()
@@ -223,8 +354,8 @@ function createWindow(): void {
   // step (the existing list already begins with one), we just append more.
   ipcMain.handle('recorder:toggle', (_event, resume?: boolean): boolean => {
     isRecording = !isRecording
-    // Arm or disarm the observer living inside the current page.
-    embeddedBrowser.webContents.send('recorder:set-active', isRecording)
+    // Arm or disarm the observer in every live frame (top page + all iframes).
+    setObserverState('setActive', isRecording)
     // When a FRESH recording begins, log where we're starting from as step 1.
     if (isRecording && !resume) {
       const url = embeddedBrowser.webContents.getURL()
@@ -241,9 +372,20 @@ function createWindow(): void {
     'recorder:event',
     (
       _event,
-      raw: { type: string; facts: ElementFacts; value?: string; secret?: boolean; key?: string }
+      raw: {
+        type: string
+        facts: ElementFacts
+        value?: string
+        secret?: boolean
+        key?: string
+        // Day 15: which frame this fired in, baked in by the injected observer
+        // (every event is relayed through the top frame, so we can't read it
+        // from the IPC sender — it travels in the payload).
+        frame?: { url: string; name?: string }[] | null
+      }
     ) => {
       if (!isRecording) return
+      console.log('[diag] event', raw.type, 'frame=', JSON.stringify(raw.frame ?? null))
       const { primary, candidates } = buildSelectors(raw.facts)
       sendStep({
         type: raw.type,
@@ -252,23 +394,42 @@ function createWindow(): void {
         secret: raw.secret,
         key: raw.key,
         selector: primary,
-        candidates
+        candidates,
+        frame: raw.frame ?? undefined
       })
     }
   )
 
-  // Every page load gives us a fresh copy of the observer that starts OFF
-  // (its `recording` flag resets to false). If we're recording, re-arm it.
-  embeddedBrowser.webContents.on('did-finish-load', () => {
-    if (isRecording) embeddedBrowser.webContents.send('recorder:set-active', true)
-  })
+  // Day 15: inject the observer into every frame as pages/iframes load.
+  // executeJavaScript reliably reaches any frame (unlike preload-into-sub-
+  // frames), and injectObserver bakes in the current record/pick state so a
+  // frame that appears mid-recording comes up already armed — no timing race.
+  embeddedBrowser.webContents.on('did-finish-load', () => injectAllFrames())
+  embeddedBrowser.webContents.on('did-frame-finish-load', () => injectAllFrames())
+  embeddedBrowser.webContents.on(
+    'did-frame-navigate',
+    (_e, _url, _code, _status, _isMainFrame, frameProcessId, frameRoutingId) => {
+      // A frame navigated to a fresh document — its old observer is gone. Drop
+      // it from the injected set so it gets the observer again, then inject now.
+      const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
+      if (frame) {
+        try {
+          injectedFrames.delete(frame.frameTreeNodeId)
+        } catch {
+          // frame gone — nothing to drop
+        }
+      }
+      injectAllFrames()
+    }
+  )
 
   // === Element picker (Day 9) ========================================
   // The renderer turns pick mode on/off; the observer in the page does the
   // pointing. A picked element comes back as raw facts — run them through the
   // selector engine (same as recorded steps) before handing to the UI.
   ipcMain.handle('recorder:setPicking', (_event, active: boolean) => {
-    embeddedBrowser.webContents.send('recorder:set-picking', active)
+    isPicking = active
+    setObserverState('setPicking', active)
   })
 
   ipcMain.on(
@@ -281,6 +442,8 @@ function createWindow(): void {
         inputValue?: string
         disabled?: boolean
         checked?: boolean
+        // Day 15: baked-in frame of the picked element (see recorder:event).
+        frame?: { url: string; name?: string }[] | null
       }
     ) => {
       const { primary, candidates } = buildSelectors(raw.facts)
@@ -302,7 +465,10 @@ function createWindow(): void {
         inputValue: raw.inputValue,
         disabled: raw.disabled,
         checked: raw.checked,
-        groupCount
+        groupCount,
+        // Day 15: if the picked element is inside an iframe, the assertion (or
+        // recovery heal) built from it must replay in — and export for — that frame.
+        frame: raw.frame ?? undefined
       })
     }
   )
@@ -532,12 +698,21 @@ function createWindow(): void {
             const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
             await wait(seconds * 1000)
           } else {
-            // The injected finder resolves the element through the full
-            // candidate ladder (role / text / CSS), strongest-first.
-            const result = await embeddedBrowser.webContents.executeJavaScript(
+            // Day 15: route the action into the frame it was recorded in (or
+            // the top frame for a normal step). The injected script is entirely
+            // document-relative, so it needs no changes — only the frame it
+            // runs in differs. The finder still resolves the element through
+            // the full candidate ladder (role / text / CSS), strongest-first.
+            const targetFrame = await resolveFrame(step.frame)
+            if (!targetFrame) {
+              throw new Error(
+                'Could not find the iframe for this step (it never appeared on the page)'
+              )
+            }
+            const result = (await targetFrame.executeJavaScript(
               buildActionScript(step),
               true
-            )
+            )) as { ok: boolean; error?: string; hoverAt?: { x: number; y: number } } | null
             if (!result || !result.ok) throw new Error(result?.error || 'Action failed')
             // A hover step: the page script located the trigger and returned
             // its center. Move the engine-level mouse there via CDP (sets CSS

@@ -11,6 +11,18 @@ function quote(value: string): string {
   return JSON.stringify(value)
 }
 
+// Day 15: when a step happened inside an <iframe>, its locator must be scoped
+// to that frame with page.frameLocator(...). Prefer the frame's name/id for a
+// stable selector, falling back to its src URL; nested frames chain. A normal
+// (top-page) step just uses `page`.
+function frameBase(frame?: FrameRef): string {
+  if (!frame || !frame.length) return 'page'
+  return frame.reduce((base, f) => {
+    const sel = f.name ? `iframe[name=${quote(f.name)}]` : `iframe[src=${quote(f.url)}]`
+    return `${base}.frameLocator(${quote(sel)})`
+  }, 'page')
+}
+
 // Playwright's toHaveURL(string) demands the FULL exact URL — too brittle for
 // a "URL contains" check (query params, session ids). A regex does partial
 // matching, so we export one — with the user's text escaped, or "/inventory.html"
@@ -108,7 +120,8 @@ function actionFor(step: RecorderStep, baseURL?: string): string | null {
   }
 
   if (!step.selector) return null
-  const locator = `page.${step.selector}`
+  const base = frameBase(step.frame)
+  const locator = `${base}.${step.selector}`
 
   // Assertions translate 1:1 to Playwright's expect() matchers.
   if (step.type === 'assert') {
@@ -149,7 +162,7 @@ function actionFor(step: RecorderStep, baseURL?: string): string | null {
         // count check is about the GROUP, so assert on the selector minus nth.
         const group = (step.selector ?? '').replace(/\.nth\(\d+\)$/, '')
         const n = Math.max(0, parseInt(step.value ?? '0', 10) || 0)
-        return `await expect(page.${group}).toHaveCount(${n})`
+        return `await expect(${base}.${group}).toHaveCount(${n})`
       }
       default:
         return `await expect(${locator}).toBeVisible()`
