@@ -187,7 +187,6 @@ function createWindow(): void {
     // Bake in this frame's identity + the CURRENT record/pick state, so a frame
     // that loads mid-recording comes up already armed (no race).
     const ref = frameRefOf(frame)
-    const url = frame.url
     // Don't commit an identity until EVERY frame in the chain has a real url.
     // A first injection that wins while a url is still uncommitted ('') would
     // bake an empty-url FrameRef that replay could never re-find. Leaving it
@@ -200,13 +199,10 @@ function createWindow(): void {
       `window.__qaflowInitActive=${isRecording};` +
       `window.__qaflowInitPicking=${isPicking};` +
       `(${observerProgram.toString()})();`
-    frame
-      .executeJavaScript(boot)
-      .then(() => console.log('[diag] injected →', ref ? JSON.stringify(ref) : 'TOP', url))
-      .catch(() => {
-        // injection can fail on a frame that's navigating — allow a retry later
-        injectedFrames.delete(id)
-      })
+    frame.executeJavaScript(boot).catch(() => {
+      // injection can fail on a frame that's navigating — allow a retry later
+      injectedFrames.delete(id)
+    })
   }
 
   // (Re)inject every frame currently in the tree. Cheap to call often: already-
@@ -418,7 +414,6 @@ function createWindow(): void {
       }
     ) => {
       if (!isRecording) return
-      console.log('[diag] event', raw.type, 'frame=', JSON.stringify(raw.frame ?? null))
       const { primary, candidates } = buildSelectors(raw.facts)
       sendStep({
         type: raw.type,
