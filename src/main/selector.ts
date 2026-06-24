@@ -118,7 +118,10 @@ export function buildSelectors(facts: ElementFacts): BuiltSelector {
           kind: 'testId',
           score: 95,
           locator: `getByTestId('${esc(facts.testId)}')`,
-          css: `[data-test="${esc(facts.testId)}"]`
+          // Match BOTH conventions — the element may carry data-test OR
+          // data-testid (we read either as the test id), and getByTestId in
+          // export defaults to data-testid. Mirrors collectDup's both-attr count.
+          css: `[data-test="${esc(facts.testId)}"], [data-testid="${esc(facts.testId)}"]`
         },
         dup.testId
       )

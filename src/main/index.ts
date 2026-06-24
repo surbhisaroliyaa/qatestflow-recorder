@@ -817,8 +817,10 @@ function createWindow(): void {
               // a page IS loading, just not via the original request. Treat
               // as success; the next step's smart-wait does the real
               // verifying. Anything else (DNS, refused) fails honestly.
+              // Match the name AND the numeric code -3: Electron 39 sometimes
+              // reports just "(-3) loading 'url'" with no ERR_ABORTED text.
               const message = err instanceof Error ? err.message : String(err)
-              if (!message.includes('ERR_ABORTED')) throw err
+              if (!message.includes('ERR_ABORTED') && !message.includes('(-3)')) throw err
             }
           } else if (step.type === 'wait') {
             // An explicit pause — no element involved, just time (Day 9).
@@ -835,20 +837,38 @@ function createWindow(): void {
             // Day 16: set the file(s) on the input. JavaScript can't assign a
             // file input (security), so use CDP DOM.setFileInputFiles — the same
             // engine-level channel Playwright's setInputFiles uses.
-            const css = (step.candidates ?? []).map((c) => c.css).find((c): c is string => !!c)
+            const cssList = (step.candidates ?? [])
+              .map((c) => c.css)
+              .filter((c): c is string => !!c)
             const paths = (step.value ?? '').split('\n').filter(Boolean)
-            if (!css) throw new Error('Upload step has no CSS selector for the file input')
+            if (!cssList.length) throw new Error('Upload step has no CSS selector for the file input')
             if (!paths.length) throw new Error('Upload step has no file to set')
             if (!cdpReady) throw new Error('File upload needs the debugger (CDP), which did not attach')
-            const doc = (await cdp.sendCommand('DOM.getDocument', { depth: 0 })) as {
-              root: { nodeId: number }
+            // Poll for the input — it may still be loading after a navigation,
+            // the same smart-wait every other step gets. Try the candidate
+            // selectors strongest-first (like the normal finder, so a weak
+            // primary can fall back), re-fetching the document each tick since
+            // DOM node ids go stale.
+            let fileNodeId = 0
+            const uploadDeadline = Date.now() + 8000
+            for (;;) {
+              const doc = (await cdp.sendCommand('DOM.getDocument', { depth: 0 })) as {
+                root: { nodeId: number }
+              }
+              for (const sel of cssList) {
+                const found = (await cdp
+                  .sendCommand('DOM.querySelector', { nodeId: doc.root.nodeId, selector: sel })
+                  .catch(() => ({ nodeId: 0 }))) as { nodeId: number }
+                if (found.nodeId) {
+                  fileNodeId = found.nodeId
+                  break
+                }
+              }
+              if (fileNodeId || Date.now() > uploadDeadline) break
+              await wait(150)
             }
-            const found = (await cdp.sendCommand('DOM.querySelector', {
-              nodeId: doc.root.nodeId,
-              selector: css
-            })) as { nodeId: number }
-            if (!found.nodeId) throw new Error('Could not find the file input on the page')
-            await cdp.sendCommand('DOM.setFileInputFiles', { files: paths, nodeId: found.nodeId })
+            if (!fileNodeId) throw new Error('Could not find the file input on the page')
+            await cdp.sendCommand('DOM.setFileInputFiles', { files: paths, nodeId: fileNodeId })
           } else {
             // Day 15: route the action into the frame it was recorded in (or
             // the top frame for a normal step). The injected script is entirely
