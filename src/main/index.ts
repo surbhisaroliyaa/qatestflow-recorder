@@ -459,13 +459,28 @@ function createWindow(): void {
   // accept (confirm) / the prompt's own default text — both editable after.
   ipcMain.on(
     'recorder:dialog',
-    (_event, raw: { kind: 'alert' | 'confirm' | 'prompt'; message?: string; value?: string }) => {
+    (
+      _event,
+      raw: {
+        kind: 'alert' | 'confirm' | 'prompt'
+        message?: string
+        value?: string
+        accept?: boolean // confirm: what the user actually chose
+      }
+    ) => {
       if (!isRecording) return
       sendStep({
         type: 'dialog',
         dialogKind: raw.kind,
         label: raw.message ?? '',
-        value: raw.kind === 'confirm' ? 'accept' : raw.kind === 'prompt' ? raw.value ?? '' : undefined
+        value:
+          raw.kind === 'confirm'
+            ? raw.accept === false
+              ? 'dismiss'
+              : 'accept'
+            : raw.kind === 'prompt'
+              ? raw.value ?? ''
+              : undefined
       })
     }
   )

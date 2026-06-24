@@ -92,9 +92,13 @@ export function observerProgram(): void {
     }
     return null
   }
+  // While RECORDING we show the REAL dialog so you answer it yourself (type the
+  // prompt, pick Ok/Cancel) and record your actual answer. The "never block"
+  // rule only matters on REPLAY (unattended), where we auto-answer instead.
   window.alert = function (message?: unknown): void {
     const msg = String(message == null ? '' : message)
     if (recording) {
+      origAlert.call(window, msg)
       postToHost('recorder:dialog', { kind: 'alert', message: msg })
       return
     }
@@ -104,8 +108,9 @@ export function observerProgram(): void {
   window.confirm = function (message?: unknown): boolean {
     const msg = String(message == null ? '' : message)
     if (recording) {
-      postToHost('recorder:dialog', { kind: 'confirm', message: msg })
-      return true
+      const ok = origConfirm.call(window, msg)
+      postToHost('recorder:dialog', { kind: 'confirm', message: msg, accept: ok })
+      return ok
     }
     const pend = consumePending('confirm')
     if (pend) return pend.accept !== false
@@ -116,6 +121,10 @@ export function observerProgram(): void {
     const msg = String(message == null ? '' : message)
     const fallback = def == null ? '' : String(def)
     if (recording) {
+      // Electron has NO native prompt() box (unlike alert/confirm), so there's
+      // nothing to type into during recording. Record the prompt with its
+      // default answer; the user edits the step (✎) to set the real answer,
+      // which replay then enters. Return the default so the page proceeds.
       postToHost('recorder:dialog', { kind: 'prompt', message: msg, value: fallback })
       return fallback
     }

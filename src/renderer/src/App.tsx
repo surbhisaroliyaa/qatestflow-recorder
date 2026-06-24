@@ -823,6 +823,11 @@ function App(): React.JSX.Element {
     if (step.type === 'assert' && step.assertKind && assertNeedsValue(step.assertKind)) {
       return step.value ?? ''
     }
+    // Day 16: a prompt's answer text, or a confirm's 'accept'/'dismiss', is
+    // editable; an alert has no answer to edit.
+    if (step.type === 'dialog' && step.dialogKind !== 'alert') {
+      return step.value ?? ''
+    }
     return null
   }
 
