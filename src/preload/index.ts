@@ -48,9 +48,34 @@ const api = {
     },
 
     // Save the generated Playwright code to a .ts file the user picks.
-    // Resolves to the saved file path, or null if cancelled.
-    exportTest: (code: string): Promise<string | null> =>
-      ipcRenderer.invoke('recorder:export', code),
+    // Resolves to the saved file path, or null if cancelled. `fixturePaths`
+    // (Day 16+) are the upload files to copy into a fixtures/ folder next to
+    // the saved spec, so the exported test is portable.
+    exportTest: (code: string, fixturePaths?: string[]): Promise<string | null> =>
+      ipcRenderer.invoke('recorder:export', code, fixturePaths),
+
+    // Day 16(+): pick a different file for an upload step. Shows an OS open
+    // dialog; resolves to the chosen file's stored path, or null if cancelled.
+    pickUploadFile: (): Promise<string | null> => ipcRenderer.invoke('recorder:pickUploadFile'),
+
+    // Day 16(+): reveal a downloaded file in the OS file explorer.
+    revealDownload: (path: string): Promise<void> =>
+      ipcRenderer.invoke('recorder:revealDownload', path),
+
+    // Day 16(+): a download STARTED — for an immediate "downloading…" toast.
+    onDownloadStart: (callback: (info: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, info: unknown): void => callback(info)
+      ipcRenderer.on('recorder:download-start', listener)
+      return () => ipcRenderer.removeListener('recorder:download-start', listener)
+    },
+
+    // Day 16(+): a download finished (during recording or replay) — for the
+    // confirmation toast. Returns an unsubscribe fn.
+    onDownloadDone: (callback: (info: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, info: unknown): void => callback(info)
+      ipcRenderer.on('recorder:download-done', listener)
+      return () => ipcRenderer.removeListener('recorder:download-done', listener)
+    },
 
     // Replay the given steps in the embedded browser. Resolves when done
     // (or at the first failed step). `interactive` true (Day 12) makes a

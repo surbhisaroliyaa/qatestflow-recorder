@@ -4,6 +4,13 @@ import { generateBugReport, bugReportFileName } from './bugReport'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
+// Day 16(+): human-friendly byte size for the download toast.
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 // Day 9: the checks offered by the assertion chooser, in display order.
 // checked/unchecked only make sense on a checkbox/radio — the chooser hides
 // them unless the picked element reported a live `checked` state (Day 11).
@@ -195,6 +202,11 @@ function App(): React.JSX.Element {
   // A re-pick landed on an element with no stable hooks — explain why the
   // heal was refused (shown inside the recovery panel).
   const [recoveryWarning, setRecoveryWarning] = useState<string | null>(null)
+  // Day 16(+): a transient download toast (record + replay). 'downloading' is
+  // shown immediately on start; it resolves to 'done' (ok/empty/failed).
+  const [downloadToast, setDownloadToast] = useState<
+    { name: string; phase: 'downloading' } | (DownloadInfo & { phase: 'done' }) | null
+  >(null)
   // Mirrors for the onPicked subscription: it's registered once (empty deps),
   // so it reads CURRENT values through refs instead of stale closed-over state.
   const repickIndexRef = useRef<number | null>(null)
@@ -322,6 +334,31 @@ function App(): React.JSX.Element {
     return unsubscribe
   }, [])
 
+  // Day 16(+): download toast — show "downloading…" the instant it starts, then
+  // resolve to the finished state. Works during record AND replay. A finished
+  // toast auto-dismisses; the in-progress one stays until 'done' arrives.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const clearTimer = (): void => {
+      if (timer) clearTimeout(timer)
+      timer = null
+    }
+    const unsubStart = window.api.recorder.onDownloadStart((info) => {
+      clearTimer()
+      setDownloadToast({ name: info.name, phase: 'downloading' })
+    })
+    const unsubDone = window.api.recorder.onDownloadDone((info) => {
+      clearTimer()
+      setDownloadToast({ ...info, phase: 'done' })
+      timer = setTimeout(() => setDownloadToast(null), 4500)
+    })
+    return () => {
+      clearTimer()
+      unsubStart()
+      unsubDone()
+    }
+  }, [])
+
   // The embedded browser is a native pane that paints over our UI, so while
   // any full-window overlay is open (export modal, suite summary) we ask main
   // to hide it (else it covers the modal).
@@ -441,7 +478,16 @@ function App(): React.JSX.Element {
   // Save the previewed code to a .ts file (main shows the OS save dialog).
   const handleSaveExport = async (): Promise<void> => {
     if (!exportCode) return
-    const path = await window.api.recorder.exportTest(exportCode)
+    // Day 16(+): gather the upload files this test references so main can copy
+    // them into a fixtures/ folder next to the saved spec (portable export).
+    const fixturePaths = Array.from(
+      new Set(
+        steps
+          .filter((s) => s.type === 'upload' && !s.disabled && s.value)
+          .flatMap((s) => (s.value ?? '').split('\n').filter(Boolean))
+      )
+    )
+    const path = await window.api.recorder.exportTest(exportCode, fixturePaths)
     if (path) setSavedPath(path)
   }
 
@@ -828,6 +874,9 @@ function App(): React.JSX.Element {
     if (step.type === 'dialog' && step.dialogKind !== 'alert') {
       return step.value ?? ''
     }
+    // Day 16(+): a download step's expected filename to verify (non-empty is
+    // always checked; this is the "correct file" part).
+    if (step.type === 'download') return step.value ?? step.label ?? ''
     return null
   }
 
@@ -925,7 +974,17 @@ function App(): React.JSX.Element {
     insertStep({ type: 'wait', value: '2' }, at)
   }
 
-  const handleStartEdit = (i: number): void => {
+  const handleStartEdit = async (i: number): Promise<void> => {
+    // Day 16(+): an upload step isn't text-editable — its "value" is a file
+    // path. The ✎ instead opens an OS file picker; the chosen file is copied
+    // into the library and swapped into the step (label = the new filename).
+    if (steps[i].type === 'upload') {
+      const newPath = await window.api.recorder.pickUploadFile()
+      if (!newPath) return
+      const name = newPath.split(/[\\/]/).pop() ?? 'file'
+      editSteps(steps.map((s, idx) => (idx === i ? { ...s, value: newPath, label: name } : s)))
+      return
+    }
     const current = editableValue(steps[i])
     if (current === null) return
     setEditValue(current)
@@ -1137,6 +1196,25 @@ function App(): React.JSX.Element {
   // === Chrome view — shown once user has navigated ===
   return (
     <div className="app">
+      {/* Day 16(+): download confirmation toast — auto-clears after a few sec.
+          Three states: ok (has content), empty (downloaded but 0 bytes), and
+          failed (transfer didn't finish). */}
+      {downloadToast &&
+        (() => {
+          if (downloadToast.phase === 'downloading') {
+            return (
+              <div className="download-toast progress">⬇ Downloading {downloadToast.name}…</div>
+            )
+          }
+          const empty = downloadToast.completed && downloadToast.bytes <= 0
+          const tone = !downloadToast.completed ? 'fail' : empty ? 'warn' : 'ok'
+          const message = !downloadToast.completed
+            ? `✗ Download failed: ${downloadToast.name}`
+            : empty
+              ? `⚠ Downloaded ${downloadToast.name}, but it's empty (0 bytes)`
+              : `✓ Downloaded ${downloadToast.name} — ${formatBytes(downloadToast.bytes)}`
+          return <div className={`download-toast ${tone}`}>{message}</div>
+        })()}
       <div className="chrome">
         <button className="nav-btn" onClick={handleBack} title="Back" aria-label="Back">
           ←
@@ -1589,7 +1667,9 @@ function App(): React.JSX.Element {
           ) : (
             <ol className="steps-list">
               {steps.map((step, i) => {
-                const editable = editableValue(step) !== null
+                // Day 16(+): upload steps aren't text-editable but DO get a ✎ —
+                // it opens a file picker to swap the uploaded file.
+                const editable = editableValue(step) !== null || step.type === 'upload'
                 const canEdit = !isRecording && !isReplaying
                 return (
                   <li
@@ -1647,6 +1727,18 @@ function App(): React.JSX.Element {
                         >
                           🔧 healed
                         </span>
+                      )}
+                      {/* Day 16(+): downloads auto-save silently — give a one-click
+                          way to confirm/open the saved file in its folder. */}
+                      {step.type === 'download' && step.downloadPath && (
+                        <button
+                          type="button"
+                          className="step-selector"
+                          onClick={() => window.api.recorder.revealDownload(step.downloadPath!)}
+                          title={`Show "${step.label}" in its folder`}
+                        >
+                          📂 Show in folder
+                        </button>
                       )}
                       {insertMenuIndex === i && canEdit && (
                         <div className="insert-menu">
@@ -1716,8 +1808,8 @@ function App(): React.JSX.Element {
                           <button
                             className="step-action"
                             onClick={() => handleStartEdit(i)}
-                            title="Edit value"
-                            aria-label="Edit value"
+                            title={step.type === 'upload' ? 'Change file' : 'Edit value'}
+                            aria-label={step.type === 'upload' ? 'Change file' : 'Edit value'}
                           >
                             ✎
                           </button>

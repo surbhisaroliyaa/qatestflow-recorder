@@ -31,7 +31,11 @@ interface ReplayResult {
 interface RecorderAPI {
   toggle: (resume?: boolean) => Promise<boolean>
   onStep: (callback: (step: RecorderStep) => void) => () => void
-  exportTest: (code: string) => Promise<string | null>
+  exportTest: (code: string, fixturePaths?: string[]) => Promise<string | null>
+  pickUploadFile: () => Promise<string | null>
+  revealDownload: (path: string) => Promise<void>
+  onDownloadStart: (callback: (info: { name: string }) => void) => () => void
+  onDownloadDone: (callback: (info: DownloadInfo) => void) => () => void
   replay: (steps: RecorderStep[], interactive?: boolean) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
@@ -70,6 +74,16 @@ interface API {
 }
 
 declare global {
+  // Day 16(+): a finished download — surfaced as a toast and (during replay)
+  // the material a `download` step checks. `completed` = the transfer finished
+  // (vs interrupted/cancelled); `bytes` then tells empty (0) from has-content.
+  interface DownloadInfo {
+    name: string
+    path: string
+    bytes: number
+    completed: boolean
+  }
+
   // === Test library (Day 11) ===
   // Outcome of a test's most recent replay — drives the green/red dot in the
   // library list.
@@ -257,6 +271,10 @@ declare global {
     secret?: boolean // password field — value masked on screen / in export
     disabled?: boolean // turned off in the editor — skipped by replay + export
     url?: string
+    // Day 16(+): a `download` step's saved file path (for "Show in folder" and
+    // the on-replay file check). The step's `value` holds the EXPECTED filename
+    // substring to verify (defaults to the recorded name; editable).
+    downloadPath?: string
     selector?: string
     candidates?: SelectorCandidate[]
     // Day 15: set when the element lives inside an <iframe> — tells replay

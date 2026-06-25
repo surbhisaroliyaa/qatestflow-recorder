@@ -117,15 +117,95 @@ export function observerProgram(): void {
     if (gg.__qaflowReplaying) return true
     return origConfirm.call(window, msg)
   }
+  // Day 16(+): Electron's embedded view has NO native prompt() box, so a page's
+  // prompt() shows nothing to type into. While RECORDING we draw our OWN in-page
+  // prompt so you type the answer on screen and it's recorded live — no editing
+  // the step afterward. Caveat: prompt() must return its value SYNCHRONOUSLY, but
+  // reading what you type is async — so the PAGE proceeds with the default; the
+  // value you type is what gets recorded and replayed.
+  let promptModalOpen = false
+  const showPromptModal = (message: string, initial: string): void => {
+    if (promptModalOpen) return
+    promptModalOpen = true
+    const overlay = document.createElement('div')
+    overlay.setAttribute('data-qaflow-ui', 'prompt')
+    overlay.style.cssText =
+      'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.35);' +
+      'display:flex;align-items:flex-start;justify-content:center;padding-top:15vh;' +
+      'font-family:system-ui,Segoe UI,Arial,sans-serif;'
+    const box = document.createElement('div')
+    box.setAttribute('data-qaflow-ui', 'prompt')
+    box.style.cssText =
+      'background:#fff;color:#111;min-width:340px;max-width:80vw;border-radius:8px;' +
+      'box-shadow:0 10px 40px rgba(0,0,0,0.35);padding:16px 18px;'
+    const label = document.createElement('div')
+    label.textContent = message || 'Prompt'
+    label.style.cssText = 'font-size:14px;margin-bottom:10px;white-space:pre-wrap;'
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.value = initial
+    input.setAttribute('data-qaflow-ui', 'prompt')
+    input.style.cssText =
+      'width:100%;box-sizing:border-box;padding:8px 10px;font-size:14px;' +
+      'border:1px solid #bbb;border-radius:5px;outline:none;'
+    const rowEl = document.createElement('div')
+    rowEl.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:14px;'
+    const cancelBtn = document.createElement('button')
+    cancelBtn.textContent = 'Cancel'
+    cancelBtn.setAttribute('data-qaflow-ui', 'prompt')
+    cancelBtn.style.cssText =
+      'padding:6px 14px;font-size:13px;border:1px solid #bbb;background:#f4f4f4;' +
+      'border-radius:5px;cursor:pointer;'
+    const okBtn = document.createElement('button')
+    okBtn.textContent = 'OK'
+    okBtn.setAttribute('data-qaflow-ui', 'prompt')
+    okBtn.style.cssText =
+      'padding:6px 14px;font-size:13px;border:1px solid #2563eb;background:#2563eb;' +
+      'color:#fff;border-radius:5px;cursor:pointer;'
+    rowEl.appendChild(cancelBtn)
+    rowEl.appendChild(okBtn)
+    box.appendChild(label)
+    box.appendChild(input)
+    box.appendChild(rowEl)
+    overlay.appendChild(box)
+    document.documentElement.appendChild(overlay)
+    input.focus()
+    input.select()
+
+    const finish = (accepted: boolean): void => {
+      // Record what you typed on OK; on Cancel record the page's default (which
+      // is what the page actually received synchronously). main reads `value`.
+      const recorded = accepted ? input.value : initial
+      promptModalOpen = false
+      overlay.remove()
+      postToHost('recorder:dialog', {
+        kind: 'prompt',
+        message,
+        value: recorded,
+        accept: accepted
+      })
+    }
+    okBtn.addEventListener('click', () => finish(true))
+    cancelBtn.addEventListener('click', () => finish(false))
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        finish(true)
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        finish(false)
+      }
+    })
+  }
+
   window.prompt = function (message?: unknown, def?: unknown): string | null {
     const msg = String(message == null ? '' : message)
     const fallback = def == null ? '' : String(def)
-    if (recording) {
-      // Electron has NO native prompt() box (unlike alert/confirm), so there's
-      // nothing to type into during recording. Record the prompt with its
-      // default answer; the user edits the step (✎) to set the real answer,
-      // which replay then enters. Return the default so the page proceeds.
-      postToHost('recorder:dialog', { kind: 'prompt', message: msg, value: fallback })
+    if (recording && !gg.__qaflowReplaying) {
+      // Show our own prompt so you can type the answer on screen; it's recorded
+      // when you submit. The page proceeds now with the default (we can't block
+      // for async input) — your typed value is what's recorded and replayed.
+      showPromptModal(msg, fallback)
       return fallback
     }
     const pend = consumePending('prompt')
@@ -307,8 +387,12 @@ export function observerProgram(): void {
   function realTarget(event: Event): Element | null {
     const path = typeof event.composedPath === 'function' ? event.composedPath() : []
     const first = path[0]
-    if (first instanceof Element) return first
-    return event.target as Element | null
+    const el = first instanceof Element ? first : (event.target as Element | null)
+    // Day 16(+): ignore events that land inside our OWN injected UI (the in-page
+    // prompt modal below). Its input/buttons must never be recorded as page
+    // clicks/typing. Returning null here makes every handler bail safely.
+    if (el && typeof el.closest === 'function' && el.closest('[data-qaflow-ui]')) return null
+    return el
   }
 
   function roleMatches(role: string, name: string): Element[] {
@@ -523,6 +607,11 @@ export function observerProgram(): void {
       const el = meaningfulTarget(target)
       const tag = el.tagName.toLowerCase()
       if (tag === 'select' || tag === 'option') return
+      // Day 16: a click on a file input only opens the native OS file picker.
+      // The file you pick is captured separately as an `upload` step (preload →
+      // CDP setFileInputFiles), so recording this click is pointless — and on
+      // replay it would pop that "Open" dialog endlessly instead of uploading.
+      if (tag === 'input' && (el as HTMLInputElement).type === 'file') return
       try {
         const trigger = findHoverTrigger(el)
         if (trigger) {

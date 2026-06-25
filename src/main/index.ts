@@ -7,8 +7,8 @@ import {
   dialog,
   webFrameMain
 } from 'electron'
-import { join } from 'path'
-import { writeFile, mkdir } from 'fs/promises'
+import { join, basename, dirname } from 'path'
+import { writeFile, mkdir, copyFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
@@ -485,38 +485,93 @@ function createWindow(): void {
     }
   )
 
+  // Day 16(+): a picked upload file is COPIED into the library's _uploads folder
+  // so the TEST owns its fixture. The step then points at our copy, not your
+  // loose file — so replay never fails if you move or delete the original, and
+  // export can ship the file alongside the spec. Returns the copy's absolute
+  // path (or the original if the copy fails, so an upload is never lost).
+  const uploadsDir = join(libraryDir(), '_uploads')
+  mkdir(uploadsDir, { recursive: true }).catch(() => {})
+  const copyIntoUploads = async (src: string): Promise<string> => {
+    try {
+      const dest = join(uploadsDir, basename(src))
+      await copyFile(src, dest)
+      return dest
+    } catch {
+      return src
+    }
+  }
+
   // Day 16: a file <input type=file> the user picked file(s) for. The relay
   // preload resolved the real disk path(s) via webUtils (the page world can't)
   // plus the input's identifying facts; build the selector with the normal
-  // engine and record an `upload` step. value = the path(s), one per line —
-  // replay sets them via CDP DOM.setFileInputFiles; export → .setInputFiles().
+  // engine and record an `upload` step. value = the COPIED path(s), one per line
+  // — replay sets them via CDP DOM.setFileInputFiles; export → .setInputFiles().
   ipcMain.on(
     'recorder:upload',
-    (_event, raw: { facts: ElementFacts; paths: string[]; names?: string[] }) => {
+    async (_event, raw: { facts: ElementFacts; paths: string[]; names?: string[] }) => {
       if (!isRecording) return
       const { primary, candidates } = buildSelectors(raw.facts)
+      const stored: string[] = []
+      for (const p of raw.paths ?? []) stored.push(await copyIntoUploads(p))
       sendStep({
         type: 'upload',
         label: (raw.names ?? []).join(', ') || 'file',
-        value: (raw.paths ?? []).join('\n'),
+        value: stored.join('\n'),
         selector: primary,
         candidates
       })
     }
   )
 
+  // Day 16(+): change an upload step's file. Show an OS open dialog, copy the
+  // chosen file into _uploads (same as recording), and return the copy's path so
+  // the renderer can swap it into the step. null = the user cancelled.
+  ipcMain.handle('recorder:pickUploadFile', async (): Promise<string | null> => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a file to upload',
+      properties: ['openFile']
+    })
+    if (result.canceled || !result.filePaths.length) return null
+    return copyIntoUploads(result.filePaths[0])
+  })
+
   // Day 16: downloads — auto-save to a known folder so a download never stalls
   // a run behind a native "Save as" dialog. Recorded as a `download` step for
   // visibility; on replay the file simply re-downloads to the same folder.
   const downloadsDir = join(libraryDir(), '_downloads')
   mkdir(downloadsDir, { recursive: true }).catch(() => {})
+  // Day 16(+): downloads finished during a REPLAY, in order — a `download` step
+  // consumes the next one to assert it arrived and isn't empty (see the replay
+  // loop). Reset at the start of each replay.
+  let isReplaying = false
+  let replayDownloads: { name: string; path: string; bytes: number; completed: boolean }[] = []
+  let replayDownloadCursor = 0
   embeddedBrowser.webContents.session.on('will-download', (_event, item) => {
+    const savePath = join(downloadsDir, item.getFilename())
     try {
-      item.setSavePath(join(downloadsDir, item.getFilename()))
+      item.setSavePath(savePath)
     } catch {
       // setSavePath rejected (called too late) — let Electron handle it
     }
-    if (isRecording) sendStep({ type: 'download', label: item.getFilename() })
+    const name = item.getFilename()
+    // Day 16(+): announce the START immediately so big files (exe/png) give
+    // instant feedback instead of a silent gap until the transfer finishes.
+    mainWindow.webContents.send('recorder:download-start', { name })
+    // When the transfer finishes, surface a confirmation toast (record AND
+    // replay) and, during replay, queue it for the matching `download` step.
+    item.once('done', (_e, state) => {
+      const bytes = item.getReceivedBytes()
+      const completed = state === 'completed'
+      mainWindow.webContents.send('recorder:download-done', { name, path: savePath, bytes, completed })
+      if (isReplaying) replayDownloads.push({ name, path: savePath, bytes, completed })
+    })
+    // Day 16(+): keep the saved path on the step (for "Show in folder" + the
+    // on-replay file check). `value` holds the EXPECTED filename to verify —
+    // defaults to the recorded name, editable via the step's ✎.
+    if (isRecording) {
+      sendStep({ type: 'download', label: name, value: name, downloadPath: savePath })
+    }
   })
 
   // Day 16: multi-tab / popups. When a page opens a new tab/window (window.open
@@ -578,6 +633,12 @@ function createWindow(): void {
         frame?: { url: string; name?: string }[] | null
       }
     ) => {
+      // A completed pick ENDS pick mode. The page's own observer already flips
+      // its local `picking` off when it captures the click, but main must reset
+      // its flag too — otherwise the next observer re-injection (e.g. the
+      // navigate at the start of a replay) bakes in a stale picking=true and the
+      // page comes back up in pick mode, painting the blue highlight mid-replay.
+      isPicking = false
       const { primary, candidates } = buildSelectors(raw.facts)
       // For 'count' checks: how many elements the primary strategy matched.
       // The observer already counted duplicates at pick time (Day 10b) — dup
@@ -799,6 +860,7 @@ function createWindow(): void {
         }
         // Day 16: replay is over — stop the dialog override from auto-answering
         // so normal browsing gets its real native dialogs back.
+        isReplaying = false
         embeddedBrowser.webContents
           .executeJavaScript('window.__qaflowReplaying=false;window.__qaflowNextDialog=null;')
           .catch(() => {})
@@ -810,6 +872,10 @@ function createWindow(): void {
       const list = steps.slice()
       // Day 16: flag replay up front so a dialog fired during the very first
       // load is auto-answered too (armNextDialog re-sets it before each action).
+      // Day 16(+): also arm download tracking so `download` steps can verify.
+      isReplaying = true
+      replayDownloads = []
+      replayDownloadCursor = 0
       embeddedBrowser.webContents
         .executeJavaScript('window.__qaflowReplaying=true')
         .catch(() => {})
@@ -846,8 +912,36 @@ function createWindow(): void {
             // the step that triggers it (see armNextDialog below) — by the time
             // we reach this row the answer was already given. Nothing to do.
           } else if (step.type === 'download') {
-            // Day 16: a download is a side effect of whatever step triggered it
-            // (session.will-download saved it to _downloads). Nothing to replay.
+            // Day 16(+): the download itself is a side effect of the preceding
+            // action (the click) — here we VERIFY it. Wait for the next download
+            // this run produced, then assert it arrived AND isn't empty AND its
+            // name matches what's expected. This turns every recorded download
+            // into a real checkpoint (e.g. "the receipt downloaded, non-empty").
+            const expectName = (step.value ?? '').trim()
+            const deadline = Date.now() + 12000
+            let got: { name: string; bytes: number; completed: boolean } | null = null
+            for (;;) {
+              if (replayDownloads.length > replayDownloadCursor) {
+                got = replayDownloads[replayDownloadCursor++]
+                break
+              }
+              if (Date.now() > deadline) break
+              await wait(150)
+            }
+            if (!got) {
+              throw new Error(
+                `Expected a download${expectName ? ` ("${expectName}")` : ''}, but nothing downloaded`
+              )
+            }
+            if (!got.completed) {
+              throw new Error(`Download of "${got.name}" did not finish (interrupted)`)
+            }
+            if (got.bytes <= 0) {
+              throw new Error(`Downloaded file "${got.name}" is empty (0 bytes)`)
+            }
+            if (expectName && !got.name.includes(expectName)) {
+              throw new Error(`Expected download "${expectName}" but got "${got.name}"`)
+            }
           } else if (step.type === 'upload') {
             // Day 16: set the file(s) on the input. JavaScript can't assign a
             // file input (security), so use CDP DOM.setFileInputFiles — the same
@@ -1036,6 +1130,13 @@ function createWindow(): void {
     if (typeof path === 'string' && path.startsWith(libraryDir())) shell.openPath(path)
   })
 
+  // Day 16(+): reveal a downloaded file in the OS file explorer (highlighted),
+  // so a silent auto-save is confirmable and one click from opening. Guarded to
+  // the library folder, same as the screenshot opener above.
+  ipcMain.handle('recorder:revealDownload', (_event, path: string) => {
+    if (typeof path === 'string' && path.startsWith(libraryDir())) shell.showItemInFolder(path)
+  })
+
   // === Failure translator + bug report (Day 13) ======================
   // The renderer assembles the evidence bundle (it owns the steps and their
   // human sentences); main runs the translator because spawning the Claude
@@ -1066,16 +1167,30 @@ function createWindow(): void {
   // React generates the Playwright code (it owns the steps); main just saves
   // it to disk, because only the backstage engine is allowed to touch files.
   // Returns the saved file path, or null if the user cancels the dialog.
-  ipcMain.handle('recorder:export', async (_event, code: string): Promise<string | null> => {
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: 'Save Playwright test',
-      defaultPath: 'recorded.spec.ts',
-      filters: [{ name: 'TypeScript test', extensions: ['ts'] }]
-    })
-    if (result.canceled || !result.filePath) return null
-    await writeFile(result.filePath, code, 'utf-8')
-    return result.filePath
-  })
+  ipcMain.handle(
+    'recorder:export',
+    async (_event, code: string, fixturePaths?: string[]): Promise<string | null> => {
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: 'Save Playwright test',
+        defaultPath: 'recorded.spec.ts',
+        filters: [{ name: 'TypeScript test', extensions: ['ts'] }]
+      })
+      if (result.canceled || !result.filePath) return null
+      await writeFile(result.filePath, code, 'utf-8')
+      // Day 16(+): the exported test references its upload files by a relative
+      // `fixtures/<name>` path. Copy each fixture into a fixtures/ folder beside
+      // the saved spec so the test is self-contained — it runs on a teammate's
+      // machine or in CI without the original loose files existing.
+      if (fixturePaths && fixturePaths.length) {
+        const fixturesDir = join(dirname(result.filePath), 'fixtures')
+        await mkdir(fixturesDir, { recursive: true }).catch(() => {})
+        for (const src of fixturePaths) {
+          await copyFile(src, join(fixturesDir, basename(src))).catch(() => {})
+        }
+      }
+      return result.filePath
+    }
+  )
 }
 
 // If the user types "google.com" we turn it into "https://google.com"

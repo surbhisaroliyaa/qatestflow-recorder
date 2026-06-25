@@ -102,8 +102,13 @@ export function stepText(step: RecorderStep): string {
       const n = (step.value ?? '').split('\n').filter(Boolean).length
       return `Upload ${n > 1 ? `${n} files` : `"${step.label ?? 'file'}"`}`
     }
-    case 'download':
-      return `Download "${step.label ?? 'file'}"`
+    case 'download': {
+      // Day 16(+): the step VERIFIES the download on replay — phrase it as the
+      // check we run, not a claim about the file. `value` is the expected
+      // filename (defaults to the recorded name).
+      const want = (step.value ?? step.label ?? 'file').trim()
+      return `Download "${want}" — verify it's not empty`
+    }
     default:
       return JSON.stringify(step)
   }
@@ -219,9 +224,13 @@ function actionFor(step: RecorderStep, baseURL?: string): string | null {
       return `await ${locator}.hover()`
     case 'upload': {
       // Day 16: Playwright sets a file input directly with setInputFiles.
+      // Day 16(+): reference the file by a PORTABLE relative path. On save, the
+      // app copies each file into a fixtures/ folder next to the spec, so the
+      // exported test is self-contained (no machine-specific absolute paths).
       const paths = (step.value ?? '').split('\n').filter(Boolean)
       if (!paths.length) return null
-      const arg = paths.length === 1 ? quote(paths[0]) : `[${paths.map(quote).join(', ')}]`
+      const rel = paths.map((p) => `fixtures/${p.split(/[\\/]/).pop()}`)
+      const arg = rel.length === 1 ? quote(rel[0]) : `[${rel.map(quote).join(', ')}]`
       return `await ${locator}.setInputFiles(${arg})`
     }
     default:
@@ -244,10 +253,17 @@ export function generatePlaywrightTest(
     // A dialog step has no action of its own — its handler is emitted just
     // before the action that triggers it (the previous loop iteration).
     if (step.type === 'dialog') continue
-    // A download is handled by the browser (saved to disk), not a scripted
-    // action — leave a comment so the reader knows it happened.
+    // Day 16(+): a download VERIFIES the file triggered by the preceding action
+    // (the `download<j>Promise` set up before that click) — assert it arrived
+    // with the expected name and is not empty.
     if (step.type === 'download') {
-      lines.push(`  // ${stepText(step)} (saved by the browser — no scripted step)`)
+      const want = (step.value ?? step.label ?? 'file').trim()
+      lines.push(
+        `  // ${stepText(step)}\n` +
+          `  const download${i} = await download${i}Promise\n` +
+          `  expect(download${i}.suggestedFilename()).toContain(${quote(want)})\n` +
+          `  expect(fs.statSync(await download${i}.path()).size).toBeGreaterThan(0)`
+      )
       continue
     }
     // Day 16: if the NEXT step is a dialog, register the handler BEFORE this
@@ -256,19 +272,26 @@ export function generatePlaywrightTest(
     if (next && next.type === 'dialog') {
       lines.push(`  // ${stepText(next)}\n  ${dialogHandler(next)}`)
     }
+    // Day 16(+): if the NEXT step is a download, this action triggers it — start
+    // waiting for the download BEFORE clicking (Playwright requires that order).
+    if (next && next.type === 'download') {
+      lines.push(`  const download${i + 1}Promise = page.waitForEvent('download')`)
+    }
     const action = actionFor(step, baseURL)
     if (!action) continue
     lines.push(`  // ${stepText(step)}\n  ${action}`)
   }
   const body = lines.join('\n\n')
 
-  // Only import expect when an assertion actually uses it.
-  const hasAssert = enabled.some((step) => step.type === 'assert')
+  // Only import expect when an assertion (or a download check) uses it; pull in
+  // fs only when a download check needs a file-size assertion.
+  const hasDownload = enabled.some((step) => step.type === 'download')
+  const hasAssert = enabled.some((step) => step.type === 'assert') || hasDownload
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
+  const header = `import ${imports} from '@playwright/test'\n` + (hasDownload ? "import fs from 'fs'\n" : '')
   const use = baseURL ? `\ntest.use({ baseURL: ${quote(baseURL)} })\n` : ''
 
-  return `import ${imports} from '@playwright/test'
-${use}
+  return `${header}${use}
 test(${quote(options?.name || 'recorded flow')}, async ({ page }) => {
 ${body}
 })

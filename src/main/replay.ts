@@ -293,7 +293,28 @@ export function buildActionScript(step: ReplayStep): string {
 
   switch (step.type) {
     case 'click':
-      action = `el.click(); return { ok: true };`
+      // Day 16(+): submitting a form that contains a file input requires a
+      // TRUSTED user gesture — Chromium silently blocks a synthetic el.click()
+      // there (a guard against pages exfiltrating files without real user
+      // action). So when this click is a submit control inside a file-upload
+      // form, hand its center coordinates back and let main dispatch a real
+      // CDP mouse click (like Playwright). Every other click stays on the
+      // robust, coordinate-free el.click().
+      // Day 16(+): a submit control inside a FILE-UPLOAD form won't actually
+      // submit via a synthetic el.click() here (the file input changes how the
+      // click resolves) — so submit the form itself with requestSubmit(), which
+      // behaves as if this button was pressed (validation + submit event), with
+      // form.submit() as a last-resort fallback. Every other click stays on the
+      // normal, robust el.click().
+      action = `
+        const submitLike = (el.tagName === 'BUTTON' && el.type !== 'button' && el.type !== 'reset')
+          || (el.tagName === 'INPUT' && (el.type === 'submit' || el.type === 'image'));
+        if (submitLike && el.form && el.form.querySelector('input[type=file]')) {
+          if (el.form.requestSubmit) { el.form.requestSubmit(el); } else { el.form.submit(); }
+          return { ok: true };
+        }
+        el.click();
+        return { ok: true };`
       break
 
     case 'type': {
