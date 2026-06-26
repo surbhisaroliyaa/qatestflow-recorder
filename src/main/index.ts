@@ -1,12 +1,4 @@
-import {
-  app,
-  shell,
-  BrowserWindow,
-  ipcMain,
-  WebContentsView,
-  dialog,
-  webFrameMain
-} from 'electron'
+import { app, shell, BrowserWindow, ipcMain, WebContentsView, dialog, webFrameMain } from 'electron'
 import { join, basename, dirname } from 'path'
 import { writeFile, mkdir, copyFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -39,6 +31,13 @@ const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(
 // embedded browser showing the website under test.
 const CHROME_HEIGHT = 60
 
+// Day 17 (multiple windows): height reserved for the tab strip, shown ONLY when
+// more than one tab is open. When visible, the embedded browser starts this
+// much further down. The renderer renders the same-height strip under the same
+// condition, so the React strip and the native view line up exactly. MUST match
+// the .tab-strip height in main.css.
+const TAB_STRIP_HEIGHT = 34
+
 // Width in pixels reserved on the RIGHT for our React "steps" panel (the live
 // recording list). Once the user has navigated, the embedded browser shrinks
 // by this much so the panel showing through underneath stays uncovered.
@@ -58,17 +57,90 @@ function createWindow(): void {
     }
   })
 
-  // === The embedded browser — a real Chrome view that loads the website ===
-  // The "recorder" preload below is now just a RELAY (it loads in the top frame
-  // only). The actual observer is INJECTED into every frame by main (see
-  // injectObserver), because Electron's preload-into-sub-frames was unreliable.
-  const embeddedBrowser = new WebContentsView({
-    webPreferences: {
-      preload: join(__dirname, '../preload/recorder.js'),
-      sandbox: false
+  // === The embedded browser tabs (Day 17: multiple windows) ===========
+  // What used to be a SINGLE embedded view is now a SET of tabs. Exactly one is
+  // active (sized to fill the browser area); the rest are zero-bound (hidden).
+  // Each tab is a real Chrome view loading a website. The "recorder" preload is
+  // a RELAY (top frame only); the observer is INJECTED into every frame by main
+  // (see injectObserver), because Electron's preload-into-sub-frames was flaky.
+  // A popup (window.open / target=_blank) becomes a new tab in Phase 2; for now
+  // there is always exactly one tab.
+  interface Tab {
+    id: string
+    // 0 = the original tab; popups get 1, 2, … in open order, NEVER reused.
+    // This ordinal is the step's `windowId` — identical at record, replay, and
+    // export time (a raw webContents.id changes on replay; a UUID isn't
+    // reproducible). Mirrors Playwright handing you pages in creation order.
+    ordinal: number
+    view: WebContentsView
+  }
+  const tabs: Tab[] = []
+  let activeTabId = ''
+  let tabOrdinalSeq = 0 // next ordinal to hand out
+  // Day 17 (Phase 4): a one-shot hook so replay can capture the next popup tab
+  // (the replay-time window-open handler still creates the tab via openTabWith;
+  // this lets replay await it and bind it to the step's `opensWindow` ordinal).
+  let onPopupOpened: ((tab: Tab) => void) | null = null
+
+  const activeTab = (): Tab => tabs.find((t) => t.id === activeTabId) ?? tabs[0]
+  // The active tab's webContents — the target of every "current page" operation.
+  // During replay this is repointed per step (Phase 4) so it always means "the
+  // tab this step runs in".
+  const activeWC = (): Electron.WebContents => activeTab().view.webContents
+  const tabByOrdinal = (n: number): Tab | undefined => tabs.find((t) => t.ordinal === n)
+  const tabOfWC = (wc: Electron.WebContents): Tab | undefined =>
+    tabs.find((t) => t.view.webContents.id === wc.id)
+
+  // Day 17 (multiple windows): a step's `windowId` is RECORDING-LOCAL, NOT the
+  // global Tab.ordinal. The tab a recording starts in is 0; each tab the
+  // recording newly touches/opens gets 1, 2, … So a clean recording always reads
+  // tab 0 / tab 1 / tab 2 regardless of how many tabs were opened earlier in the
+  // session. (The global Tab.ordinal still drives the live tab strip.) Reset at
+  // the start of a fresh recording (see recorder:toggle).
+  const recWindowIdByTabId = new Map<string, number>()
+  let nextRecWindowId = 0
+  const recWindowIdOf = (tab: Tab): number => {
+    let id = recWindowIdByTabId.get(tab.id)
+    if (id === undefined) {
+      id = nextRecWindowId++
+      recWindowIdByTabId.set(tab.id, id)
     }
-  })
-  mainWindow.contentView.addChildView(embeddedBrowser)
+    return id
+  }
+  // The recording-local windowId of a step's IPC SENDER — race-proof: it's the
+  // tab that actually fired the event, not whichever tab is currently visible.
+  const recWindowIdOfWC = (wc: Electron.WebContents): number => {
+    const tab = tabOfWC(wc)
+    return tab ? recWindowIdOf(tab) : 0
+  }
+
+  // Tell the renderer the current set of open tabs (for the tab strip). Built
+  // fresh each call from the live views so titles/urls are current.
+  const emitTabs = (): void => {
+    if (mainWindow.isDestroyed()) return
+    // Skip any tab whose webContents is mid-teardown (reading it would throw).
+    const list = tabs.flatMap((t) => {
+      try {
+        const w = t.view.webContents
+        if (w.isDestroyed()) return []
+        return [
+          {
+            ordinal: t.ordinal,
+            title: w.getTitle() || w.getURL() || 'New Tab',
+            url: w.getURL(),
+            active: t.id === activeTabId
+          }
+        ]
+      } catch {
+        return []
+      }
+    })
+    try {
+      mainWindow.webContents.send('browser:tabs-changed', list)
+    } catch {
+      // window gone — nothing to update
+    }
+  }
 
   // === iframe plumbing (Day 15) ======================================
   // The observer is injected into every frame and reports WHICH frame each
@@ -108,9 +180,10 @@ function createWindow(): void {
   }
 
   const findFrameNow = (
+    wc: Electron.WebContents,
     ref?: { url: string; name?: string }[]
   ): Electron.WebFrameMain | null => {
-    const main = embeddedBrowser.webContents.mainFrame
+    const main = wc.mainFrame
     if (!ref || !ref.length) return main
     if (!main) return null
     const norm = (u: string): string => u.replace(/#.*$/, '').replace(/\/$/, '')
@@ -145,11 +218,12 @@ function createWindow(): void {
   // An iframe may still be loading when replay reaches its step, so poll for
   // it (same idea as the element finder waiting for an element to appear).
   const resolveFrame = async (
+    wc: Electron.WebContents,
     ref?: { url: string; name?: string }[]
   ): Promise<Electron.WebFrameMain | null> => {
     const deadline = Date.now() + 8000
     for (;;) {
-      const frame = findFrameNow(ref)
+      const frame = findFrameNow(wc, ref)
       if (frame) return frame
       if (Date.now() > deadline) return null
       await wait(150)
@@ -169,7 +243,7 @@ function createWindow(): void {
       ? {
           kind: next.dialogKind,
           accept: next.dialogKind === 'confirm' ? next.value !== 'dismiss' : true,
-          text: next.dialogKind === 'prompt' ? next.value ?? '' : undefined
+          text: next.dialogKind === 'prompt' ? (next.value ?? '') : undefined
         }
       : null
     try {
@@ -232,8 +306,8 @@ function createWindow(): void {
 
   // (Re)inject every frame currently in the tree. Cheap to call often: already-
   // injected frames are skipped by the set.
-  const injectAllFrames = (): void => {
-    for (const frame of subtreeFrames(embeddedBrowser.webContents.mainFrame)) {
+  const injectAllFrames = (wc: Electron.WebContents): void => {
+    for (const frame of subtreeFrames(wc.mainFrame)) {
       injectObserver(frame)
     }
   }
@@ -244,9 +318,12 @@ function createWindow(): void {
   // silently missed grandchild frames). Each boot bakes in the current
   // isRecording/isPicking, and the observer re-asserts that state when it sees
   // it's already installed — so listeners are never registered twice.
+  // Re-inject EVERY tab's frames from scratch — used when a global state change
+  // (record on/off, pick on/off) must reach every live tab, not just the active
+  // one. With one tab this is the old single-view behavior.
   const reinjectAllFrames = (): void => {
     injectedFrames.clear()
-    injectAllFrames()
+    for (const t of tabs) injectAllFrames(t.view.webContents)
   }
 
   // Until the user navigates to a real URL, we keep the embedded browser
@@ -260,20 +337,32 @@ function createWindow(): void {
   let overlayOpen = false
 
   const resizeEmbedded = (): void => {
-    if (!hasNavigated || overlayOpen) {
-      embeddedBrowser.setBounds({ x: 0, y: 0, width: 0, height: 0 })
-      return
-    }
+    if (mainWindow.isDestroyed()) return
     // getContentBounds = the drawable area inside the window frame, so the
     // native browser view and the CSS panel measure from the same ruler and
     // meet exactly at width - PANEL_WIDTH (no overlap, no gap at the seam).
     const { width, height } = mainWindow.getContentBounds()
-    embeddedBrowser.setBounds({
+    // The tab strip is shown only with 2+ tabs; when shown, the browser view
+    // starts that much lower (the renderer reserves the same band).
+    const top = CHROME_HEIGHT + (tabs.length > 1 ? TAB_STRIP_HEIGHT : 0)
+    const hidden = { x: 0, y: 0, width: 0, height: 0 }
+    const shown = {
       x: 0,
-      y: CHROME_HEIGHT,
+      y: top,
       width: Math.max(0, width - PANEL_WIDTH),
-      height: Math.max(0, height - CHROME_HEIGHT)
-    })
+      height: Math.max(0, height - top)
+    }
+    // Only the ACTIVE tab is sized to fill the browser area; every other tab is
+    // zero-bound (hidden). Before first navigation, or while a React overlay is
+    // open, even the active tab is hidden so the welcome/modal shows through.
+    for (const t of tabs) {
+      const visible = t.id === activeTabId && hasNavigated && !overlayOpen
+      try {
+        t.view.setBounds(visible ? shown : hidden)
+      } catch {
+        // view mid-teardown — skip it
+      }
+    }
   }
 
   mainWindow.on('resize', resizeEmbedded)
@@ -303,9 +392,12 @@ function createWindow(): void {
   // ERR_ABORTED is noise, not failure. Real load errors (DNS, refused,
   // timeout) are swallowed too at this level: the embedded browser shows
   // its own error page; an exception here would just crash the caller.
-  const loadUrlTolerantly = async (url: string): Promise<void> => {
+  const loadUrlTolerantly = async (
+    url: string,
+    wc: Electron.WebContents = activeWC()
+  ): Promise<void> => {
     try {
-      await embeddedBrowser.webContents.loadURL(url)
+      await wc.loadURL(url)
     } catch {
       // superseded or failed — either way the webContents tells the story
     }
@@ -325,7 +417,7 @@ function createWindow(): void {
   // Returns true if we actually went back; false if there was no history
   // left (in that case the React UI returns to the welcome screen).
   ipcMain.handle('browser:goBack', (): boolean => {
-    const history = embeddedBrowser.webContents.navigationHistory
+    const history = activeWC().navigationHistory
     if (history.canGoBack()) {
       history.goBack()
       return true
@@ -342,7 +434,7 @@ function createWindow(): void {
   })
 
   ipcMain.handle('browser:goForward', (): boolean => {
-    const history = embeddedBrowser.webContents.navigationHistory
+    const history = activeWC().navigationHistory
     if (history.canGoForward()) {
       history.goForward()
       return true
@@ -351,7 +443,7 @@ function createWindow(): void {
   })
 
   ipcMain.handle('browser:reload', () => {
-    embeddedBrowser.webContents.reload()
+    activeWC().reload()
   })
 
   // When the React UI opens a full-window overlay (e.g. the export modal), hide
@@ -364,8 +456,8 @@ function createWindow(): void {
   // The embedded page's live URL + title — the renderer can't see inside the
   // native browser view, so page-level checks (Day 11) ask main for prefills.
   ipcMain.handle('browser:getPageInfo', (): { url: string; title: string } => ({
-    url: embeddedBrowser.webContents.getURL(),
-    title: embeddedBrowser.webContents.getTitle()
+    url: activeWC().getURL(),
+    title: activeWC().getTitle()
   }))
 
   // "Home" — jump straight back to the welcome screen in one click, instead of
@@ -381,7 +473,7 @@ function createWindow(): void {
     reinjectAllFrames() // disarm every frame (isRecording is now false)
     resizeEmbedded() // hide the embedded browser
     try {
-      embeddedBrowser.webContents.navigationHistory.clear()
+      activeWC().navigationHistory.clear()
     } catch {
       // older Electron versions might not have clear(); safe to ignore
     }
@@ -392,15 +484,212 @@ function createWindow(): void {
     mainWindow.webContents.send('browser:url-changed', url)
   }
 
-  embeddedBrowser.webContents.on('did-navigate', (_event, url) => notifyUrlChange(url))
-  embeddedBrowser.webContents.on('did-navigate-in-page', (_event, url) => notifyUrlChange(url))
+  // === Tab wiring (Day 17: multiple windows) =========================
+  // Install every per-view listener on a tab's webContents. Called for the
+  // initial tab and (Phase 2) for each popup tab, so every tab behaves
+  // identically: it reports URL changes (when active), arms its frames with the
+  // observer as they load, and handles popups.
+  let tabIdSeq = 0
+  const wireTab = (view: WebContentsView, ordinal: number): Tab => {
+    const tab: Tab = { id: `tab-${++tabIdSeq}`, ordinal, view }
+    tabs.push(tab)
+    const wc = view.webContents
+
+    // The active tab drives the URL bar; any tab's navigation refreshes the
+    // strip (titles / urls change).
+    const onNav = (_e: unknown, url: string): void => {
+      if (tab.id === activeTabId) notifyUrlChange(url)
+      emitTabs()
+    }
+    wc.on('did-navigate', onNav)
+    wc.on('did-navigate-in-page', onNav)
+    // Titles arrive a beat after navigation — keep the strip label current.
+    wc.on('page-title-updated', () => emitTabs())
+
+    // Popups (window.open / target=_blank). Phase 2: deny the OS popup and open
+    // a REAL new tab in our strip, made active, loading the requested URL.
+    wc.setWindowOpenHandler((details) => {
+      const url = details.url
+      if (url && url !== 'about:blank') openTabWith(url, tab)
+      return { action: 'deny' }
+    })
+
+    // The page (or our close button) closed this view — drop it from the strip
+    // and fall back to another tab if it was active. The original tab (the only
+    // one that can't be a popup) is never auto-removed out from under the user.
+    // Skip during app/window teardown (the whole window is going away anyway).
+    wc.on('destroyed', () => {
+      if (!mainWindow.isDestroyed()) closeTab(tab)
+    })
+
+    // Inject the observer into every frame as pages/iframes load.
+    wc.on('did-finish-load', () => injectAllFrames(wc))
+    wc.on('did-frame-finish-load', () => injectAllFrames(wc))
+    wc.on(
+      'did-frame-navigate',
+      (_e, _url, _code, _status, _isMain, frameProcessId, frameRoutingId) => {
+        // A frame navigated to a fresh document — its old observer is gone. Drop
+        // it from the injected set so it gets the observer again, then inject now.
+        const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
+        if (frame) {
+          try {
+            injectedFrames.delete(frame.frameTreeNodeId)
+          } catch {
+            // frame gone — nothing to drop
+          }
+        }
+        injectAllFrames(wc)
+      }
+    )
+
+    return tab
+  }
+
+  // Make a brand-new tab: a Chrome view with the recorder relay preload, added
+  // to the window and fully wired. Does NOT change the active tab or load a URL.
+  const createTab = (): Tab => {
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: join(__dirname, '../preload/recorder.js'),
+        sandbox: false
+      }
+    })
+    mainWindow.contentView.addChildView(view)
+    return wireTab(view, tabOrdinalSeq++)
+  }
+
+  // The initial tab (ordinal 0) — always present.
+  const firstTab = createTab()
+  activeTabId = firstTab.id
+
+  // Open a popup as a new tab: create it, make it active (on top), load the URL,
+  // and tell the renderer the tab set changed. `openerTab` is the tab that
+  // opened it — while recording we tag THAT tab's last click with `opensWindow`
+  // (both as RECORDING-LOCAL windowIds) so replay/export know which action spawns
+  // the popup.
+  const openTabWith = (url: string, openerTab?: Tab): Tab => {
+    const tab = createTab()
+    activeTabId = tab.id
+    hasNavigated = true
+    loadUrlTolerantly(url, tab.view.webContents)
+    resizeEmbedded()
+    emitTabs()
+    // Phase 4: hand the new tab to a waiting replay (one-shot), so it can bind it
+    // to the opening step's `opensWindow` ordinal.
+    if (onPopupOpened) {
+      const notify = onPopupOpened
+      onPopupOpened = null
+      notify(tab)
+    }
+    if (isRecording && openerTab) {
+      // Order matters: number the OPENER first so it always gets the lower id,
+      // THEN the popup — otherwise a popup whose opener isn't numbered yet would
+      // grab the smaller number ("tab 2 opens tab 1", backwards).
+      const openerWindowId = recWindowIdOf(openerTab)
+      const newWindowId = recWindowIdOf(tab)
+      const last = lastInteractiveStepIdByTab.get(openerWindowId)
+      if (last && Date.now() - last.at < 250) {
+        // The opener click ALREADY arrived this same gesture (<250ms ago) — it's
+        // the opener; patch it after the fact. (A human can't fit an unrelated
+        // click into that window, so this won't mis-tag a previous click.)
+        mainWindow.webContents.send('recorder:step-patch', {
+          id: last.id,
+          opensWindow: newWindowId
+        })
+      } else {
+        // The opener click hasn't landed yet (the usual case) — tag the NEXT
+        // click for this tab inline when sendStep emits it.
+        pendingOpenerByTab.set(openerWindowId, { ordinal: newWindowId, at: Date.now() })
+      }
+    }
+    return tab
+  }
+
+  // Remove a tab from the strip. Never removes the last remaining tab (there is
+  // always at least the original tab). If the closed tab was active, fall back
+  // to the highest remaining ordinal. Idempotent (a self-close + our removal can
+  // both fire). Closing the webContents is best-effort — it may already be gone.
+  const closeTab = (tab: Tab): void => {
+    const idx = tabs.findIndex((t) => t.id === tab.id)
+    if (idx === -1 || tabs.length <= 1) return
+    tabs.splice(idx, 1)
+    try {
+      mainWindow.contentView.removeChildView(tab.view)
+    } catch {
+      // view already detached — fine
+    }
+    // The webContents may ALREADY be destroyed (a self-closing popup, or app
+    // teardown) — in which case even reading `.webContents` throws "Object has
+    // been destroyed". Guard the whole access, not just the close() call.
+    try {
+      if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close()
+    } catch {
+      // already destroyed — nothing to close
+    }
+    if (activeTabId === tab.id) {
+      activeTabId = tabs[tabs.length - 1].id
+      try {
+        mainWindow.contentView.addChildView(activeTab().view) // bring to top
+        notifyUrlChange(activeWC().getURL())
+      } catch {
+        // the fallback tab is mid-teardown too — the UI refresh below copes
+      }
+    }
+    resizeEmbedded()
+    emitTabs()
+  }
+
+  // === Tab strip IPC (Day 17) ========================================
+  // Make a given tab (by ordinal) the active, visible one.
+  ipcMain.handle('browser:switchTab', (_event, ordinal: number) => {
+    const tab = tabByOrdinal(ordinal)
+    if (!tab) return
+    activeTabId = tab.id
+    mainWindow.contentView.addChildView(tab.view) // re-add = move to top z-order
+    resizeEmbedded()
+    notifyUrlChange(tab.view.webContents.getURL())
+    emitTabs()
+  })
+
+  // Close a tab from the strip's ✕ (the original tab can't be closed).
+  ipcMain.handle('browser:closeTab', (_event, ordinal: number) => {
+    const tab = tabByOrdinal(ordinal)
+    if (tab) closeTab(tab)
+  })
 
   // === Recording =====================================================
   // One door for steps: whether a step came from the observer (a click/type
   // inside the page) or from main itself (a navigation), it leaves through
   // here on its way to the React panel.
-  const sendStep = (step: Record<string, unknown>): void => {
-    mainWindow.webContents.send('recorder:step', step)
+  // Day 17 (multiple windows): every emitted step gets a unique, increasing id
+  // so a later `recorder:step-patch` (e.g. "this click opened tab 1") can target
+  // the exact step after it was already sent to the renderer.
+  let nextStepId = 1
+  // Day 17 (multiple windows): correlating the click that opened a popup with the
+  // popup, despite the two arriving on different channels at almost the same time.
+  // The popup's window-open handler fires in-process; the opening click travels a
+  // longer path (observer → relay preload → IPC), so it usually arrives AFTER.
+  // Two maps cover both orderings:
+  //  - lastInteractiveStepIdByTab: the most recent click/press per tab (+ when),
+  //    for the rare case the click ALREADY arrived this same gesture (patch it).
+  //  - pendingOpenerByTab: "the NEXT click in this tab opens tab N" — set when a
+  //    popup opens before its click lands, so that click is tagged inline.
+  const lastInteractiveStepIdByTab = new Map<number, { id: number; at: number }>()
+  const pendingOpenerByTab = new Map<number, { ordinal: number; at: number }>()
+  // `windowId` defaults to the active tab (for main-initiated steps like a URL
+  // bar navigate); observer-sourced steps pass the SENDER's id explicitly.
+  const sendStep = (step: Record<string, unknown>, windowId = recWindowIdOf(activeTab())): void => {
+    const id = nextStepId++
+    if (step.type === 'click' || step.type === 'press') {
+      // If a popup was opened by (what we now know is) THIS click, tag it inline.
+      const pending = pendingOpenerByTab.get(windowId)
+      if (pending && Date.now() - pending.at < 2000) {
+        step.opensWindow = pending.ordinal
+        pendingOpenerByTab.delete(windowId)
+      }
+      lastInteractiveStepIdByTab.set(windowId, { id, at: Date.now() })
+    }
+    mainWindow.webContents.send('recorder:step', { id, windowId, ...step })
   }
 
   // Start/stop recording. Returns the new state so React stays in sync.
@@ -410,9 +699,19 @@ function createWindow(): void {
     isRecording = !isRecording
     // Arm or disarm the observer in every live frame (top page + all iframes).
     reinjectAllFrames()
-    // When a FRESH recording begins, log where we're starting from as step 1.
+    // When a FRESH recording begins, start from a clean SINGLE tab (like a fresh
+    // browser context — and symmetric with replay, which also resets to one
+    // tab). Close any leftover popup tabs so old tabs can't pollute the
+    // recording-local numbering, then reset it so this run starts at tab 0.
+    // (Resume keeps the existing tabs + numbering.)
     if (isRecording && !resume) {
-      const url = embeddedBrowser.webContents.getURL()
+      for (const t of tabs.filter((t) => t.id !== activeTabId)) closeTab(t)
+      recWindowIdByTabId.clear()
+      lastInteractiveStepIdByTab.clear()
+      pendingOpenerByTab.clear()
+      nextRecWindowId = 0
+      recWindowIdOf(activeTab()) // the tab we start in becomes windowId 0
+      const url = activeWC().getURL()
       if (url && !url.startsWith('data:')) sendStep({ type: 'navigate', url })
     }
     return isRecording
@@ -425,7 +724,7 @@ function createWindow(): void {
   ipcMain.on(
     'recorder:event',
     (
-      _event,
+      event,
       raw: {
         type: string
         facts: ElementFacts
@@ -440,16 +739,19 @@ function createWindow(): void {
     ) => {
       if (!isRecording) return
       const { primary, candidates } = buildSelectors(raw.facts)
-      sendStep({
-        type: raw.type,
-        label: labelFrom(raw.facts),
-        value: raw.value,
-        secret: raw.secret,
-        key: raw.key,
-        selector: primary,
-        candidates,
-        frame: raw.frame ?? undefined
-      })
+      sendStep(
+        {
+          type: raw.type,
+          label: labelFrom(raw.facts),
+          value: raw.value,
+          secret: raw.secret,
+          key: raw.key,
+          selector: primary,
+          candidates,
+          frame: raw.frame ?? undefined
+        },
+        recWindowIdOfWC(event.sender)
+      )
     }
   )
 
@@ -460,7 +762,7 @@ function createWindow(): void {
   ipcMain.on(
     'recorder:dialog',
     (
-      _event,
+      event,
       raw: {
         kind: 'alert' | 'confirm' | 'prompt'
         message?: string
@@ -469,19 +771,22 @@ function createWindow(): void {
       }
     ) => {
       if (!isRecording) return
-      sendStep({
-        type: 'dialog',
-        dialogKind: raw.kind,
-        label: raw.message ?? '',
-        value:
-          raw.kind === 'confirm'
-            ? raw.accept === false
-              ? 'dismiss'
-              : 'accept'
-            : raw.kind === 'prompt'
-              ? raw.value ?? ''
-              : undefined
-      })
+      sendStep(
+        {
+          type: 'dialog',
+          dialogKind: raw.kind,
+          label: raw.message ?? '',
+          value:
+            raw.kind === 'confirm'
+              ? raw.accept === false
+                ? 'dismiss'
+                : 'accept'
+              : raw.kind === 'prompt'
+                ? (raw.value ?? '')
+                : undefined
+        },
+        recWindowIdOfWC(event.sender)
+      )
     }
   )
 
@@ -509,18 +814,22 @@ function createWindow(): void {
   // — replay sets them via CDP DOM.setFileInputFiles; export → .setInputFiles().
   ipcMain.on(
     'recorder:upload',
-    async (_event, raw: { facts: ElementFacts; paths: string[]; names?: string[] }) => {
+    async (event, raw: { facts: ElementFacts; paths: string[]; names?: string[] }) => {
       if (!isRecording) return
+      const ordinal = recWindowIdOfWC(event.sender)
       const { primary, candidates } = buildSelectors(raw.facts)
       const stored: string[] = []
       for (const p of raw.paths ?? []) stored.push(await copyIntoUploads(p))
-      sendStep({
-        type: 'upload',
-        label: (raw.names ?? []).join(', ') || 'file',
-        value: stored.join('\n'),
-        selector: primary,
-        candidates
-      })
+      sendStep(
+        {
+          type: 'upload',
+          label: (raw.names ?? []).join(', ') || 'file',
+          value: stored.join('\n'),
+          selector: primary,
+          candidates
+        },
+        ordinal
+      )
     }
   )
 
@@ -547,7 +856,9 @@ function createWindow(): void {
   let isReplaying = false
   let replayDownloads: { name: string; path: string; bytes: number; completed: boolean }[] = []
   let replayDownloadCursor = 0
-  embeddedBrowser.webContents.session.on('will-download', (_event, item) => {
+  // The session is shared across all tabs (same default session), so this is a
+  // single registration that catches downloads from ANY tab.
+  firstTab.view.webContents.session.on('will-download', (_event, item, webContents) => {
     const savePath = join(downloadsDir, item.getFilename())
     try {
       item.setSavePath(savePath)
@@ -563,52 +874,27 @@ function createWindow(): void {
     item.once('done', (_e, state) => {
       const bytes = item.getReceivedBytes()
       const completed = state === 'completed'
-      mainWindow.webContents.send('recorder:download-done', { name, path: savePath, bytes, completed })
+      mainWindow.webContents.send('recorder:download-done', {
+        name,
+        path: savePath,
+        bytes,
+        completed
+      })
       if (isReplaying) replayDownloads.push({ name, path: savePath, bytes, completed })
     })
     // Day 16(+): keep the saved path on the step (for "Show in folder" + the
     // on-replay file check). `value` holds the EXPECTED filename to verify —
     // defaults to the recorded name, editable via the step's ✎.
     if (isRecording) {
-      sendStep({ type: 'download', label: name, value: name, downloadPath: savePath })
+      sendStep(
+        { type: 'download', label: name, value: name, downloadPath: savePath },
+        webContents ? recWindowIdOfWC(webContents) : recWindowIdOf(activeTab())
+      )
     }
   })
 
-  // Day 16: multi-tab / popups. When a page opens a new tab/window (window.open
-  // or a target="_blank" link), FOLLOW it in this same view instead of spawning
-  // a separate window. We DON'T record a navigate step for it — like any link
-  // navigation, it's a consequence of the click that opened it, so the recorded
-  // CLICK reproduces it on replay (recording a navigate here would also land
-  // out of order, since the click is relayed asynchronously). True simultaneous
-  // multi-tab with a tab strip is a much larger feature — parked as backlog.
-  embeddedBrowser.webContents.setWindowOpenHandler((details) => {
-    const url = details.url
-    if (url && url !== 'about:blank') loadUrlTolerantly(url)
-    return { action: 'deny' }
-  })
-
-  // Day 15: inject the observer into every frame as pages/iframes load.
-  // executeJavaScript reliably reaches any frame (unlike preload-into-sub-
-  // frames), and injectObserver bakes in the current record/pick state so a
-  // frame that appears mid-recording comes up already armed — no timing race.
-  embeddedBrowser.webContents.on('did-finish-load', () => injectAllFrames())
-  embeddedBrowser.webContents.on('did-frame-finish-load', () => injectAllFrames())
-  embeddedBrowser.webContents.on(
-    'did-frame-navigate',
-    (_e, _url, _code, _status, _isMainFrame, frameProcessId, frameRoutingId) => {
-      // A frame navigated to a fresh document — its old observer is gone. Drop
-      // it from the injected set so it gets the observer again, then inject now.
-      const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
-      if (frame) {
-        try {
-          injectedFrames.delete(frame.frameTreeNodeId)
-        } catch {
-          // frame gone — nothing to drop
-        }
-      }
-      injectAllFrames()
-    }
-  )
+  // (Popup handling + per-frame observer injection now live in wireTab, so every
+  // tab — the original and any future popup tab — is wired identically.)
 
   // === Element picker (Day 9) ========================================
   // The renderer turns pick mode on/off; the observer in the page does the
@@ -711,32 +997,28 @@ function createWindow(): void {
       resolveRecovery({ action: 'abort' })
       overlayOpen = false // make sure the browser is visible while replaying
 
+      // Day 17 (Phase 4): a replay can span MULTIPLE tabs. Start from a clean
+      // SINGLE tab (test isolation, symmetric with a fresh recording): close any
+      // leftover popup tabs, keep one as the recording-local windowId 0. Popups
+      // opened during the run bind their ordinal as they appear.
+      const baseTab = activeTab()
+      for (const t of tabs.filter((t) => t.id !== baseTab.id)) closeTab(t)
+      activeTabId = baseTab.id
+      resizeEmbedded()
+      const ordinalToTab = new Map<number, Tab>([[0, baseTab]])
+      // The tab the CURRENT step runs in — repointed per step by switchTo().
+      let currentWC = baseTab.view.webContents
+
       // Test isolation: start EVERY replay from a clean state (fresh cookies +
       // localStorage), exactly like a real Playwright test gets a fresh browser
       // context. Without this, leftover state — e.g. an item already in the cart
       // from the recording session — breaks the replay ("Add to cart" is gone).
       try {
-        await embeddedBrowser.webContents.session.clearStorageData({
+        await currentWC.session.clearStorageData({
           storages: ['cookies', 'localstorage']
         })
       } catch {
         // best-effort; continue even if clearing isn't supported
-      }
-
-      // Hover steps need a REAL mouse move. Electron's sendInputEvent delivers
-      // the event to page JavaScript but does NOT reliably switch on CSS
-      // :hover styling (electron/electron#13511). So we attach the Chrome
-      // DevTools Protocol (CDP) and use Input.dispatchMouseEvent — the same
-      // engine-level channel Playwright's .hover() uses. Attached once per
-      // replay, detached in the finally below.
-      const cdp = embeddedBrowser.webContents.debugger
-      let cdpReady = false
-      try {
-        if (!cdp.isAttached()) cdp.attach('1.3')
-        cdpReady = true
-      } catch {
-        // attach can fail (e.g. DevTools already attached) — we'll fall back
-        // to sendInputEvent, which at least delivers JS mouse events.
       }
 
       // === Failure evidence capture (Day 13) ==========================
@@ -767,7 +1049,6 @@ function createWindow(): void {
         const message = typeof e?.message === 'string' ? e.message : String(legacyMessage ?? '')
         if (message) addEvidence(consoleErrors, message.slice(0, 300))
       }
-      embeddedBrowser.webContents.on('console-message', onConsoleMessage)
 
       // Network watch rides the SAME CDP debugger the hover support attaches
       // (best-effort: no CDP, no network evidence — never a failed replay).
@@ -796,7 +1077,7 @@ function createWindow(): void {
         }
       }
       const relationTag = (requestUrl: string): string => {
-        const page = siteOf(embeddedBrowser.webContents.getURL())
+        const page = siteOf(currentWC.getURL())
         const req = siteOf(requestUrl)
         if (!page || !req) return ''
         return req === page ? '[site] ' : '[third-party] '
@@ -821,14 +1102,59 @@ function createWindow(): void {
           addEvidence(networkErrors, `${relationTag(url)}${errorText} on ${trimUrl(url)}`)
         }
       }
-      if (cdpReady) {
-        cdp.on('message', onCdpMessage)
-        try {
-          await cdp.sendCommand('Network.enable')
-        } catch {
-          // network domain unavailable — console evidence still works
+      // Each tab a replay touches needs its OWN CDP debugger (hover / upload /
+      // network) and console listener. Attach lazily on first visit; detach all
+      // in finish(). `cdp`/`cdpReady` always point at the CURRENT tab's debugger.
+      const attached = new Map<
+        number,
+        { wc: Electron.WebContents; cdp: Electron.Debugger; ready: boolean }
+      >()
+      let cdp: Electron.Debugger = currentWC.debugger
+      let cdpReady = false
+      const attachTo = (
+        wcToAttach: Electron.WebContents
+      ): { cdp: Electron.Debugger; ready: boolean } => {
+        let rec = attached.get(wcToAttach.id)
+        if (!rec) {
+          wcToAttach.on('console-message', onConsoleMessage)
+          const d = wcToAttach.debugger
+          let ready = false
+          try {
+            if (!d.isAttached()) d.attach('1.3')
+            ready = true
+          } catch {
+            // attach can fail (e.g. DevTools already attached) — fall back to
+            // sendInputEvent for hover; no CDP means no network evidence here.
+          }
+          if (ready) {
+            d.on('message', onCdpMessage)
+            d.sendCommand('Network.enable').catch(() => {
+              // network domain unavailable — console evidence still works
+            })
+          }
+          rec = { wc: wcToAttach, cdp: d, ready }
+          attached.set(wcToAttach.id, rec)
         }
+        return rec
       }
+
+      // Make the tab for a recording-local windowId the active/current target,
+      // attaching its debugger. Returns false if that tab was never opened.
+      const switchTo = (windowId: number): boolean => {
+        const tab = ordinalToTab.get(windowId)
+        if (!tab) return false
+        if (tab.view.webContents !== currentWC) {
+          activeTabId = tab.id
+          mainWindow.contentView.addChildView(tab.view) // bring to top
+          resizeEmbedded()
+          currentWC = tab.view.webContents
+        }
+        const rec = attachTo(currentWC)
+        cdp = rec.cdp
+        cdpReady = rec.ready
+        return true
+      }
+      switchTo(0) // attach the starting tab
 
       // Every exit from the replay goes through here so the CDP debugger is
       // always released, pass or fail.
@@ -849,21 +1175,30 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
       } => {
-        embeddedBrowser.webContents.removeListener('console-message', onConsoleMessage)
-        if (cdpReady) {
+        // Detach EVERY tab we touched (console + CDP), and clear the replay flag
+        // in each so normal browsing gets its real native dialogs back.
+        onPopupOpened = null // drop any unfired one-shot popup hook
+        for (const rec of attached.values()) {
           try {
-            cdp.removeListener('message', onCdpMessage)
-            cdp.detach()
+            rec.wc.removeListener('console-message', onConsoleMessage)
           } catch {
-            // already detached — fine
+            // listener already gone — fine
+          }
+          if (rec.ready) {
+            try {
+              rec.cdp.removeListener('message', onCdpMessage)
+              rec.cdp.detach()
+            } catch {
+              // already detached — fine
+            }
+          }
+          if (!rec.wc.isDestroyed()) {
+            rec.wc
+              .executeJavaScript('window.__qaflowReplaying=false;window.__qaflowNextDialog=null;')
+              .catch(() => {})
           }
         }
-        // Day 16: replay is over — stop the dialog override from auto-answering
-        // so normal browsing gets its real native dialogs back.
         isReplaying = false
-        embeddedBrowser.webContents
-          .executeJavaScript('window.__qaflowReplaying=false;window.__qaflowNextDialog=null;')
-          .catch(() => {})
         return outcome
       }
 
@@ -876,9 +1211,7 @@ function createWindow(): void {
       isReplaying = true
       replayDownloads = []
       replayDownloadCursor = 0
-      embeddedBrowser.webContents
-        .executeJavaScript('window.__qaflowReplaying=true')
-        .catch(() => {})
+      currentWC.executeJavaScript('window.__qaflowReplaying=true').catch(() => {})
 
       for (let i = 0; i < list.length; i++) {
         const step = list[i]
@@ -887,12 +1220,28 @@ function createWindow(): void {
         if (step.disabled) continue
         evidenceStep = i // tag captured console/network lines with this step
         mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
+        // Day 17 (Phase 4): if THIS step opens a new tab, arm a one-shot to
+        // capture it so we can bind it to `opensWindow` after the action runs.
+        let popupWait: Promise<Tab> | null = null
         try {
+          // Make this step's tab the current target. Tab 0 is always bound; a
+          // popup tab was bound when its opener step ran.
+          const stepWindowId = step.windowId ?? 0
+          if (!switchTo(stepWindowId)) {
+            throw new Error(
+              `This step runs in tab ${stepWindowId}, which was never opened during replay`
+            )
+          }
+          if (step.opensWindow !== undefined) {
+            popupWait = new Promise<Tab>((resolve) => {
+              onPopupOpened = resolve
+            })
+          }
           if (step.type === 'navigate') {
             hasNavigated = true
             resizeEmbedded()
             try {
-              await embeddedBrowser.webContents.loadURL(step.url ?? '')
+              await currentWC.loadURL(step.url ?? '')
             } catch (err) {
               // ERR_ABORTED = the request was superseded (redirect / retry) —
               // a page IS loading, just not via the original request. Treat
@@ -950,9 +1299,11 @@ function createWindow(): void {
               .map((c) => c.css)
               .filter((c): c is string => !!c)
             const paths = (step.value ?? '').split('\n').filter(Boolean)
-            if (!cssList.length) throw new Error('Upload step has no CSS selector for the file input')
+            if (!cssList.length)
+              throw new Error('Upload step has no CSS selector for the file input')
             if (!paths.length) throw new Error('Upload step has no file to set')
-            if (!cdpReady) throw new Error('File upload needs the debugger (CDP), which did not attach')
+            if (!cdpReady)
+              throw new Error('File upload needs the debugger (CDP), which did not attach')
             // Poll for the input — it may still be loading after a navigation,
             // the same smart-wait every other step gets. Try the candidate
             // selectors strongest-first (like the normal finder, so a weak
@@ -984,7 +1335,7 @@ function createWindow(): void {
             // document-relative, so it needs no changes — only the frame it
             // runs in differs. The finder still resolves the element through
             // the full candidate ladder (role / text / CSS), strongest-first.
-            const targetFrame = await resolveFrame(step.frame)
+            const targetFrame = await resolveFrame(currentWC, step.frame)
             if (!targetFrame) {
               throw new Error(
                 'Could not find the iframe for this step (it never appeared on the page)'
@@ -995,10 +1346,11 @@ function createWindow(): void {
             // itself instead of blocking. Also flag replay so any UNEXPECTED
             // dialog auto-accepts rather than hanging the run.
             await armNextDialog(targetFrame, list[i + 1])
-            const result = (await targetFrame.executeJavaScript(
-              buildActionScript(step),
-              true
-            )) as { ok: boolean; error?: string; hoverAt?: { x: number; y: number } } | null
+            const result = (await targetFrame.executeJavaScript(buildActionScript(step), true)) as {
+              ok: boolean
+              error?: string
+              hoverAt?: { x: number; y: number }
+            } | null
             if (!result || !result.ok) throw new Error(result?.error || 'Action failed')
             // A hover step: the page script located the trigger and returned
             // its center. Move the engine-level mouse there via CDP (sets CSS
@@ -1016,14 +1368,32 @@ function createWindow(): void {
                 }
               }
               if (!moved) {
-                embeddedBrowser.webContents.sendInputEvent({ type: 'mouseMove', x, y })
+                currentWC.sendInputEvent({ type: 'mouseMove', x, y })
               }
               await wait(150)
+            }
+          }
+          // Day 17 (Phase 4): if this step opened a tab, the action above just
+          // triggered the popup — wait for it and bind it to its ordinal so
+          // later steps in that tab can run. A timeout means the popup never
+          // appeared; a later step referencing it will fail clearly.
+          if (popupWait) {
+            const newTab = await Promise.race([popupWait, wait(8000).then(() => null)])
+            onPopupOpened = null // disarm if it never fired
+            if (newTab) {
+              ordinalToTab.set(step.opensWindow as number, newTab)
+              const popupWC = newTab.view.webContents
+              attachTo(popupWC)
+              // Give the popup a beat to load before steps run in it (its first
+              // step would otherwise race the navigation).
+              const loadDeadline = Date.now() + 8000
+              while (popupWC.isLoading() && Date.now() < loadDeadline) await wait(100)
             }
           }
           mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'done' })
           await wait(450)
         } catch (err) {
+          onPopupOpened = null // disarm any popup hook if the step failed
           const message = err instanceof Error ? err.message : String(err)
           // Day 11.5: photograph the page AT the moment of failure — evidence
           // for a human now and required input for Day 13's AI translator.
@@ -1034,15 +1404,12 @@ function createWindow(): void {
             // an outline around the culprit element when it still resolves.
             // Draw → capture → erase: the marks live only inside the PNG.
             try {
-              await embeddedBrowser.webContents.executeJavaScript(
-                buildFailureMarkScript(step, message),
-                true
-              )
+              await currentWC.executeJavaScript(buildFailureMarkScript(step, message), true)
               await wait(120) // let the scroll + overlay paint before capture
             } catch {
               // decoration failed — capture the plain screenshot anyway
             }
-            const image = await embeddedBrowser.webContents.capturePage()
+            const image = await currentWC.capturePage()
             const dir = join(libraryDir(), '_failures')
             await mkdir(dir, { recursive: true })
             screenshotPath = join(dir, `failure-${Date.now()}.png`)
@@ -1051,7 +1418,7 @@ function createWindow(): void {
             screenshotPath = undefined
           }
           try {
-            await embeddedBrowser.webContents.executeJavaScript(removeFailureMarkScript(), true)
+            await currentWC.executeJavaScript(removeFailureMarkScript(), true)
           } catch {
             // page may be gone — nothing to clean
           }

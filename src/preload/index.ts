@@ -29,6 +29,19 @@ const api = {
       const listener = (_event: unknown, url: string): void => callback(url)
       ipcRenderer.on('browser:url-changed', listener)
       return () => ipcRenderer.removeListener('browser:url-changed', listener)
+    },
+
+    // Day 17 (multiple windows): make the tab with this ordinal the active one.
+    switchTab: (ordinal: number): Promise<void> => ipcRenderer.invoke('browser:switchTab', ordinal),
+
+    // Day 17: close the tab with this ordinal (the original tab can't close).
+    closeTab: (ordinal: number): Promise<void> => ipcRenderer.invoke('browser:closeTab', ordinal),
+
+    // Day 17: subscribe to the open-tabs list. Returns an unsubscribe fn.
+    onTabsChanged: (callback: (tabs: unknown[]) => void): (() => void) => {
+      const listener = (_event: unknown, tabs: unknown[]): void => callback(tabs)
+      ipcRenderer.on('browser:tabs-changed', listener)
+      return () => ipcRenderer.removeListener('browser:tabs-changed', listener)
     }
   },
 
@@ -45,6 +58,14 @@ const api = {
       const listener = (_event: unknown, step: unknown): void => callback(step)
       ipcRenderer.on('recorder:step', listener)
       return () => ipcRenderer.removeListener('recorder:step', listener)
+    },
+
+    // Day 17 (multiple windows): a previously-sent step gained an `opensWindow`
+    // tag (it opened a new tab). Returns an unsubscribe fn.
+    onStepPatch: (callback: (patch: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, patch: unknown): void => callback(patch)
+      ipcRenderer.on('recorder:step-patch', listener)
+      return () => ipcRenderer.removeListener('recorder:step-patch', listener)
     },
 
     // Save the generated Playwright code to a .ts file the user picks.

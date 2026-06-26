@@ -40,6 +40,12 @@ export interface ReplayStep {
   // is unchanged (it's all document-relative) — main just runs it in the
   // matching frame's document instead of the top page. See FrameRef.
   frame?: { url: string; name?: string }[]
+  // Day 17 (multiple windows): recording-local tab this step runs in (0 = the
+  // starting tab). Replay switches to this tab before running the step.
+  windowId?: number
+  // Day 17: set on the click/press that OPENS a new tab — the ordinal it opens.
+  // Replay arms a wait-for-popup before the action and binds the new tab to it.
+  opensWindow?: number
 }
 
 // === The in-page resolver ===========================================

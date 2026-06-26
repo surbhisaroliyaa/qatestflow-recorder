@@ -10,6 +10,12 @@ interface BrowserAPI {
   onUrlChange: (callback: (url: string) => void) => () => void
   // Live URL + title of the embedded page — prefills page-level checks (Day 11).
   getPageInfo: () => Promise<{ url: string; title: string }>
+  // Day 17 (multiple windows): make a given tab (by ordinal) the active one.
+  switchTab: (ordinal: number) => Promise<void>
+  // Day 17: close a tab (by ordinal). The original tab (0) can't be closed.
+  closeTab: (ordinal: number) => Promise<void>
+  // Day 17: the open-tabs list changed (opened/closed/switched/retitled).
+  onTabsChanged: (callback: (tabs: TabInfo[]) => void) => () => void
 }
 
 interface ReplayProgress {
@@ -31,6 +37,9 @@ interface ReplayResult {
 interface RecorderAPI {
   toggle: (resume?: boolean) => Promise<boolean>
   onStep: (callback: (step: RecorderStep) => void) => () => void
+  // Day 17 (multiple windows): a recorded step gained an `opensWindow` tag
+  // after it was sent — patch it in place (matched by `id`).
+  onStepPatch: (callback: (patch: StepPatch) => void) => () => void
   exportTest: (code: string, fixturePaths?: string[]) => Promise<string | null>
   pickUploadFile: () => Promise<string | null>
   revealDownload: (path: string) => Promise<void>
@@ -280,6 +289,34 @@ declare global {
     // Day 15: set when the element lives inside an <iframe> — tells replay
     // which frame to run in, and export which frameLocator to wrap.
     frame?: FrameRef
+    // Day 17: a transient correlation id stamped by main when the step is
+    // emitted, so a later `recorder:step-patch` (which tab a click opened) can
+    // target this exact step. Only meaningful during a live recording.
+    id?: number
+    // Day 17 (multiple windows): which browser tab this step happened in, as an
+    // ORDINAL — 0 = the original tab, 1 = the first popup opened this session,
+    // etc. Absent/undefined is read as 0 everywhere (back-compat with older
+    // single-tab tests). Analogous to `frame`, one level up.
+    windowId?: number
+    // Day 17: set on the click/press step that OPENED a new tab — the value is
+    // the ordinal of the tab it opened. Lets replay arm a wait-for-page before
+    // the click, and export wrap it in Promise.all([waitForEvent('page'), …]).
+    opensWindow?: number
+  }
+
+  // Day 17: one open browser tab, as the renderer's tab strip sees it.
+  interface TabInfo {
+    ordinal: number
+    title: string
+    url: string
+    active: boolean
+  }
+
+  // Day 17: main tells the renderer a click opened a new tab — patch the
+  // already-sent step (matched by `id`) with the ordinal it opened.
+  interface StepPatch {
+    id: number
+    opensWindow: number
   }
 
   interface Window {

@@ -98,6 +98,8 @@ function App(): React.JSX.Element {
   const [hasNavigated, setHasNavigated] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [steps, setSteps] = useState<RecorderStep[]>([])
+  // Day 17 (multiple windows): the open browser tabs. Empty/one = strip hidden.
+  const [tabs, setTabs] = useState<TabInfo[]>([])
   // The generated Playwright code shown in the export modal (null = closed).
   const [exportCode, setExportCode] = useState<string | null>(null)
   const [savedPath, setSavedPath] = useState<string | null>(null)
@@ -257,6 +259,12 @@ function App(): React.JSX.Element {
     return unsubscribe
   }, [])
 
+  // Day 17 (multiple windows): keep the tab strip in sync with main.
+  useEffect(() => {
+    const unsubscribe = window.api.browser.onTabsChanged((t) => setTabs(t))
+    return unsubscribe
+  }, [])
+
   // Day 9: a picked element arrives — close pick mode, open the assertion
   // chooser prefilled with the element's live text.
   // Day 12: unless this pick is a RE-PICK for a paused replay — then it heals
@@ -330,6 +338,17 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const unsubscribe = window.api.recorder.onStep((step) => {
       setSteps((prev) => [...prev, step])
+    })
+    return unsubscribe
+  }, [])
+
+  // Day 17 (multiple windows): main tells us a click opened a new tab AFTER the
+  // step was already sent — patch that step (matched by id) with `opensWindow`.
+  useEffect(() => {
+    const unsubscribe = window.api.recorder.onStepPatch((patch) => {
+      setSteps((prev) =>
+        prev.map((s) => (s.id === patch.id ? { ...s, opensWindow: patch.opensWindow } : s))
+      )
     })
     return unsubscribe
   }, [])
@@ -1277,6 +1296,37 @@ function App(): React.JSX.Element {
         </button>
       </div>
 
+      {/* Day 17: the tab strip — shown only with 2+ tabs (a popup opened one).
+          Its height must match TAB_STRIP_HEIGHT in main so the native browser
+          view, which starts just below it, lines up exactly. */}
+      {tabs.length > 1 && (
+        <div className="tab-strip">
+          {tabs.map((t) => (
+            <div
+              key={t.ordinal}
+              className={`browser-tab${t.active ? ' active' : ''}`}
+              onClick={() => window.api.browser.switchTab(t.ordinal)}
+              title={t.url}
+            >
+              <span className="browser-tab-title">{t.title || 'New Tab'}</span>
+              {t.ordinal > 0 && (
+                <button
+                  className="browser-tab-close"
+                  title="Close tab"
+                  aria-label="Close tab"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    window.api.browser.closeTab(t.ordinal)
+                  }}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* The browser area is left empty — the native embedded browser is
           painted over it. Only the steps panel on the right shows through. */}
       <div className="workspace">
@@ -1705,6 +1755,20 @@ function App(): React.JSX.Element {
                         />
                       ) : (
                         <span className="step-text">{stepText(step)}</span>
+                      )}
+                      {/* Day 17: tab provenance — only shown for multi-tab tests */}
+                      {(step.windowId ?? 0) > 0 && (
+                        <span className="window-badge" title={`Runs in tab ${step.windowId}`}>
+                          ⧉ tab {step.windowId}
+                        </span>
+                      )}
+                      {step.opensWindow !== undefined && (
+                        <span
+                          className="window-badge opens"
+                          title={`This action opens tab ${step.opensWindow}`}
+                        >
+                          ↗ opens tab {step.opensWindow}
+                        </span>
                       )}
                       {step.selector && (
                         <button

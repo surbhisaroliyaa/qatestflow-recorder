@@ -11,16 +11,17 @@ function quote(value: string): string {
   return JSON.stringify(value)
 }
 
-// Day 15: when a step happened inside an <iframe>, its locator must be scoped
-// to that frame with page.frameLocator(...). Prefer the frame's name/id for a
-// stable selector, falling back to its src URL; nested frames chain. A normal
-// (top-page) step just uses `page`.
-function frameBase(frame?: FrameRef): string {
-  if (!frame || !frame.length) return 'page'
+// Day 15/17: scope a locator to the right page AND frame. `pageVar` is the page
+// the step runs in (`page` for single-tab tests, `page0`/`page1`/… for multi-
+// window ones — see generatePlaywrightTest). Day 15: if the step happened inside
+// an <iframe>, chain page.frameLocator(...) onto it (name/id preferred, src URL
+// fallback; nested frames chain).
+function pageBase(pageVar: string, frame?: FrameRef): string {
+  if (!frame || !frame.length) return pageVar
   return frame.reduce((base, f) => {
     const sel = f.name ? `iframe[name=${quote(f.name)}]` : `iframe[src=${quote(f.url)}]`
     return `${base}.frameLocator(${quote(sel)})`
-  }, 'page')
+  }, pageVar)
 }
 
 // Playwright's toHaveURL(string) demands the FULL exact URL — too brittle for
@@ -117,45 +118,49 @@ export function stepText(step: RecorderStep): string {
 // Day 16: a dialog is answered by a handler REGISTERED BEFORE the action that
 // triggers it (Playwright's page.once('dialog', …)), so it's emitted just ahead
 // of its trigger by the generator — not as its own line here.
-function dialogHandler(step: RecorderStep): string {
+function dialogHandler(step: RecorderStep, pageVar: string): string {
   if (step.dialogKind === 'confirm' && step.value === 'dismiss') {
-    return `page.once('dialog', (dialog) => dialog.dismiss())`
+    return `${pageVar}.once('dialog', (dialog) => dialog.dismiss())`
   }
   if (step.dialogKind === 'prompt') {
-    return `page.once('dialog', (dialog) => dialog.accept(${quote(step.value ?? '')}))`
+    return `${pageVar}.once('dialog', (dialog) => dialog.accept(${quote(step.value ?? '')}))`
   }
-  return `page.once('dialog', (dialog) => dialog.accept())`
+  return `${pageVar}.once('dialog', (dialog) => dialog.accept())`
 }
 
 // The actual Playwright action for one step (without the leading comment).
 // `baseURL`: when a navigate's URL lives under it, emit just the PATH —
 // `test.use({ baseURL })` (added by the generator) resolves it at runtime, so
 // retargeting the suite at another environment means editing ONE line.
-function actionFor(step: RecorderStep, baseURL?: string): string | null {
+function actionFor(
+  step: RecorderStep,
+  baseURL: string | undefined,
+  pageVar: string
+): string | null {
   if (step.type === 'navigate') {
     let url = step.url ?? ''
     if (baseURL && url.startsWith(baseURL)) {
       url = url.slice(baseURL.length) || '/'
     }
-    return `await page.goto(${quote(url)})`
+    return `await ${pageVar}.goto(${quote(url)})`
   }
 
   if (step.type === 'wait') {
     const ms = Math.max(0, (parseFloat(step.value ?? '0') || 0) * 1000)
-    return `await page.waitForTimeout(${ms})`
+    return `await ${pageVar}.waitForTimeout(${ms})`
   }
 
-  // Page-level checks assert on `page` itself — no element, so they must run
+  // Page-level checks assert on the page itself — no element, so they must run
   // BEFORE the no-selector bail-out below.
   if (step.type === 'assert' && step.assertKind === 'url-contains') {
-    return `await expect(page).toHaveURL(${regexContains(step.value ?? '')})`
+    return `await expect(${pageVar}).toHaveURL(${regexContains(step.value ?? '')})`
   }
   if (step.type === 'assert' && step.assertKind === 'title') {
-    return `await expect(page).toHaveTitle(${quote(step.value ?? '')})`
+    return `await expect(${pageVar}).toHaveTitle(${quote(step.value ?? '')})`
   }
 
   if (!step.selector) return null
-  const base = frameBase(step.frame)
+  const base = pageBase(pageVar, step.frame)
   const locator = `${base}.${step.selector}`
 
   // Assertions translate 1:1 to Playwright's expect() matchers.
@@ -247,9 +252,19 @@ export function generatePlaywrightTest(
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const enabled = steps.filter((step) => !step.disabled)
+
+  // Day 17 (multiple windows): is this a multi-tab test? Only then do we switch
+  // from the single `page` fixture to per-tab `page0`/`page1`/… variables (and
+  // a `context` to open new pages). A single-tab test exports EXACTLY as before.
+  const multiWindow = enabled.some(
+    (step) => (step.windowId ?? 0) > 0 || step.opensWindow !== undefined
+  )
+  const pv = (windowId?: number): string => (multiWindow ? `page${windowId ?? 0}` : 'page')
+
   const lines: string[] = []
   for (let i = 0; i < enabled.length; i++) {
     const step = enabled[i]
+    const pageVar = pv(step.windowId)
     // A dialog step has no action of its own — its handler is emitted just
     // before the action that triggers it (the previous loop iteration).
     if (step.type === 'dialog') continue
@@ -270,25 +285,44 @@ export function generatePlaywrightTest(
     // action, because Playwright dialog handlers must be set up in advance.
     const next = enabled[i + 1]
     if (next && next.type === 'dialog') {
-      lines.push(`  // ${stepText(next)}\n  ${dialogHandler(next)}`)
+      lines.push(`  // ${stepText(next)}\n  ${dialogHandler(next, pv(next.windowId))}`)
     }
     // Day 16(+): if the NEXT step is a download, this action triggers it — start
     // waiting for the download BEFORE clicking (Playwright requires that order).
     if (next && next.type === 'download') {
-      lines.push(`  const download${i + 1}Promise = page.waitForEvent('download')`)
+      lines.push(`  const download${i + 1}Promise = ${pageVar}.waitForEvent('download')`)
     }
-    const action = actionFor(step, baseURL)
+    const action = actionFor(step, baseURL, pageVar)
     if (!action) continue
+    // Day 17: a step that OPENS a tab must set up the page wait BEFORE the click,
+    // so wrap it in Promise.all([context.waitForEvent('page'), <action>]) and
+    // capture the new page as page<N>.
+    if (step.opensWindow !== undefined) {
+      const inner = action.replace(/^await /, '')
+      lines.push(
+        `  // ${stepText(step)}\n` +
+          `  const [page${step.opensWindow}] = await Promise.all([\n` +
+          `    context.waitForEvent('page'),\n` +
+          `    ${inner}\n` +
+          `  ])`
+      )
+      continue
+    }
     lines.push(`  // ${stepText(step)}\n  ${action}`)
   }
-  const body = lines.join('\n\n')
+
+  // Day 17: in multi-window mode, alias the fixture as page0 and grab its
+  // context (used to await newly-opened pages). Prepended to the test body.
+  const prelude = multiWindow ? '  const page0 = page\n  const context = page.context()\n\n' : ''
+  const body = prelude + lines.join('\n\n')
 
   // Only import expect when an assertion (or a download check) uses it; pull in
   // fs only when a download check needs a file-size assertion.
   const hasDownload = enabled.some((step) => step.type === 'download')
   const hasAssert = enabled.some((step) => step.type === 'assert') || hasDownload
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
-  const header = `import ${imports} from '@playwright/test'\n` + (hasDownload ? "import fs from 'fs'\n" : '')
+  const header =
+    `import ${imports} from '@playwright/test'\n` + (hasDownload ? "import fs from 'fs'\n" : '')
   const use = baseURL ? `\ntest.use({ baseURL: ${quote(baseURL)} })\n` : ''
 
   return `${header}${use}

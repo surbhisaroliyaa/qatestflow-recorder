@@ -155,6 +155,94 @@ body {
   border-bottom: 1px solid #444;
 }
 
+/* Day 17 (multiple windows): the tab strip. Height (34px) MUST match
+   TAB_STRIP_HEIGHT in src/main/index.ts so the native browser view, which
+   starts just below it, lines up with no gap or overlap. */
+.tab-strip {
+  display: flex;
+  align-items: stretch;
+  height: 34px;
+  flex: none;
+  gap: 2px;
+  padding: 0 8px;
+  background: #232323;
+  border-bottom: 1px solid #444;
+  overflow-x: auto;
+}
+
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 200px;
+  padding: 0 10px;
+  background: #2c2c2c;
+  border: 1px solid #3a3a3a;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  align-self: flex-end;
+  height: 28px;
+  cursor: pointer;
+  color: #bbb;
+  font-size: 12px;
+  user-select: none;
+}
+
+.browser-tab:hover {
+  background: #343434;
+}
+
+.browser-tab.active {
+  background: #1e1e1e;
+  border-color: #4a6cf7;
+  color: #fff;
+}
+
+.browser-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-tab-close {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  text-align: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+}
+
+.browser-tab-close:hover {
+  background: #e0524d;
+  color: #fff;
+}
+
+/* Day 17 (multiple windows): per-step tab provenance badges. */
+.window-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #2a3a5a;
+  color: #9db8f7;
+  white-space: nowrap;
+}
+
+.window-badge.opens {
+  background: #3a2f1a;
+  color: #e0b341;
+}
+
 .nav-btn {
   display: flex;
   align-items: center;
