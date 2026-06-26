@@ -219,6 +219,13 @@ function App(): React.JSX.Element {
   // A re-pick landed on an element with no stable hooks — explain why the
   // heal was refused (shown inside the recovery panel).
   const [recoveryWarning, setRecoveryWarning] = useState<string | null>(null)
+  // A re-pick whose element looks DIFFERENT from the original step — held back
+  // for a "heal anyway?" confirm so a wrong pick can't silently heal (Day 17).
+  const [repickPending, setRepickPending] = useState<{
+    picked: PickedElement
+    healIndex: number
+    message: string
+  } | null>(null)
   // Day 16(+): a transient download toast (record + replay). 'downloading' is
   // shown immediately on start; it resolves to 'done' (ok/empty/failed).
   const [downloadToast, setDownloadToast] = useState<
@@ -288,6 +295,53 @@ function App(): React.JSX.Element {
     refreshSessions()
   }, [])
 
+  // Apply a re-pick heal: same step, new eyes — keep what it DOES (type/value/
+  // check), replace how it FINDS the element (label + ladder + frame), and retry.
+  const applyHeal = (picked: PickedElement, healIndex: number): void => {
+    const next = stepsRef.current.map((s, idx) =>
+      idx === healIndex
+        ? {
+            ...s,
+            label: picked.label,
+            selector: picked.selector,
+            candidates: picked.candidates,
+            // Day 15: the re-picked element may now live in a different frame
+            // (or none) — carry its frame so replay routes correctly.
+            frame: picked.frame
+          }
+        : s
+    )
+    setSteps(next)
+    setHealedIndices((prev) => new Set(prev).add(healIndex))
+    setRecovery(null)
+    setRepickPending(null)
+    window.api.recorder.recovery({ action: 'retry', step: next[healIndex] })
+  }
+
+  // Day 17: does the re-picked element look DIFFERENT from the original step's
+  // element? A click succeeds on almost anything, so without this a wrong pick
+  // would silently "heal" + pass. Compare visible label (unrelated words) and
+  // ARIA role. Returns a warning to confirm, or null when it's a clean match.
+  const repickMismatch = (original: RecorderStep, picked: PickedElement): string | null => {
+    const norm = (s?: string): string =>
+      (s ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim()
+    const a = norm(original.label)
+    const b = norm(picked.label)
+    const aTokens = new Set(a.split(' ').filter(Boolean))
+    const shared = b.split(' ').some((t) => t && aTokens.has(t))
+    const labelDiffers = !!a && !!b && a !== b && !shared
+    const oRole = primaryCandidate(original)?.role
+    const pRole = picked.candidates.find((c) => c.locator === picked.selector)?.role
+    const roleDiffers = !!oRole && !!pRole && oRole !== pRole
+    if (!labelDiffers && !roleDiffers) return null
+    const origDesc = original.label ? `"${original.label}"${oRole ? ` (${oRole})` : ''}` : 'it'
+    const gotDesc = `"${picked.label}"${pRole ? ` (${pRole})` : ''}`
+    return `You picked ${gotDesc}, but the original step targeted ${origDesc} — they look different. Heal anyway?`
+  }
+
   // Day 9: a picked element arrives — close pick mode, open the assertion
   // chooser prefilled with the element's live text.
   // Day 12: unless this pick is a RE-PICK for a paused replay — then it heals
@@ -307,26 +361,15 @@ function App(): React.JSX.Element {
           )
           return
         }
-        // Same step, new eyes: keep what it DOES (type/value/check), replace
-        // how it FINDS the element (label + full candidate ladder, rebuilt
-        // from the freshly picked element).
-        const next = stepsRef.current.map((s, idx) =>
-          idx === healIndex
-            ? {
-                ...s,
-                label: picked.label,
-                selector: picked.selector,
-                candidates: picked.candidates,
-                // Day 15: the re-picked element may now live in a different
-                // frame (or none) — carry its frame so replay routes correctly.
-                frame: picked.frame
-              }
-            : s
-        )
-        setSteps(next)
-        setHealedIndices((prev) => new Set(prev).add(healIndex))
-        setRecovery(null)
-        window.api.recorder.recovery({ action: 'retry', step: next[healIndex] })
+        // Day 17: if the pick looks different from the original element, hold it
+        // for a "heal anyway?" confirm instead of silently healing.
+        const original = stepsRef.current[healIndex]
+        const mismatch = original ? repickMismatch(original, picked) : null
+        if (mismatch) {
+          setRepickPending({ picked, healIndex, message: mismatch })
+          return
+        }
+        applyHeal(picked, healIndex)
         return
       }
       setPickedElement(picked)
@@ -353,6 +396,7 @@ function App(): React.JSX.Element {
     const unsubscribe = window.api.recorder.onReplayPaused((info) => {
       setRecovery(info)
       setRecoveryWarning(null)
+      setRepickPending(null)
     })
     return unsubscribe
   }, [])
@@ -496,6 +540,7 @@ function App(): React.JSX.Element {
     // mirror that here so no recovery UI survives the trip to welcome.
     setRecovery(null)
     setRecoveryWarning(null)
+    setRepickPending(null)
     setRepickIndex(null)
     setSkippedIndices(new Set())
     setHealedIndices(new Set())
@@ -637,6 +682,7 @@ function App(): React.JSX.Element {
   const answerRecovery = (action: 'retry' | 'skip' | 'stop'): void => {
     setRecovery(null)
     setRecoveryWarning(null)
+    setRepickPending(null)
     window.api.recorder.recovery({ action })
   }
 
@@ -645,6 +691,7 @@ function App(): React.JSX.Element {
   const handleRecoveryRepick = async (): Promise<void> => {
     if (!recovery) return
     setRecoveryWarning(null)
+    setRepickPending(null)
     setRepickIndex(recovery.index)
     setIsPicking(true)
     await window.api.recorder.setPicking(true)
@@ -1565,7 +1612,23 @@ function App(): React.JSX.Element {
               </div>
               <code className="assert-selector recovery-error">{recovery.error}</code>
               {recoveryWarning && <div className="pick-warning">⚠ {recoveryWarning}</div>}
-              {repickIndex !== null ? (
+              {repickPending ? (
+                <>
+                  {/* Day 17: the pick looks different from the original — confirm */}
+                  <div className="pick-warning">⚠ {repickPending.message}</div>
+                  <div className="assert-actions recovery-actions">
+                    <button className="modal-btn" onClick={() => setRepickPending(null)}>
+                      Cancel
+                    </button>
+                    <button
+                      className="modal-btn primary"
+                      onClick={() => applyHeal(repickPending.picked, repickPending.healIndex)}
+                    >
+                      Heal anyway
+                    </button>
+                  </div>
+                </>
+              ) : repickIndex !== null ? (
                 <div className="assert-actions recovery-actions">
                   <span className="recovery-hint">
                     Click the correct element in the page (Esc cancels)
