@@ -1,6 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, WebContentsView, dialog, webFrameMain } from 'electron'
 import { join, basename, dirname } from 'path'
-import { writeFile, mkdir, copyFile } from 'fs/promises'
+import { writeFile, mkdir, copyFile, readFile, readdir } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
@@ -18,6 +18,7 @@ import {
   deleteTest,
   recordRun,
   libraryDir,
+  slugify,
   type RunInfo
 } from './library'
 import { explainFailure, type FailureEvidence } from './translator'
@@ -336,6 +337,11 @@ function createWindow(): void {
   // open we hide the browser by shrinking it to nothing, then restore it.
   let overlayOpen = false
 
+  // Day 17 (viewport emulation): when set, the active tab renders at this FIXED
+  // size (device emulation) instead of filling the browser area, so the page's
+  // window.innerWidth = this width and responsive layouts switch. Null = fill.
+  let viewportOverride: { width: number; height: number } | null = null
+
   const resizeEmbedded = (): void => {
     if (mainWindow.isDestroyed()) return
     // getContentBounds = the drawable area inside the window frame, so the
@@ -345,13 +351,20 @@ function createWindow(): void {
     // The tab strip is shown only with 2+ tabs; when shown, the browser view
     // starts that much lower (the renderer reserves the same band).
     const top = CHROME_HEIGHT + (tabs.length > 1 ? TAB_STRIP_HEIGHT : 0)
+    const areaWidth = Math.max(0, width - PANEL_WIDTH)
+    const areaHeight = Math.max(0, height - top)
     const hidden = { x: 0, y: 0, width: 0, height: 0 }
-    const shown = {
-      x: 0,
-      y: top,
-      width: Math.max(0, width - PANEL_WIDTH),
-      height: Math.max(0, height - top)
-    }
+    // With a viewport override, clamp it to the available area so it never spills
+    // under the panel/chrome; the leftover area shows the dark React backdrop
+    // (like a browser's device-emulation mode).
+    const shown = viewportOverride
+      ? {
+          x: 0,
+          y: top,
+          width: Math.min(viewportOverride.width, areaWidth),
+          height: Math.min(viewportOverride.height, areaHeight)
+        }
+      : { x: 0, y: top, width: areaWidth, height: areaHeight }
     // Only the ACTIVE tab is sized to fill the browser area; every other tab is
     // zero-bound (hidden). Before first navigation, or while a React overlay is
     // open, even the active tab is hidden so the welcome/modal shows through.
@@ -446,12 +459,43 @@ function createWindow(): void {
     activeWC().reload()
   })
 
+  // Day 17: wipe the browser's cookies + localStorage on demand (like Chrome's
+  // "clear site data") so you can record from a clean, logged-out state. We wait
+  // for the clear to actually settle (clearStorageData resolves early) before
+  // reloading, so the reloaded page reflects the cleared state.
+  ipcMain.handle('browser:clearData', async () => {
+    const wc = activeWC()
+    try {
+      await wc.session.clearStorageData({ storages: ['cookies', 'localstorage'] })
+    } catch {
+      // best-effort
+    }
+    for (let i = 0; i < 20; i++) {
+      try {
+        if ((await wc.session.cookies.get({})).length === 0) break
+      } catch {
+        break
+      }
+      await wait(50)
+    }
+    wc.reload()
+  })
+
   // When the React UI opens a full-window overlay (e.g. the export modal), hide
   // the native embedded browser so it doesn't cover the overlay; restore after.
   ipcMain.handle('browser:setOverlay', (_event, open: boolean) => {
     overlayOpen = open
     resizeEmbedded()
   })
+
+  // Day 17 (viewport emulation): render at a fixed viewport (or null = fill).
+  ipcMain.handle(
+    'browser:setViewport',
+    (_event, viewport: { width: number; height: number } | null) => {
+      viewportOverride = viewport && viewport.width > 0 && viewport.height > 0 ? viewport : null
+      resizeEmbedded()
+    }
+  )
 
   // The embedded page's live URL + title — the renderer can't see inside the
   // native browser view, so page-level checks (Day 11) ask main for prefills.
@@ -845,6 +889,129 @@ function createWindow(): void {
     return copyIntoUploads(result.filePaths[0])
   })
 
+  // Day 17: saved sessions (storageState) — cookies + localStorage captured from
+  // the logged-in browser, so a test can start already logged in. Stored as
+  // Playwright-format storageState JSON in _sessions (the same format export
+  // emits, and a real Playwright run consumes directly).
+  const sessionsDir = join(libraryDir(), '_sessions')
+  mkdir(sessionsDir, { recursive: true }).catch(() => {})
+
+  interface PWStorageState {
+    cookies: {
+      name: string
+      value: string
+      domain: string
+      path: string
+      expires: number
+      httpOnly: boolean
+      secure: boolean
+      sameSite: 'Strict' | 'Lax' | 'None'
+    }[]
+    origins: { origin: string; localStorage: { name: string; value: string }[] }[]
+  }
+
+  // Capture the active tab's current session (cookies + the current page's
+  // localStorage) into a Playwright storageState file. Returns the file name.
+  ipcMain.handle('session:save', async (_event, name: string): Promise<string | null> => {
+    try {
+      const wc = activeWC()
+      const raw = await wc.session.cookies.get({})
+      const cookies = raw.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain ?? '',
+        path: c.path ?? '/',
+        expires: c.expirationDate ?? -1,
+        httpOnly: !!c.httpOnly,
+        secure: !!c.secure,
+        sameSite: (c.sameSite === 'no_restriction'
+          ? 'None'
+          : c.sameSite === 'strict'
+            ? 'Strict'
+            : 'Lax') as 'Strict' | 'Lax' | 'None'
+      }))
+      let origins: PWStorageState['origins'] = []
+      let origin = ''
+      try {
+        origin = new URL(wc.getURL()).origin
+      } catch {
+        origin = ''
+      }
+      if (origin) {
+        const lsJson = (await wc
+          .executeJavaScript('JSON.stringify(Object.entries(window.localStorage))')
+          .catch(() => '[]')) as string
+        const entries = JSON.parse(lsJson) as [string, string][]
+        if (entries.length) {
+          origins = [{ origin, localStorage: entries.map(([n, v]) => ({ name: n, value: v })) }]
+        }
+      }
+      const state: PWStorageState = { cookies, origins }
+      const file = `${slugify(name)}.json`
+      await writeFile(join(sessionsDir, file), JSON.stringify(state, null, 2), 'utf-8')
+      return file
+    } catch {
+      return null
+    }
+  })
+
+  ipcMain.handle('session:list', async (): Promise<string[]> => {
+    try {
+      const files = await readdir(sessionsDir)
+      return files.filter((f) => f.endsWith('.json'))
+    } catch {
+      return []
+    }
+  })
+
+  // Seed a saved session into the browser before a replay so it starts logged in.
+  // Cookies are set up front (they apply pre-navigation). localStorage is handed
+  // back to the caller to inject after the first navigation reaches its origin
+  // (localStorage is per-origin and needs the page loaded there first).
+  const seedSession = async (
+    wc: Electron.WebContents,
+    file: string
+  ): Promise<PWStorageState['origins']> => {
+    try {
+      const raw = await readFile(join(sessionsDir, file), 'utf-8')
+      const state = JSON.parse(raw) as PWStorageState
+      for (const c of state.cookies ?? []) {
+        const host = (c.domain || '').replace(/^\./, '')
+        if (!host) continue
+        // Use HTTPS for the url (modern sites are https; a non-secure cookie set
+        // via an https url is still valid and sent to https requests). Set it as
+        // a HOST cookie (no `domain` field) — passing `domain` makes Electron
+        // normalize it to ".host" (a domain cookie), which some apps' js-cookie
+        // reads differ on; a host cookie matches exactly what the site set.
+        const url = `https://${host}${c.path || '/'}`
+        const isDomainCookie = (c.domain || '').startsWith('.')
+        try {
+          // Seed as a SESSION cookie (no expirationDate). The original cookie's
+          // expiry may already have passed between saving the session and this
+          // replay (many auth cookies are short-lived) — and setting an expired
+          // cookie silently fails to persist. The seeded auth only needs to last
+          // THIS replay, so a session cookie is both correct and bulletproof.
+          await wc.session.cookies.set({
+            url,
+            name: c.name,
+            value: c.value,
+            ...(isDomainCookie ? { domain: c.domain } : {}),
+            path: c.path || '/',
+            secure: c.secure,
+            httpOnly: c.httpOnly,
+            sameSite:
+              c.sameSite === 'None' ? 'no_restriction' : c.sameSite === 'Strict' ? 'strict' : 'lax'
+          })
+        } catch {
+          // a single bad cookie shouldn't abort the whole seed
+        }
+      }
+      return state.origins ?? []
+    } catch {
+      return []
+    }
+  }
+
   // Day 16: downloads — auto-save to a known folder so a download never stalls
   // a run behind a native "Save as" dialog. Recorded as a `download` step for
   // visibility; on replay the file simply re-downloads to the same folder.
@@ -983,7 +1150,8 @@ function createWindow(): void {
     async (
       _event,
       steps: ReplayStep[],
-      interactive?: boolean
+      interactive?: boolean,
+      storageState?: string
     ): Promise<{
       ok: boolean
       failedAt?: number
@@ -1019,6 +1187,39 @@ function createWindow(): void {
         })
       } catch {
         // best-effort; continue even if clearing isn't supported
+      }
+      // Electron resolves clearStorageData's promise BEFORE the async wipe
+      // actually finishes — so a cookie set right after gets erased by the
+      // still-pending clear. When we're about to SEED a session, wait for the
+      // clear to truly settle (cookie store actually empty) before seeding.
+      if (storageState) {
+        for (let i = 0; i < 40; i++) {
+          try {
+            if ((await currentWC.session.cookies.get({})).length === 0) break
+          } catch {
+            break
+          }
+          await wait(50)
+        }
+      }
+
+      // Day 17: if the test has a saved session, seed it AFTER clearing — cookies
+      // now, localStorage after the first navigate reaches its origin (it's
+      // per-origin and needs the page loaded there). So the run starts logged in.
+      let seedOrigins: { origin: string; localStorage: { name: string; value: string }[] }[] = []
+      let localStorageSeeded = false
+      if (storageState) {
+        // Seed, then VERIFY the cookies landed; re-seed once if the wipe still
+        // raced us (belt-and-suspenders against the clearStorageData timing).
+        seedOrigins = await seedSession(currentWC, storageState)
+        try {
+          if ((await currentWC.session.cookies.get({})).length === 0) {
+            await wait(100)
+            seedOrigins = await seedSession(currentWC, storageState)
+          }
+        } catch {
+          // verification is best-effort
+        }
       }
 
       // === Failure evidence capture (Day 13) ==========================
@@ -1252,6 +1453,31 @@ function createWindow(): void {
               const message = err instanceof Error ? err.message : String(err)
               if (!message.includes('ERR_ABORTED') && !message.includes('(-3)')) throw err
             }
+            // Day 17: now that a page is loaded, seed this origin's localStorage
+            // from the saved session (once), then reload so the app reads it —
+            // so localStorage-based logins start authenticated too.
+            if (seedOrigins.length && !localStorageSeeded) {
+              let origin = ''
+              try {
+                origin = new URL(currentWC.getURL()).origin
+              } catch {
+                origin = ''
+              }
+              const match = seedOrigins.find((o) => o.origin === origin)
+              if (match && match.localStorage.length) {
+                localStorageSeeded = true
+                const setLs = match.localStorage
+                  .map(
+                    (e) =>
+                      `window.localStorage.setItem(${JSON.stringify(e.name)},${JSON.stringify(e.value)});`
+                  )
+                  .join('')
+                await currentWC
+                  .executeJavaScript(`(()=>{try{${setLs}}catch(e){}})()`)
+                  .catch(() => {})
+                await currentWC.loadURL(currentWC.getURL()).catch(() => {})
+              }
+            }
           } else if (step.type === 'wait') {
             // An explicit pause — no element involved, just time (Day 9).
             const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
@@ -1481,8 +1707,17 @@ function createWindow(): void {
   // library.ts where it's testable without Electron wiring.
   ipcMain.handle(
     'library:save',
-    (_event, input: { name: string; baseURL: string; suite: string; steps: unknown[] }) =>
-      saveTest(input)
+    (
+      _event,
+      input: {
+        name: string
+        baseURL: string
+        suite: string
+        steps: unknown[]
+        storageState?: string
+        viewport?: { width: number; height: number }
+      }
+    ) => saveTest(input)
   )
   ipcMain.handle('library:list', () => listTests())
   ipcMain.handle('library:listSuites', () => listSuites())
@@ -1536,7 +1771,14 @@ function createWindow(): void {
   // Returns the saved file path, or null if the user cancels the dialog.
   ipcMain.handle(
     'recorder:export',
-    async (_event, code: string, fixturePaths?: string[]): Promise<string | null> => {
+    async (
+      _event,
+      code: string,
+      fixturePaths?: string[],
+      sessionFile?: string,
+      pageObjectCode?: string,
+      pageObjectFileName?: string
+    ): Promise<string | null> => {
       const result = await dialog.showSaveDialog(mainWindow, {
         title: 'Save Playwright test',
         defaultPath: 'recorded.spec.ts',
@@ -1554,6 +1796,20 @@ function createWindow(): void {
         for (const src of fixturePaths) {
           await copyFile(src, join(fixturesDir, basename(src))).catch(() => {})
         }
+      }
+      // Day 17: the test.use({ storageState }) the export emits points at
+      // `sessions/<file>` — copy the session JSON there so the spec is portable.
+      if (sessionFile) {
+        const sessDir = join(dirname(result.filePath), 'sessions')
+        await mkdir(sessDir, { recursive: true }).catch(() => {})
+        await copyFile(join(sessionsDir, sessionFile), join(sessDir, sessionFile)).catch(() => {})
+      }
+      // Day 17 (full POM): the spec imports the page class from `./pages/<Name>` —
+      // write that class file into a pages/ folder beside the spec.
+      if (pageObjectCode && pageObjectFileName) {
+        const pagesDir = join(dirname(result.filePath), 'pages')
+        await mkdir(pagesDir, { recursive: true }).catch(() => {})
+        await writeFile(join(pagesDir, pageObjectFileName), pageObjectCode, 'utf-8').catch(() => {})
       }
       return result.filePath
     }

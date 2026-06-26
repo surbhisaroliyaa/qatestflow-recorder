@@ -39,6 +39,12 @@ export interface SavedTestFile {
   updatedAt: string
   lastRun?: RunInfo // most recent outcome (= runs[0]; kept for older files)
   runs?: RunInfo[] // run history, newest first, capped (Day 11.5)
+  // Day 17: a saved session (storageState) file in _sessions to start this test
+  // already logged in (skip the login steps). Undefined = fresh/clean state.
+  storageState?: string
+  // Day 17: render the test at a fixed viewport (device emulation). Undefined =
+  // fill the window (desktop, the default).
+  viewport?: { width: number; height: number }
   steps: unknown[]
 }
 
@@ -53,6 +59,7 @@ export interface SavedTestSummary {
   baseURL: string
   updatedAt: string
   stepCount: number
+  storageState?: string // Day 17: attached session, if any
   lastRun?: RunInfo
   runs?: RunInfo[]
 }
@@ -105,6 +112,7 @@ function toSummary(fileName: string, test: SavedTestFile): SavedTestSummary {
     baseURL: test.baseURL,
     updatedAt: test.updatedAt,
     stepCount: Array.isArray(test.steps) ? test.steps.length : 0,
+    storageState: test.storageState,
     lastRun: test.lastRun,
     runs: test.runs?.slice(0, RUN_HISTORY_LIMIT)
   }
@@ -129,6 +137,8 @@ export async function saveTest(input: {
   baseURL: string
   suite: string
   steps: unknown[]
+  storageState?: string
+  viewport?: { width: number; height: number }
 }): Promise<SavedTestSummary> {
   await ensureDir()
   const suite = safeSegment(input.suite)
@@ -144,6 +154,8 @@ export async function saveTest(input: {
     updatedAt: now,
     lastRun: previous?.lastRun,
     runs: previous?.runs,
+    storageState: input.storageState,
+    viewport: input.viewport,
     steps: input.steps
   }
   await writeFile(join(libraryDir(), fileName), JSON.stringify(test, null, 2), 'utf-8')

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { generatePlaywrightTest, stepText } from './playwrightExport'
+import { generatePlaywrightTest, generatePageObjectTest, stepText } from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
@@ -103,6 +103,12 @@ function App(): React.JSX.Element {
   // The generated Playwright code shown in the export modal (null = closed).
   const [exportCode, setExportCode] = useState<string | null>(null)
   const [savedPath, setSavedPath] = useState<string | null>(null)
+  // Day 17 (page-object export): toggle between inline and full POM output.
+  const [poExport, setPoExport] = useState(false)
+  // POM mode produces a SECOND file (the page class). Null = inline (one file).
+  const [exportPage, setExportPage] = useState<string | null>(null)
+  const [exportPageFileName, setExportPageFileName] = useState('')
+  const [exportTab, setExportTab] = useState<'spec' | 'page'>('spec')
   // Replay state: which step is running, which finished, which failed + why.
   const [isReplaying, setIsReplaying] = useState(false)
   const [replayingIndex, setReplayingIndex] = useState<number | null>(null)
@@ -134,8 +140,17 @@ function App(): React.JSX.Element {
   const [testName, setTestName] = useState('')
   const [testFileName, setTestFileName] = useState<string | null>(null)
   const [baseURL, setBaseURL] = useState('')
+  // Day 17 — session reuse: the storageState file attached to this test (start
+  // logged in), and the list of saved sessions to pick from.
+  const [storageState, setStorageState] = useState<string | undefined>(undefined)
+  const [sessions, setSessions] = useState<string[]>([])
+  // Day 17 — viewport emulation: the device viewport this test renders at
+  // (undefined = desktop / fill the window).
+  const [viewport, setViewport] = useState<{ width: number; height: number } | undefined>(undefined)
   const [savePanelOpen, setSavePanelOpen] = useState(false)
   const [saveNameInput, setSaveNameInput] = useState('')
+  // Day 17 (session reuse): the name to save the current browser session under.
+  const [sessionNameInput, setSessionNameInput] = useState('')
   // Inline editing of the test's base URL (the environment switch).
   const [editingBase, setEditingBase] = useState(false)
   const [baseEditValue, setBaseEditValue] = useState('')
@@ -263,6 +278,14 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const unsubscribe = window.api.browser.onTabsChanged((t) => setTabs(t))
     return unsubscribe
+  }, [])
+
+  // Day 17 (session reuse): load the saved-session list once.
+  const refreshSessions = (): void => {
+    window.api.session.list().then(setSessions)
+  }
+  useEffect(() => {
+    refreshSessions()
   }, [])
 
   // Day 9: a picked element arrives — close pick mode, open the assertion
@@ -463,6 +486,8 @@ function App(): React.JSX.Element {
     setTestName('')
     setTestFileName(null)
     setBaseURL('')
+    setStorageState(undefined)
+    applyViewport(undefined)
     setTestSuite('')
     setSavePanelOpen(false)
     setSuiteRun(null)
@@ -484,17 +509,44 @@ function App(): React.JSX.Element {
   // Export: generate the Playwright code and open the preview modal. The
   // test's name becomes the test title; its base URL becomes test.use({...})
   // (derived from the first navigation when the test was never saved).
-  const handleExport = (): void => {
-    setSavedPath(null)
-    setExportCode(
-      generatePlaywrightTest(steps, {
-        name: testName || undefined,
-        baseURL: baseURL || deriveBaseURL(steps) || undefined
-      })
-    )
+  // Generate the export and show it. Inline = one file; Page Object = two files
+  // (a spec + a page class), unless the test is multi-tab/iframe/dialog/download
+  // (POM falls back to inline, since those don't fit a clean auto-POM).
+  const showExport = (pageObject: boolean): void => {
+    const opts = {
+      name: testName || undefined,
+      baseURL: baseURL || deriveBaseURL(steps) || undefined,
+      storageState,
+      viewport
+    }
+    if (pageObject) {
+      const pom = generatePageObjectTest(steps, opts)
+      if (pom) {
+        setExportCode(pom.spec)
+        setExportPage(pom.page)
+        setExportPageFileName(pom.pageFileName)
+        setExportTab('spec')
+        return
+      }
+      // Unsupported for POM — fall back to inline so the user still gets output.
+    }
+    setExportCode(generatePlaywrightTest(steps, opts))
+    setExportPage(null)
   }
 
-  // Save the previewed code to a .ts file (main shows the OS save dialog).
+  const handleExport = (): void => {
+    setSavedPath(null)
+    showExport(poExport)
+  }
+
+  // Day 17: flip between inline and Page Object output, regenerating the preview.
+  const handleTogglePoExport = (po: boolean): void => {
+    setPoExport(po)
+    showExport(po)
+  }
+
+  // Save the previewed code to .ts file(s) (main shows the OS save dialog). In
+  // Page Object mode the page class is written to a pages/ folder beside the spec.
   const handleSaveExport = async (): Promise<void> => {
     if (!exportCode) return
     // Day 16(+): gather the upload files this test references so main can copy
@@ -506,12 +558,19 @@ function App(): React.JSX.Element {
           .flatMap((s) => (s.value ?? '').split('\n').filter(Boolean))
       )
     )
-    const path = await window.api.recorder.exportTest(exportCode, fixturePaths)
+    const path = await window.api.recorder.exportTest(
+      exportCode,
+      fixturePaths,
+      storageState,
+      exportPage ?? undefined,
+      exportPage ? exportPageFileName : undefined
+    )
     if (path) setSavedPath(path)
   }
 
   const handleCopyExport = (): void => {
-    if (exportCode) navigator.clipboard.writeText(exportCode)
+    const code = exportTab === 'page' && exportPage ? exportPage : exportCode
+    if (code) navigator.clipboard.writeText(code)
   }
 
   // One replay of one steps-list, with outcome recorded for saved tests.
@@ -521,7 +580,8 @@ function App(): React.JSX.Element {
   const runOnce = async (
     list: RecorderStep[],
     fileName: string | null,
-    interactive = false
+    interactive = false,
+    sessionFile: string | undefined = storageState
   ): Promise<{
     ok: boolean
     failedAt?: number
@@ -539,7 +599,7 @@ function App(): React.JSX.Element {
     setLastConsoleErrors([])
     setLastNetworkErrors([])
     setIsReplaying(true)
-    const result = await window.api.recorder.replay(list, interactive)
+    const result = await window.api.recorder.replay(list, interactive, sessionFile)
     setIsReplaying(false)
     setReplayingIndex(null)
     setRecovery(null)
@@ -697,13 +757,40 @@ function App(): React.JSX.Element {
     setSavePanelOpen(true)
   }
 
+  // Day 17 (viewport emulation): set the device viewport and apply it live so
+  // the embedded browser re-renders at that size immediately.
+  const applyViewport = (vp: { width: number; height: number } | undefined): void => {
+    setViewport(vp)
+    window.api.browser.setViewport(vp ?? null)
+  }
+
+  // Day 17 (session reuse): capture the embedded browser's CURRENT state (after
+  // logging in) as a named session, then auto-attach it to this test.
+  const handleSaveSession = async (): Promise<void> => {
+    const name = sessionNameInput.trim()
+    if (!name) return
+    const file = await window.api.session.save(name)
+    if (file) {
+      setSessionNameInput('')
+      setStorageState(file)
+      refreshSessions()
+    }
+  }
+
   const handleSaveTest = async (): Promise<void> => {
     const name = saveNameInput.trim()
     if (!name) return
     // A typed new section name wins over the chosen chip.
     const suite = newSuiteInput.trim() || saveSuite || 'Daily'
     const base = baseURL || deriveBaseURL(steps)
-    const summary = await window.api.library.save({ name, baseURL: base, suite, steps })
+    const summary = await window.api.library.save({
+      name,
+      baseURL: base,
+      suite,
+      steps,
+      storageState,
+      viewport
+    })
     // Renaming or re-sectioning = a MOVE: the save created the new file, so
     // drop the old one (otherwise stale copies pile up under the old name).
     if (testFileName && testFileName !== summary.fileName) {
@@ -727,6 +814,8 @@ function App(): React.JSX.Element {
     setTestFileName(fileName)
     setTestSuite(fileName.includes('/') ? fileName.split('/')[0] : '')
     setBaseURL(test.baseURL)
+    setStorageState(test.storageState)
+    applyViewport(test.viewport)
     setHasNavigated(true)
     const firstNav = test.steps.find((s) => s.type === 'navigate' && s.url)
     if (firstNav?.url) {
@@ -769,7 +858,7 @@ function App(): React.JSX.Element {
         setTestFileName(t.fileName)
         setTestSuite(suite)
         setBaseURL(data.baseURL)
-        const result = await runOnce(data.steps, t.fileName)
+        const result = await runOnce(data.steps, t.fileName, false, data.storageState)
         entry = {
           fileName: t.fileName,
           name: data.name,
@@ -1257,6 +1346,14 @@ function App(): React.JSX.Element {
         <button className="nav-btn" onClick={handleHome} title="Home" aria-label="Home">
           ⌂
         </button>
+        <button
+          className="nav-btn"
+          onClick={() => window.api.browser.clearData()}
+          title="Clear cookies & site data (log out, empty cart) and reload"
+          aria-label="Clear browser data"
+        >
+          🧹
+        </button>
         <form className="url-form" onSubmit={handleSubmit}>
           <input
             className="url-input"
@@ -1600,6 +1697,71 @@ function App(): React.JSX.Element {
                   ? `base URL: ${baseURL || deriveBaseURL(steps)}`
                   : 'no base URL detected'}
               </code>
+              {/* Day 17: session reuse — start this test already logged in */}
+              <div className="session-block">
+                <label className="session-label">Start logged in (session):</label>
+                <select
+                  className="session-select"
+                  value={storageState ?? ''}
+                  onChange={(e) => setStorageState(e.target.value || undefined)}
+                >
+                  <option value="">None — fresh login each run</option>
+                  {sessions.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+                <div className="session-save-row">
+                  <input
+                    className="assert-value"
+                    value={sessionNameInput}
+                    onChange={(e) => setSessionNameInput(e.target.value)}
+                    placeholder="name to save the CURRENT logged-in browser as…"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    className="modal-btn"
+                    onClick={handleSaveSession}
+                    disabled={!sessionNameInput.trim()}
+                    title="Capture the embedded browser's current cookies + storage as a reusable session"
+                  >
+                    Save session
+                  </button>
+                </div>
+              </div>
+              {/* Day 17: viewport / device emulation */}
+              <div className="session-block">
+                <label className="session-label">Viewport (device):</label>
+                <div className="assert-kinds">
+                  {[
+                    {
+                      label: 'Desktop',
+                      vp: undefined as { width: number; height: number } | undefined
+                    },
+                    { label: 'Tablet · 768×1024', vp: { width: 768, height: 1024 } },
+                    { label: 'Mobile · 375×667', vp: { width: 375, height: 667 } }
+                  ].map((p) => {
+                    const active =
+                      (!viewport && !p.vp) ||
+                      (!!viewport &&
+                        !!p.vp &&
+                        viewport.width === p.vp.width &&
+                        viewport.height === p.vp.height)
+                    return (
+                      <button
+                        key={p.label}
+                        type="button"
+                        className={`assert-kind${active ? ' chosen' : ''}`}
+                        onClick={() => applyViewport(p.vp)}
+                      >
+                        {p.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
               <div className="assert-actions">
                 <button className="modal-btn" onClick={() => setSavePanelOpen(false)}>
                   Cancel
@@ -2090,8 +2252,45 @@ function App(): React.JSX.Element {
                 ✕
               </button>
             </div>
+            {/* Day 17: choose inline vs full Page Object Model output */}
+            <div className="export-modes">
+              <button
+                type="button"
+                className={`export-mode${!poExport ? ' chosen' : ''}`}
+                onClick={() => handleTogglePoExport(false)}
+              >
+                Inline
+              </button>
+              <button
+                type="button"
+                className={`export-mode${poExport ? ' chosen' : ''}`}
+                onClick={() => handleTogglePoExport(true)}
+                title="Full Page Object Model: a page class (locators + methods) + a spec that drives it. Single-page tests only."
+              >
+                Page Object
+              </button>
+              {/* In POM mode, two files — tabs to switch between spec and page class */}
+              {exportPage && (
+                <div className="export-file-tabs">
+                  <button
+                    type="button"
+                    className={`export-file-tab${exportTab === 'spec' ? ' chosen' : ''}`}
+                    onClick={() => setExportTab('spec')}
+                  >
+                    spec.ts
+                  </button>
+                  <button
+                    type="button"
+                    className={`export-file-tab${exportTab === 'page' ? ' chosen' : ''}`}
+                    onClick={() => setExportTab('page')}
+                  >
+                    {exportPageFileName}
+                  </button>
+                </div>
+              )}
+            </div>
             <pre className="modal-code">
-              <code>{exportCode}</code>
+              <code>{exportTab === 'page' && exportPage ? exportPage : exportCode}</code>
             </pre>
             <div className="modal-footer">
               {savedPath && <span className="saved-path">Saved to {savedPath}</span>}
@@ -2099,7 +2298,7 @@ function App(): React.JSX.Element {
                 Copy
               </button>
               <button className="modal-btn primary" onClick={handleSaveExport}>
-                Save .ts
+                {exportPage ? 'Save files' : 'Save .ts'}
               </button>
             </div>
           </div>

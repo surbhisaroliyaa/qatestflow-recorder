@@ -11,6 +11,30 @@ function quote(value: string): string {
   return JSON.stringify(value)
 }
 
+// Day 17 (page-object export): turn a step's human label into a camelCase JS
+// identifier for a named locator const, e.g. "Login button" -> "loginButton".
+function camelName(label: string): string {
+  const words = (label || 'el')
+    .replace(/[^a-zA-Z0-9 ]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  if (!words.length) return 'el'
+  const camel = words
+    .map((w, i) =>
+      i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+    )
+    .join('')
+  // A JS identifier can't start with a digit.
+  return /^[a-zA-Z_]/.test(camel) ? camel : `el${camel.charAt(0).toUpperCase()}${camel.slice(1)}`
+}
+
+// PascalCase version for a class name, e.g. "saucedemo login" -> "SaucedemoLogin".
+function pascalName(label: string): string {
+  const c = camelName(label)
+  return c.charAt(0).toUpperCase() + c.slice(1)
+}
+
 // Day 15/17: scope a locator to the right page AND frame. `pageVar` is the page
 // the step runs in (`page` for single-tab tests, `page0`/`page1`/… for multi-
 // window ones — see generatePlaywrightTest). Day 15: if the step happened inside
@@ -135,7 +159,10 @@ function dialogHandler(step: RecorderStep, pageVar: string): string {
 function actionFor(
   step: RecorderStep,
   baseURL: string | undefined,
-  pageVar: string
+  pageVar: string,
+  // Day 17 (page-object export): when set, the step's element is referenced via
+  // this pre-declared const (e.g. `loginButton`) instead of an inline locator.
+  elementLocator?: string
 ): string | null {
   if (step.type === 'navigate') {
     let url = step.url ?? ''
@@ -161,7 +188,7 @@ function actionFor(
 
   if (!step.selector) return null
   const base = pageBase(pageVar, step.frame)
-  const locator = `${base}.${step.selector}`
+  const locator = elementLocator ?? `${base}.${step.selector}`
 
   // Assertions translate 1:1 to Playwright's expect() matchers.
   if (step.type === 'assert') {
@@ -248,7 +275,12 @@ function actionFor(
 // test.use — the single line to edit when pointing at another environment).
 export function generatePlaywrightTest(
   steps: RecorderStep[],
-  options?: { name?: string; baseURL?: string }
+  options?: {
+    name?: string
+    baseURL?: string
+    storageState?: string
+    viewport?: { width: number; height: number }
+  }
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const enabled = steps.filter((step) => !step.disabled)
@@ -323,11 +355,201 @@ export function generatePlaywrightTest(
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const header =
     `import ${imports} from '@playwright/test'\n` + (hasDownload ? "import fs from 'fs'\n" : '')
-  const use = baseURL ? `\ntest.use({ baseURL: ${quote(baseURL)} })\n` : ''
+  // Day 17: test.use carries baseURL and (when a session is attached) the
+  // storageState path, so the exported test starts logged in.
+  const useProps: string[] = []
+  if (baseURL) useProps.push(`baseURL: ${quote(baseURL)}`)
+  if (options?.storageState) {
+    useProps.push(`storageState: ${quote(`sessions/${options.storageState}`)}`)
+  }
+  if (options?.viewport) {
+    useProps.push(
+      `viewport: { width: ${options.viewport.width}, height: ${options.viewport.height} }`
+    )
+  }
+  const use = useProps.length ? `\ntest.use({ ${useProps.join(', ')} })\n` : ''
 
   return `${header}${use}
 test(${quote(options?.name || 'recorded flow')}, async ({ page }) => {
 ${body}
 })
 `
+}
+
+// =====================================================================
+// Day 17 — FULL Page Object Model export (two files)
+// A real POM: a Page class holding the locators (+ a goto() and action
+// methods grouped from the recorded steps) in pages/<Name>Page.ts, and a spec
+// that imports it, instantiates it, calls the methods, and keeps the ASSERTIONS
+// (the "what we're checking") in the test — the classic separation.
+//
+// Scope: single-page, no-iframe, no-multi-tab tests, and no dialog/download
+// steps (those need handlers registered around actions, which don't fit a clean
+// auto-POM). Returns null for anything outside that — the caller falls back to
+// the normal inline export.
+// =====================================================================
+export function generatePageObjectTest(
+  steps: RecorderStep[],
+  options?: {
+    name?: string
+    baseURL?: string
+    storageState?: string
+    viewport?: { width: number; height: number }
+  }
+): { spec: string; page: string; pageFileName: string; className: string } | null {
+  const enabled = steps.filter((s) => !s.disabled)
+  const multiWindow = enabled.some((s) => (s.windowId ?? 0) > 0 || s.opensWindow !== undefined)
+  const hasFrames = enabled.some((s) => s.frame?.length)
+  const hasAwkward = enabled.some((s) => s.type === 'dialog' || s.type === 'download')
+  if (multiWindow || hasFrames || hasAwkward) return null
+
+  const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
+  const className = `${pascalName(options?.name || 'recorded flow')}Page`
+  const pageFileName = `${className}.ts`
+
+  // Member names shared across locators + methods (a class can't have a property
+  // and a method with the same name), plus reserved members.
+  const used = new Set<string>(['page', 'goto', 'constructor'])
+  const locatorDefs: { name: string; selector: string }[] = []
+  const nameByExpr = new Map<string, string>()
+  const nameForElement = (step: RecorderStep, clickTarget = false): string => {
+    const expr = step.selector as string
+    const existing = nameByExpr.get(expr)
+    if (existing) return existing
+    // A clicked element's locator gets a "Button" suffix (the POM convention for
+    // clickable things) so the ACTION METHOD can keep the clean verb — e.g. the
+    // login button is `loginButton`, the method that uses it is `login()`.
+    const baseName = camelName(step.label || step.type) + (clickTarget ? 'Button' : '')
+    let name = baseName
+    let n = 2
+    while (used.has(name)) name = `${baseName}${n++}`
+    used.add(name)
+    nameByExpr.set(expr, name)
+    locatorDefs.push({ name, selector: expr })
+    return name
+  }
+  // A step that targets a single named element (so it gets a locator property).
+  // Page-level asserts (url/title) and 'count' (a group check) use page directly.
+  const usesElement = (step: RecorderStep): boolean =>
+    !!step.selector &&
+    !(
+      step.type === 'assert' &&
+      (step.assertKind === 'url-contains' ||
+        step.assertKind === 'title' ||
+        step.assertKind === 'count')
+    )
+
+  // Walk the steps: accumulate consecutive ACTIONS into a method buffer, and
+  // flush it (as a method + a call in the spec) at each navigate/assert boundary.
+  const methods: { name: string; body: string[] }[] = []
+  const specBody: string[] = []
+  let buffer: string[] = []
+  let lastActionLabel = ''
+  let actionsSeq = 0
+  const flush = (): void => {
+    if (!buffer.length) return
+    const base = lastActionLabel ? camelName(lastActionLabel) : `actions${++actionsSeq}`
+    let name = base
+    let n = 2
+    while (used.has(name)) name = `${base}${n++}`
+    used.add(name)
+    methods.push({ name, body: buffer })
+    specBody.push(`  await app.${name}()`)
+    buffer = []
+    lastActionLabel = ''
+  }
+
+  let firstNavSeen = false
+  for (const step of enabled) {
+    if (step.type === 'navigate') {
+      flush()
+      if (!firstNavSeen) {
+        firstNavSeen = true
+        specBody.push('  await app.goto()')
+      } else {
+        let url = step.url ?? ''
+        if (baseURL && url.startsWith(baseURL)) url = url.slice(baseURL.length) || '/'
+        specBody.push(`  await app.page.goto(${quote(url)})`)
+      }
+      continue
+    }
+    if (step.type === 'assert') {
+      flush()
+      const name = usesElement(step) ? nameForElement(step) : ''
+      const line = actionFor(step, baseURL, 'app.page', name ? `app.${name}` : undefined)
+      if (line) specBody.push(`  ${line}`)
+      continue
+    }
+    // An action step → into the current method buffer.
+    if (step.type === 'wait') {
+      const line = actionFor(step, baseURL, 'this.page')
+      if (line) buffer.push(`    ${line}`)
+      continue
+    }
+    if (!step.selector) continue
+    const name = nameForElement(step, step.type === 'click')
+    const line = actionFor(step, baseURL, 'this.page', `this.${name}`)
+    if (line) buffer.push(`    ${line}`)
+    if (step.type === 'click' || step.type === 'press') lastActionLabel = step.label || ''
+  }
+  flush()
+
+  // The goto() destination = the first navigate (as a path under baseURL).
+  let gotoUrl = '/'
+  const firstNav = enabled.find((s) => s.type === 'navigate')
+  if (firstNav?.url) {
+    let u = firstNav.url
+    if (baseURL && u.startsWith(baseURL)) u = u.slice(baseURL.length) || '/'
+    gotoUrl = u
+  }
+
+  // === Build the page class file ===
+  const pageLines: string[] = []
+  pageLines.push(`import { type Page, type Locator } from '@playwright/test'`)
+  pageLines.push('')
+  pageLines.push(`export class ${className} {`)
+  pageLines.push(`  readonly page: Page`)
+  for (const d of locatorDefs) pageLines.push(`  readonly ${d.name}: Locator`)
+  pageLines.push('')
+  pageLines.push(`  constructor(page: Page) {`)
+  pageLines.push(`    this.page = page`)
+  for (const d of locatorDefs) pageLines.push(`    this.${d.name} = page.${d.selector}`)
+  pageLines.push(`  }`)
+  pageLines.push('')
+  pageLines.push(`  async goto(): Promise<void> {`)
+  pageLines.push(`    await this.page.goto(${quote(gotoUrl)})`)
+  pageLines.push(`  }`)
+  for (const m of methods) {
+    pageLines.push('')
+    pageLines.push(`  async ${m.name}(): Promise<void> {`)
+    for (const b of m.body) pageLines.push(b)
+    pageLines.push(`  }`)
+  }
+  pageLines.push(`}`)
+  const page = `${pageLines.join('\n')}\n`
+
+  // === Build the spec file ===
+  const hasAssert = enabled.some((s) => s.type === 'assert')
+  const imports = hasAssert ? '{ test, expect }' : '{ test }'
+  const useProps: string[] = []
+  if (baseURL) useProps.push(`baseURL: ${quote(baseURL)}`)
+  if (options?.storageState) {
+    useProps.push(`storageState: ${quote(`sessions/${options.storageState}`)}`)
+  }
+  if (options?.viewport) {
+    useProps.push(
+      `viewport: { width: ${options.viewport.width}, height: ${options.viewport.height} }`
+    )
+  }
+  const use = useProps.length ? `\ntest.use({ ${useProps.join(', ')} })\n` : ''
+  const spec =
+    `import ${imports} from '@playwright/test'\n` +
+    `import { ${className} } from './pages/${className}'\n` +
+    `${use}\n` +
+    `test(${quote(options?.name || 'recorded flow')}, async ({ page }) => {\n` +
+    `  const app = new ${className}(page)\n` +
+    `${specBody.join('\n')}\n` +
+    `})\n`
+
+  return { spec, page, pageFileName, className }
 }

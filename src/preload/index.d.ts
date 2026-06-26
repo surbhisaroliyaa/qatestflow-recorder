@@ -5,6 +5,8 @@ interface BrowserAPI {
   goBack: () => Promise<boolean>
   goForward: () => Promise<boolean>
   reload: () => Promise<void>
+  // Day 17: clear cookies + localStorage (log out / empty cart), then reload.
+  clearData: () => Promise<void>
   home: () => Promise<void>
   setOverlay: (open: boolean) => Promise<void>
   onUrlChange: (callback: (url: string) => void) => () => void
@@ -16,6 +18,8 @@ interface BrowserAPI {
   closeTab: (ordinal: number) => Promise<void>
   // Day 17: the open-tabs list changed (opened/closed/switched/retitled).
   onTabsChanged: (callback: (tabs: TabInfo[]) => void) => () => void
+  // Day 17 (viewport emulation): render at a fixed viewport, or null to fill.
+  setViewport: (viewport: { width: number; height: number } | null) => Promise<void>
 }
 
 interface ReplayProgress {
@@ -40,12 +44,24 @@ interface RecorderAPI {
   // Day 17 (multiple windows): a recorded step gained an `opensWindow` tag
   // after it was sent — patch it in place (matched by `id`).
   onStepPatch: (callback: (patch: StepPatch) => void) => () => void
-  exportTest: (code: string, fixturePaths?: string[]) => Promise<string | null>
+  exportTest: (
+    code: string,
+    fixturePaths?: string[],
+    sessionFile?: string,
+    pageObjectCode?: string,
+    pageObjectFileName?: string
+  ) => Promise<string | null>
   pickUploadFile: () => Promise<string | null>
   revealDownload: (path: string) => Promise<void>
   onDownloadStart: (callback: (info: { name: string }) => void) => () => void
   onDownloadDone: (callback: (info: DownloadInfo) => void) => () => void
-  replay: (steps: RecorderStep[], interactive?: boolean) => Promise<ReplayResult>
+  // Day 17: `storageState` (a saved session file) seeds the browser so the test
+  // starts already logged in (skips re-login) instead of from a clean state.
+  replay: (
+    steps: RecorderStep[],
+    interactive?: boolean,
+    storageState?: string
+  ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
   recovery: (decision: RecoveryDecision) => void
@@ -60,6 +76,8 @@ interface LibraryAPI {
     baseURL: string
     suite: string
     steps: RecorderStep[]
+    storageState?: string
+    viewport?: { width: number; height: number }
   }) => Promise<SavedTestSummary>
   list: () => Promise<SavedTestSummary[]>
   listSuites: () => Promise<string[]>
@@ -67,6 +85,16 @@ interface LibraryAPI {
   remove: (fileName: string) => Promise<void>
   recordRun: (fileName: string, run: RunInfo) => Promise<void>
   openScreenshot: (path: string) => Promise<void>
+}
+
+// Day 17 — saved browser sessions (storageState: cookies + localStorage) so a
+// test can start already logged in.
+interface SessionAPI {
+  // Capture the embedded browser's current session as a named storageState file.
+  // Returns the saved file name (e.g. "auth.json"), or null on failure.
+  save: (name: string) => Promise<string | null>
+  // List the saved session file names.
+  list: () => Promise<string[]>
 }
 
 // === Failure translator (Day 13) ===
@@ -80,6 +108,7 @@ interface API {
   recorder: RecorderAPI
   library: LibraryAPI
   translator: TranslatorAPI
+  session: SessionAPI
 }
 
 declare global {
@@ -125,6 +154,8 @@ declare global {
     baseURL: string
     createdAt: string
     updatedAt: string
+    storageState?: string // Day 17: attached session (start logged in)
+    viewport?: { width: number; height: number } // Day 17: device emulation
     lastRun?: RunInfo
     steps: RecorderStep[]
   }

@@ -13,6 +13,9 @@ const api = {
     goForward: (): Promise<boolean> => ipcRenderer.invoke('browser:goForward'),
     reload: (): Promise<void> => ipcRenderer.invoke('browser:reload'),
 
+    // Day 17: clear cookies + localStorage (log out / empty cart), then reload.
+    clearData: (): Promise<void> => ipcRenderer.invoke('browser:clearData'),
+
     // Reset straight to the welcome screen.
     home: (): Promise<void> => ipcRenderer.invoke('browser:home'),
 
@@ -42,7 +45,11 @@ const api = {
       const listener = (_event: unknown, tabs: unknown[]): void => callback(tabs)
       ipcRenderer.on('browser:tabs-changed', listener)
       return () => ipcRenderer.removeListener('browser:tabs-changed', listener)
-    }
+    },
+
+    // Day 17 (viewport emulation): render at a fixed viewport, or null to fill.
+    setViewport: (viewport: { width: number; height: number } | null): Promise<void> =>
+      ipcRenderer.invoke('browser:setViewport', viewport)
   },
 
   recorder: {
@@ -72,8 +79,21 @@ const api = {
     // Resolves to the saved file path, or null if cancelled. `fixturePaths`
     // (Day 16+) are the upload files to copy into a fixtures/ folder next to
     // the saved spec, so the exported test is portable.
-    exportTest: (code: string, fixturePaths?: string[]): Promise<string | null> =>
-      ipcRenderer.invoke('recorder:export', code, fixturePaths),
+    exportTest: (
+      code: string,
+      fixturePaths?: string[],
+      sessionFile?: string,
+      pageObjectCode?: string,
+      pageObjectFileName?: string
+    ): Promise<string | null> =>
+      ipcRenderer.invoke(
+        'recorder:export',
+        code,
+        fixturePaths,
+        sessionFile,
+        pageObjectCode,
+        pageObjectFileName
+      ),
 
     // Day 16(+): pick a different file for an upload step. Shows an OS open
     // dialog; resolves to the chosen file's stored path, or null if cancelled.
@@ -103,9 +123,10 @@ const api = {
     // failure PAUSE for a recovery decision instead of ending the run.
     replay: (
       steps: unknown[],
-      interactive?: boolean
+      interactive?: boolean,
+      storageState?: string
     ): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
-      ipcRenderer.invoke('recorder:replay', steps, interactive),
+      ipcRenderer.invoke('recorder:replay', steps, interactive, storageState),
 
     // === Recovery (Day 12) ===
     // An interactive replay paused at a failed step — main's loop is holding,
@@ -167,6 +188,8 @@ const api = {
       baseURL: string
       suite: string
       steps: unknown[]
+      storageState?: string
+      viewport?: { width: number; height: number }
     }): Promise<unknown> => ipcRenderer.invoke('library:save', input),
     list: (): Promise<unknown[]> => ipcRenderer.invoke('library:list'),
     listSuites: (): Promise<string[]> => ipcRenderer.invoke('library:listSuites'),
@@ -176,6 +199,12 @@ const api = {
       ipcRenderer.invoke('library:recordRun', fileName, run),
     openScreenshot: (path: string): Promise<void> =>
       ipcRenderer.invoke('library:openScreenshot', path)
+  },
+
+  // === Saved sessions (Day 17) — cookies + localStorage as storageState. ===
+  session: {
+    save: (name: string): Promise<string | null> => ipcRenderer.invoke('session:save', name),
+    list: (): Promise<string[]> => ipcRenderer.invoke('session:list')
   }
 }
 
