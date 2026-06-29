@@ -79,6 +79,16 @@ interface RecorderAPI {
   setPicking: (active: boolean) => Promise<void>
   onPicked: (callback: (picked: PickedElement) => void) => () => void
   onPickCancel: (callback: () => void) => () => void
+  // Day 19: capture the current page as a visual baseline + add a snapshot step.
+  snapshot: () => Promise<void>
+}
+
+// === Visual regression (Day 19) ===
+interface VisualAPI {
+  // Adopt a current capture as the new baseline (a page legitimately changed).
+  updateBaseline: (baselineId: string, currentPath: string) => Promise<boolean>
+  // A baseline image as a data: URL (for the diff view).
+  getBaseline: (id: string) => Promise<string | null>
 }
 
 interface LibraryAPI {
@@ -151,6 +161,7 @@ interface API {
   session: SessionAPI
   trace: TraceAPI
   drafts: DraftAPI
+  visual: VisualAPI
 }
 
 declare global {
@@ -290,6 +301,15 @@ declare global {
     // Day 18 (self-heal): an auto-found replacement element for the broken step
     // (matched by its recorded label) — offered as a one-click fix.
     suggestion?: PickedElement
+    // Day 19: a visual-snapshot failure — the diff image + the baseline to
+    // update if the new look is intended.
+    visual?: {
+      baselineId?: string
+      currentPath: string
+      diffPath?: string
+      ratioPct: number
+      thresholdPct: number
+    }
     consoleErrors?: string[] // evidence so far — Explain works mid-pause (Day 13)
     networkErrors?: string[]
   }
@@ -399,6 +419,7 @@ declare global {
       | 'dialog'
       | 'upload'
       | 'download'
+      | 'snapshot'
     label?: string
     // For type/select: the entered value. For assert text/value kinds: the
     // EXPECTED value. For wait: the seconds, as text (editable like any value).
@@ -418,6 +439,9 @@ declare global {
     // the on-replay file check). The step's `value` holds the EXPECTED filename
     // substring to verify (defaults to the recorded name; editable).
     downloadPath?: string
+    // Day 19 (visual regression): a `snapshot` step's baseline image id (file
+    // in _baselines). `value` holds the allowed diff threshold as a percent.
+    baselineId?: string
     selector?: string
     candidates?: SelectorCandidate[]
     // Day 15: set when the element lives inside an <iframe> — tells replay

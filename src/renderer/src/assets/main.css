@@ -439,6 +439,31 @@ body {
   cursor: default;
 }
 
+/* Day 19: visual-snapshot button — matches the chrome-bar buttons. */
+.snapshot-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 120ms ease;
+}
+.snapshot-btn:hover:not(:disabled) {
+  background: #4a4a4a;
+}
+.snapshot-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* While picking: blue, like the highlight box in the page. */
 .check-btn.picking {
   background: #173a5e;

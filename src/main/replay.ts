@@ -34,6 +34,7 @@ export interface ReplayStep {
   attrName?: string // for `attribute` asserts — which attribute to check (Day 11)
   secret?: boolean
   disabled?: boolean // turned off in the editor — skipped during replay
+  baselineId?: string // Day 19: a `snapshot` step's baseline image id
   selector?: string
   candidates?: ReplayCandidate[]
   // Day 15: when set, the element lives inside an <iframe>. The action script

@@ -166,7 +166,18 @@ const api = {
       const listener = (): void => callback()
       ipcRenderer.on('recorder:pick-cancel', listener)
       return () => ipcRenderer.removeListener('recorder:pick-cancel', listener)
-    }
+    },
+
+    // Day 19: capture the current page as a visual baseline + add a snapshot step.
+    snapshot: (): Promise<void> => ipcRenderer.invoke('recorder:snapshot')
+  },
+
+  // === Visual regression (Day 19) ===
+  visual: {
+    updateBaseline: (baselineId: string, currentPath: string): Promise<boolean> =>
+      ipcRenderer.invoke('visual:updateBaseline', baselineId, currentPath),
+    getBaseline: (id: string): Promise<string | null> =>
+      ipcRenderer.invoke('visual:getBaseline', id)
   },
 
   // === Failure translator + bug report (Day 13) ===

@@ -1212,6 +1212,8 @@ function App(): React.JSX.Element {
     if (step.type === 'type' || step.type === 'select' || step.type === 'wait') {
       return step.value ?? ''
     }
+    // Day 19: a snapshot's allowed diff threshold (percent) is editable.
+    if (step.type === 'snapshot') return step.value ?? '1'
     if (step.type === 'assert' && step.assertKind && assertNeedsValue(step.assertKind)) {
       return step.value ?? ''
     }
@@ -1767,6 +1769,15 @@ function App(): React.JSX.Element {
         >
           ✓ {isPicking ? 'Picking…' : 'Check'}
         </button>
+        {/* Day 19: capture the current page as a visual baseline. */}
+        <button
+          className="snapshot-btn"
+          onClick={() => window.api.recorder.snapshot()}
+          disabled={isReplaying || isPicking}
+          title="Visual snapshot: capture how the page looks now as a baseline; replay flags any visual change"
+        >
+          📸 Snapshot
+        </button>
         <button
           className={`record-btn${isRecording ? ' recording' : ''}`}
           onClick={handleRecordToggle}
@@ -2071,6 +2082,24 @@ function App(): React.JSX.Element {
                   >
                     🔁 Retry
                   </button>
+                  {/* Day 19: a visual snapshot differs — if the new look is
+                      intended, adopt it as the new baseline, then retry (passes). */}
+                  {recovery.visual?.baselineId && (
+                    <button
+                      className="modal-btn"
+                      onClick={async () => {
+                        const v = recovery.visual!
+                        const ok = await window.api.visual.updateBaseline(
+                          v.baselineId!,
+                          v.currentPath
+                        )
+                        if (ok) answerRecovery('retry')
+                      }}
+                      title="Adopt the current look as the new baseline (the visual change is intended), then retry"
+                    >
+                      📸 Update baseline
+                    </button>
+                  )}
                   {/* Day 18: manual pick heals a SELECTOR — only offer it when
                       the selector actually broke (not for assertion/timing
                       failures, where re-picking wouldn't help). */}

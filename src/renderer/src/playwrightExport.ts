@@ -67,6 +67,8 @@ export function stepText(step: RecorderStep): string {
       return 'Go back'
     case 'closeTab':
       return `Close tab ${step.windowId ?? ''}`.trim()
+    case 'snapshot':
+      return `Visual snapshot${step.value ? ` (≤ ${step.value}% diff)` : ''}`
     case 'click':
       return `Click ${step.label}`
     case 'type':
@@ -182,6 +184,12 @@ function actionFor(
 
   if (step.type === 'closeTab') {
     return `await ${pageVar}.close()`
+  }
+
+  if (step.type === 'snapshot') {
+    // Day 19: Playwright manages its own baseline (created on first run, then
+    // compared) — a clean 1:1 mapping for our visual snapshot.
+    return `await expect(${pageVar}).toHaveScreenshot()`
   }
 
   if (step.type === 'wait') {
@@ -363,7 +371,8 @@ export function generatePlaywrightTest(
   // Only import expect when an assertion (or a download check) uses it; pull in
   // fs only when a download check needs a file-size assertion.
   const hasDownload = enabled.some((step) => step.type === 'download')
-  const hasAssert = enabled.some((step) => step.type === 'assert') || hasDownload
+  const hasAssert =
+    enabled.some((step) => step.type === 'assert' || step.type === 'snapshot') || hasDownload
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const header =
     `import ${imports} from '@playwright/test'\n` + (hasDownload ? "import fs from 'fs'\n" : '')

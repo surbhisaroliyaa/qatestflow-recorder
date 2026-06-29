@@ -28,6 +28,7 @@ import {
 } from './library'
 import { explainFailure, type FailureEvidence } from './translator'
 import { observerProgram } from './observerSource'
+import { saveBaseline, loadBaseline, isSafeBaselineId, diffImages } from './visual'
 import {
   saveTrace,
   loadTrace,
@@ -43,6 +44,29 @@ import {
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+// Day 19: a visual snapshot must be captured when the page is STABLE, or a
+// half-loaded page (images still arriving) gets compared against a fully
+// rendered baseline. Wait for document-complete + every image finished, then a
+// short settle for fonts/layout. Used for BOTH baseline + replay captures so
+// they're taken under identical conditions. Best-effort (never throws).
+async function waitForVisualStable(wc: Electron.WebContents): Promise<void> {
+  try {
+    const deadline = Date.now() + 4000
+    for (;;) {
+      const ready = await wc
+        .executeJavaScript(
+          'document.readyState === "complete" && Array.prototype.every.call(document.images, function(i){return i.complete})'
+        )
+        .catch(() => true)
+      if (ready === true || Date.now() > deadline) break
+      await wait(150)
+    }
+    await wait(350) // settle for fonts / layout / late paints
+  } catch {
+    // best-effort — capture anyway
+  }
+}
 
 // Height in pixels reserved at the top of the window for our React chrome
 // (URL bar + back/forward/reload buttons). Everything below this is the
@@ -1713,6 +1737,12 @@ function createWindow(): void {
         traceConsoleCursor = consoleErrors.length
         traceNetworkCursor = networkErrors.length
         const stepStartMs = Date.now()
+        // Day 19: set when a `snapshot` step fails its visual diff — the catch
+        // then uses the diff image as the evidence (not a fresh page capture)
+        // and offers an "Update baseline" recovery.
+        let pendingVisual:
+          | { baselineId?: string; currentPath: string; diffPath?: string; ratioPct: number; thresholdPct: number }
+          | null = null
         mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
         // Day 17 (Phase 4): if THIS step opens a new tab, arm a one-shot to
         // capture it so we can bind it to `opensWindow` after the action runs.
@@ -1806,6 +1836,46 @@ function createWindow(): void {
               const wasCurrent = currentWC === tab.view.webContents
               closeTab(tab)
               if (wasCurrent) switchTo(0)
+            }
+          } else if (step.type === 'snapshot') {
+            // Day 19: re-capture the page and pixel-diff against the baseline.
+            // Wait for the page to settle first so we don't compare a still-
+            // loading page (images arriving) against the fully-rendered baseline.
+            await waitForVisualStable(currentWC)
+            const image = await currentWC.capturePage()
+            const baseline = step.baselineId ? await loadBaseline(step.baselineId) : null
+            if (!baseline) {
+              // No baseline on disk (e.g. first run / deleted) — adopt the
+              // current look as the baseline and pass, like Playwright does.
+              if (step.baselineId) await saveBaseline(step.baselineId, image.toPNG())
+            } else {
+              const result = diffImages(baseline, image)
+              const thresholdPct = Math.max(0, parseFloat(step.value ?? '1') || 0)
+              const ratioPct = result.ratio * 100
+              if (result.sizeMismatch || ratioPct > thresholdPct) {
+                const dir = join(libraryDir(), '_failures')
+                await mkdir(dir, { recursive: true })
+                const stamp = Date.now()
+                const currentPath = join(dir, `visual-current-${stamp}.png`)
+                await writeFile(currentPath, image.toPNG())
+                let diffPath: string | undefined
+                if (result.diffPng) {
+                  diffPath = join(dir, `visual-diff-${stamp}.png`)
+                  await writeFile(diffPath, result.diffPng)
+                }
+                pendingVisual = {
+                  baselineId: step.baselineId,
+                  currentPath,
+                  diffPath,
+                  ratioPct,
+                  thresholdPct
+                }
+                throw new Error(
+                  result.sizeMismatch
+                    ? `Visual snapshot: the page size changed (${result.baseSize?.width}×${result.baseSize?.height} → ${result.curSize?.width}×${result.curSize?.height})`
+                    : `Visual snapshot differs by ${ratioPct.toFixed(2)}% (allowed ${thresholdPct}%)`
+                )
+              }
             }
           } else if (step.type === 'wait') {
             // An explicit pause — no element involved, just time (Day 9).
@@ -1985,28 +2055,34 @@ function createWindow(): void {
           // Best-effort: a screenshot problem must never mask the real error.
           let screenshotPath: string | undefined
           let annotatedImage: Electron.NativeImage | undefined
-          try {
-            // Day 12.9: annotate the evidence first — red error banner, plus
-            // an outline around the culprit element when it still resolves.
-            // Draw → capture → erase: the marks live only inside the PNG.
+          if (pendingVisual) {
+            // Day 19: a visual-snapshot failure — the DIFF image is the evidence
+            // (changed pixels in red), so don't annotate/capture the page.
+            screenshotPath = pendingVisual.diffPath ?? pendingVisual.currentPath
+          } else {
             try {
-              await currentWC.executeJavaScript(buildFailureMarkScript(step, message), true)
-              await wait(120) // let the scroll + overlay paint before capture
+              // Day 12.9: annotate the evidence first — red error banner, plus
+              // an outline around the culprit element when it still resolves.
+              // Draw → capture → erase: the marks live only inside the PNG.
+              try {
+                await currentWC.executeJavaScript(buildFailureMarkScript(step, message), true)
+                await wait(120) // let the scroll + overlay paint before capture
+              } catch {
+                // decoration failed — capture the plain screenshot anyway
+              }
+              annotatedImage = await currentWC.capturePage()
+              const dir = join(libraryDir(), '_failures')
+              await mkdir(dir, { recursive: true })
+              screenshotPath = join(dir, `failure-${Date.now()}.png`)
+              await writeFile(screenshotPath, annotatedImage.toPNG())
             } catch {
-              // decoration failed — capture the plain screenshot anyway
+              screenshotPath = undefined
             }
-            annotatedImage = await currentWC.capturePage()
-            const dir = join(libraryDir(), '_failures')
-            await mkdir(dir, { recursive: true })
-            screenshotPath = join(dir, `failure-${Date.now()}.png`)
-            await writeFile(screenshotPath, annotatedImage.toPNG())
-          } catch {
-            screenshotPath = undefined
-          }
-          try {
-            await currentWC.executeJavaScript(removeFailureMarkScript(), true)
-          } catch {
-            // page may be gone — nothing to clean
+            try {
+              await currentWC.executeJavaScript(removeFailureMarkScript(), true)
+            } catch {
+              // page may be gone — nothing to clean
+            }
           }
           mainWindow.webContents.send('recorder:replay-progress', {
             index: i,
@@ -2040,6 +2116,17 @@ function createWindow(): void {
               traceId: tracePersisted ? traceRunId : undefined,
               selectorBroke,
               suggestion,
+              // Day 19: a visual-snapshot failure — lets the panel show the diff
+              // and offer "Update baseline" (adopt the new look).
+              visual: pendingVisual
+                ? {
+                    baselineId: pendingVisual.baselineId,
+                    currentPath: pendingVisual.currentPath,
+                    diffPath: pendingVisual.diffPath,
+                    ratioPct: pendingVisual.ratioPct,
+                    thresholdPct: pendingVisual.thresholdPct
+                  }
+                : undefined,
               // Day 13: evidence so far — the Explain button works mid-pause too
               consoleErrors: consoleErrors.slice(),
               networkErrors: networkErrors.slice()
@@ -2143,6 +2230,43 @@ function createWindow(): void {
   ipcMain.handle('drafts:list', () => listDrafts())
   ipcMain.handle('drafts:load', (_event, id: string) => loadDraft(id))
   ipcMain.handle('drafts:delete', (_event, id: string) => deleteDraft(id))
+
+  // === Visual regression (Day 19) ====================================
+  // Capture the current page as a baseline + emit a `snapshot` step. The
+  // step carries the baseline id; replay re-captures and pixel-diffs.
+  ipcMain.handle('recorder:snapshot', async (): Promise<void> => {
+    try {
+      await waitForVisualStable(activeWC())
+      const image = await activeWC().capturePage()
+      const id = `snap-${Date.now()}`
+      await saveBaseline(id, image.toPNG())
+      // `value` = allowed diff threshold (percent). 1% tolerates anti-aliasing
+      // while still catching real visual changes; editable per step.
+      sendStep({ type: 'snapshot', label: 'Visual snapshot', baselineId: id, value: '1' })
+    } catch {
+      // capture can fail if the page is gone — silently no-op
+    }
+  })
+  // Adopt the CURRENT look as the new baseline (a page legitimately changed).
+  ipcMain.handle(
+    'visual:updateBaseline',
+    async (_event, baselineId: string, currentPath: string): Promise<boolean> => {
+      if (!isSafeBaselineId(baselineId)) return false
+      // currentPath is one of OUR saved diff-source PNGs in the library.
+      if (typeof currentPath !== 'string' || !currentPath.startsWith(libraryDir())) return false
+      try {
+        await saveBaseline(baselineId, await readFile(currentPath))
+        return true
+      } catch {
+        return false
+      }
+    }
+  )
+  // Serve a baseline image as a data URL (for the diff view).
+  ipcMain.handle('visual:getBaseline', async (_event, id: string): Promise<string | null> => {
+    const buf = await loadBaseline(id)
+    return buf ? `data:image/png;base64,${buf.toString('base64')}` : null
+  })
   // Open a failure screenshot in the OS image viewer. Only paths inside the
   // library folder are allowed — this is a viewer, not a general file opener.
   ipcMain.handle('library:openScreenshot', (_event, path: string) => {
