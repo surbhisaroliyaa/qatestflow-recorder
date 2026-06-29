@@ -263,6 +263,10 @@ function App(): React.JSX.Element {
 
   // Steps left ON (disabled steps are skipped by replay + export).
   const enabledCount = steps.filter((s) => !s.disabled).length
+  // Day 18: is this a multi-tab recording? If so, EVERY step shows which tab it
+  // runs on (incl. the original "main tab") — otherwise the original tab is the
+  // only one with no badge, which reads as missing/confusing.
+  const multiWindow = steps.some((s) => (s.windowId ?? 0) > 0 || s.opensWindow !== undefined)
 
   // The test's base URL when none was set yet: the ORIGIN of the first
   // navigation (https://site.com/login -> https://site.com).
@@ -2383,10 +2387,20 @@ function App(): React.JSX.Element {
                       ) : (
                         <span className="step-text">{stepText(step)}</span>
                       )}
-                      {/* Day 17: tab provenance — only shown for multi-tab tests */}
-                      {(step.windowId ?? 0) > 0 && (
-                        <span className="window-badge" title={`Runs in tab ${step.windowId}`}>
-                          ⧉ tab {step.windowId}
+                      {/* Day 17/18: tab provenance. In a multi-tab recording EVERY
+                          step shows which tab it RUNS ON — the original is "main
+                          tab", popups are tab 1, 2, 3… (Day 18: original was
+                          previously unbadged, which read as "never shows tab 0"). */}
+                      {multiWindow && (
+                        <span
+                          className="window-badge"
+                          title={
+                            (step.windowId ?? 0) === 0
+                              ? 'Runs on the main (original) tab'
+                              : `Runs on tab ${step.windowId}`
+                          }
+                        >
+                          ⧉ {(step.windowId ?? 0) === 0 ? 'main tab' : `tab ${step.windowId}`}
                         </span>
                       )}
                       {step.opensWindow !== undefined && (
