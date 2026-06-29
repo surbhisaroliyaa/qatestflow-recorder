@@ -17,9 +17,14 @@ import {
   loadTest,
   deleteTest,
   recordRun,
+  saveDraft,
+  listDrafts,
+  loadDraft,
+  deleteDraft,
   libraryDir,
   slugify,
-  type RunInfo
+  type RunInfo,
+  type DraftFile
 } from './library'
 import { explainFailure, type FailureEvidence } from './translator'
 import { observerProgram } from './observerSource'
@@ -2045,6 +2050,12 @@ function createWindow(): void {
   ipcMain.handle('library:recordRun', (_event, fileName: string, run: RunInfo) =>
     recordRun(fileName, run)
   )
+
+  // === Drafts (Day 18) — auto-saved in-progress recordings ===========
+  ipcMain.handle('drafts:save', (_event, input: DraftFile) => saveDraft(input))
+  ipcMain.handle('drafts:list', () => listDrafts())
+  ipcMain.handle('drafts:load', (_event, id: string) => loadDraft(id))
+  ipcMain.handle('drafts:delete', (_event, id: string) => deleteDraft(id))
   // Open a failure screenshot in the OS image viewer. Only paths inside the
   // library folder are allowed — this is a viewer, not a general file opener.
   ipcMain.handle('library:openScreenshot', (_event, path: string) => {

@@ -218,3 +218,123 @@ export async function recordRun(fileName: string, run: RunInfo): Promise<void> {
   test.runs = [run, ...(test.runs ?? [])].slice(0, RUN_HISTORY_LIMIT)
   await writeFile(join(libraryDir(), safeRel(fileName)), JSON.stringify(test, null, 2), 'utf-8')
 }
+
+// =====================================================================
+// DRAFTS (Day 18) — auto-saved in-progress recordings, so a forgotten Save
+// doesn't lose work. They live under _drafts (a hidden folder, excluded from
+// the suite listing like the other _ folders). The newest is offered for
+// recovery on launch; all of them form a "Recent recordings" list. Capped so
+// abandoned drafts don't pile up forever. A draft is deleted once it's saved
+// as a real test.
+// =====================================================================
+const DRAFT_LIMIT = 15
+const SAFE_DRAFT_ID = /^draft-[a-zA-Z0-9_-]+$/
+
+export interface DraftFile {
+  id: string
+  name: string
+  baseURL: string
+  suite: string
+  storageState?: string
+  viewport?: { width: number; height: number }
+  updatedAt: string
+  steps: unknown[]
+}
+
+export interface DraftSummary {
+  id: string
+  name: string
+  stepCount: number
+  updatedAt: string
+  firstUrl?: string // the recording's starting URL — identifies an unnamed draft
+}
+
+function draftsDir(): string {
+  return join(libraryDir(), '_drafts')
+}
+
+export async function saveDraft(input: {
+  id: string
+  name: string
+  baseURL: string
+  suite: string
+  storageState?: string
+  viewport?: { width: number; height: number }
+  steps: unknown[]
+}): Promise<void> {
+  if (!SAFE_DRAFT_ID.test(input.id)) return
+  await mkdir(draftsDir(), { recursive: true })
+  const draft: DraftFile = {
+    id: input.id,
+    name: input.name,
+    baseURL: input.baseURL,
+    suite: input.suite,
+    storageState: input.storageState,
+    viewport: input.viewport,
+    updatedAt: new Date().toISOString(),
+    steps: input.steps
+  }
+  await writeFile(join(draftsDir(), `${input.id}.json`), JSON.stringify(draft, null, 2), 'utf-8')
+  await pruneDrafts()
+}
+
+export async function listDrafts(): Promise<DraftSummary[]> {
+  let files: string[]
+  try {
+    files = await readdir(draftsDir())
+  } catch {
+    return [] // no drafts folder yet
+  }
+  const drafts: DraftSummary[] = []
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue
+    try {
+      const d = JSON.parse(await readFile(join(draftsDir(), f), 'utf-8')) as DraftFile
+      if (!d || !Array.isArray(d.steps)) continue
+      // The first navigate step's URL is the best label for an unnamed draft.
+      const firstNav = (d.steps as Array<{ type?: string; url?: string }>).find(
+        (s) => s?.type === 'navigate' && !!s.url
+      )
+      drafts.push({
+        id: d.id,
+        name: d.name,
+        stepCount: d.steps.length,
+        updatedAt: d.updatedAt,
+        firstUrl: firstNav?.url
+      })
+    } catch {
+      // skip a corrupt draft
+    }
+  }
+  // Newest first (ISO timestamps sort lexicographically).
+  return drafts.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+}
+
+export async function loadDraft(id: string): Promise<DraftFile | null> {
+  if (!SAFE_DRAFT_ID.test(id)) return null
+  try {
+    const d = JSON.parse(await readFile(join(draftsDir(), `${id}.json`), 'utf-8'))
+    if (!d || !Array.isArray(d.steps)) return null
+    return d as DraftFile
+  } catch {
+    return null
+  }
+}
+
+export async function deleteDraft(id: string): Promise<void> {
+  if (!SAFE_DRAFT_ID.test(id)) return
+  try {
+    await unlink(join(draftsDir(), `${id}.json`))
+  } catch {
+    // already gone — fine
+  }
+}
+
+async function pruneDrafts(): Promise<void> {
+  try {
+    const summaries = await listDrafts() // newest first
+    for (const d of summaries.slice(DRAFT_LIMIT)) await deleteDraft(d.id)
+  } catch {
+    // best-effort
+  }
+}

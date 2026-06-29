@@ -114,6 +114,22 @@ interface TranslatorAPI {
   saveReport: (markdown: string, defaultName: string) => Promise<string | null>
 }
 
+// === Drafts (Day 18) — auto-saved in-progress recordings ===
+interface DraftAPI {
+  save: (input: {
+    id: string
+    name: string
+    baseURL: string
+    suite: string
+    storageState?: string
+    viewport?: { width: number; height: number }
+    steps: RecorderStep[]
+  }) => Promise<void>
+  list: () => Promise<DraftSummary[]>
+  load: (id: string) => Promise<DraftData | null>
+  delete: (id: string) => Promise<void>
+}
+
 // === Run trace (Day 18) ===
 interface TraceAPI {
   // The manifest, with each step's thumbnail inlined as a data: URL for the
@@ -134,6 +150,7 @@ interface API {
   translator: TranslatorAPI
   session: SessionAPI
   trace: TraceAPI
+  drafts: DraftAPI
 }
 
 declare global {
@@ -186,6 +203,25 @@ declare global {
     failedAt?: number
     stepCount: number
     steps: TraceStep[]
+  }
+
+  // === Drafts (Day 18) — auto-saved in-progress recordings ===
+  interface DraftSummary {
+    id: string
+    name: string
+    stepCount: number
+    updatedAt: string
+    firstUrl?: string
+  }
+  interface DraftData {
+    id: string
+    name: string
+    baseURL: string
+    suite: string
+    storageState?: string
+    viewport?: { width: number; height: number }
+    updatedAt: string
+    steps: RecorderStep[]
   }
 
   // One row in the library list (no steps — kept light for listing).

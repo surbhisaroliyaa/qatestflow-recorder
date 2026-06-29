@@ -137,6 +137,12 @@ function App(): React.JSX.Element {
   // Day 11 — test library. The current test's identity (empty/null = an
   // unsaved recording) + the saved-tests list shown on the welcome screen.
   const [savedTests, setSavedTests] = useState<SavedTestSummary[]>([])
+  // Day 18 — auto-saved drafts (unsaved in-progress recordings). `draftIdRef`
+  // is the current recording's draft id; the timer debounces the auto-save.
+  const [drafts, setDrafts] = useState<DraftSummary[]>([])
+  const draftIdRef = useRef<string | null>(null)
+  const draftSaveTimer = useRef<number | null>(null)
+  const [draftDismissed, setDraftDismissed] = useState(false)
   // Welcome screen: which test's last-run error detail is expanded (by fileName).
   const [errorOpenFor, setErrorOpenFor] = useState<string | null>(null)
   const [testName, setTestName] = useState('')
@@ -270,13 +276,38 @@ function App(): React.JSX.Element {
     }
   }
 
-  // Refresh the library list + section list whenever the welcome screen shows.
+  // Refresh the library list + section list + drafts whenever welcome shows.
   useEffect(() => {
     if (!hasNavigated) {
       window.api.library.list().then(setSavedTests)
       window.api.library.listSuites().then(setSuites)
+      window.api.drafts.list().then(setDrafts)
     }
   }, [hasNavigated])
+
+  // Day 18: auto-save the current UNSAVED recording as a draft (debounced), so
+  // a forgotten Save never loses work. Saved tests persist via the library, so
+  // they're skipped here. Once steps exist, a draft id is minted and reused.
+  useEffect(() => {
+    if (testFileName !== null || steps.length === 0) return
+    if (!draftIdRef.current) draftIdRef.current = `draft-${Date.now()}`
+    const id = draftIdRef.current
+    if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current)
+    draftSaveTimer.current = window.setTimeout(() => {
+      window.api.drafts.save({
+        id,
+        name: testName,
+        baseURL,
+        suite: testSuite,
+        storageState,
+        viewport,
+        steps
+      })
+    }, 700)
+    return () => {
+      if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current)
+    }
+  }, [steps, testFileName, testName, baseURL, testSuite, storageState, viewport])
 
   // Sync the URL bar whenever the embedded browser navigates.
   // Mark hasNavigated true so we switch from welcome -> chrome view.
@@ -511,6 +542,11 @@ function App(): React.JSX.Element {
     if (steps.length === 0) return
     if (!window.confirm(`Clear all ${steps.length} steps and start over?`)) return
     editSteps([])
+    // Day 18: "start over" discards the current draft too.
+    if (draftIdRef.current) {
+      window.api.drafts.delete(draftIdRef.current)
+      draftIdRef.current = null
+    }
   }
 
   const handleSubmit = (e: FormEvent): void => {
@@ -540,6 +576,22 @@ function App(): React.JSX.Element {
   // Home: one click straight back to the welcome screen — a fresh start, so
   // stop recording and clear the captured steps too.
   const handleHome = async (): Promise<void> => {
+    // Day 18: flush the current unsaved recording to its draft NOW (the
+    // debounced auto-save may not have fired yet), so leaving never loses it.
+    // It then lives in the Recent list; mint a fresh draft for the next take.
+    if (draftIdRef.current && steps.length > 0 && testFileName === null) {
+      window.api.drafts.save({
+        id: draftIdRef.current,
+        name: testName,
+        baseURL,
+        suite: testSuite,
+        storageState,
+        viewport,
+        steps
+      })
+    }
+    draftIdRef.current = null
+    setDraftDismissed(true) // don't nag with the recover banner after an explicit Home
     await window.api.browser.home()
     setHasNavigated(false)
     setUrlInput('')
@@ -924,6 +976,11 @@ function App(): React.JSX.Element {
     setBaseURL(base)
     setSavePanelOpen(false)
     setHealedIndices(new Set()) // healed selectors are on disk now — hint done
+    // Day 18: it's a real test now — drop the auto-saved draft.
+    if (draftIdRef.current) {
+      window.api.drafts.delete(draftIdRef.current)
+      draftIdRef.current = null
+    }
   }
 
   // Open a saved test: its steps become the working list (the single source
@@ -944,6 +1001,49 @@ function App(): React.JSX.Element {
       setUrlInput(firstNav.url)
       window.api.browser.navigate(firstNav.url)
     }
+  }
+
+  // Day 18: restore an auto-saved draft (an unsaved recording). Like opening a
+  // test, but it has no fileName — it stays a draft until explicitly saved, and
+  // editing it keeps updating the SAME draft.
+  const handleLoadDraft = async (id: string): Promise<void> => {
+    const d = await window.api.drafts.load(id)
+    if (!d) return
+    editSteps(d.steps)
+    setTestName(d.name || '')
+    setTestFileName(null)
+    setTestSuite(d.suite || '')
+    setBaseURL(d.baseURL || '')
+    setStorageState(d.storageState)
+    applyViewport(d.viewport)
+    draftIdRef.current = d.id
+    setDraftDismissed(true)
+    setHasNavigated(true)
+    const firstNav = d.steps.find((s) => s.type === 'navigate' && s.url)
+    if (firstNav?.url) {
+      setUrlInput(firstNav.url)
+      window.api.browser.navigate(firstNav.url)
+    }
+  }
+
+  const handleDeleteDraft = async (id: string): Promise<void> => {
+    await window.api.drafts.delete(id)
+    setDrafts((prev) => prev.filter((d) => d.id !== id))
+    if (draftIdRef.current === id) draftIdRef.current = null
+  }
+
+  // A friendly label for a draft: its name if it was given one, else the site
+  // it's recording (the first URL's domain), else a fallback.
+  const draftLabel = (d: DraftSummary): string => {
+    if (d.name) return d.name
+    if (d.firstUrl) {
+      try {
+        return new URL(d.firstUrl).hostname.replace(/^www\./, '')
+      } catch {
+        return d.firstUrl
+      }
+    }
+    return 'Untitled recording'
   }
 
   // === Day 11.5: suite runner =======================================
@@ -1287,6 +1387,77 @@ function App(): React.JSX.Element {
               </button>
             ))}
           </div>
+
+          {/* Day 18: recover the most recent unsaved recording (until dismissed). */}
+          {!draftDismissed && drafts.length > 0 && (
+            <div className="recover-banner">
+              <span className="recover-text">
+                ↩ Unsaved recording — <strong>{draftLabel(drafts[0])}</strong> ·{' '}
+                {drafts[0].stepCount} step{drafts[0].stepCount === 1 ? '' : 's'} ·{' '}
+                {new Date(drafts[0].updatedAt).toLocaleString()}
+              </span>
+              <div className="recover-actions">
+                <button
+                  type="button"
+                  className="recover-btn primary"
+                  onClick={() => handleLoadDraft(drafts[0].id)}
+                >
+                  Restore
+                </button>
+                <button
+                  type="button"
+                  className="recover-btn"
+                  onClick={() => setDraftDismissed(true)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Day 18: Recent recordings — auto-saved unsaved drafts, newest first. */}
+          {drafts.length > 0 && (
+            <div className="test-library recent-drafts">
+              <div className="library-heading">
+                <span className="library-heading-title">Recent recordings</span>
+                <span className="library-heading-sub">
+                  unsaved — auto-kept so you don’t lose work
+                </span>
+              </div>
+              <ul className="library-list">
+                {drafts.map((d) => (
+                  <li key={d.id} className="library-item">
+                    <div className="library-item-head">
+                      <button
+                        type="button"
+                        className="library-row"
+                        onClick={() => handleLoadDraft(d.id)}
+                        title="Restore this recording"
+                      >
+                        <span className="run-dot none" />
+                        <span className="library-name" title={d.firstUrl || draftLabel(d)}>
+                          {draftLabel(d)}
+                        </span>
+                        <span className="library-meta">
+                          {d.stepCount} step{d.stepCount === 1 ? '' : 's'} ·{' '}
+                          {new Date(d.updatedAt).toLocaleString()}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="library-delete"
+                        onClick={() => handleDeleteDraft(d.id)}
+                        title="Delete this draft"
+                        aria-label="Delete draft"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {/* === Day 11 + 11.5: saved-test library, grouped into sections === */}
           {(savedTests.length > 0 || suites.length > 0) && (

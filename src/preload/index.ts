@@ -208,6 +208,14 @@ const api = {
     list: (): Promise<string[]> => ipcRenderer.invoke('session:list')
   },
 
+  // === Drafts (Day 18) — auto-saved in-progress recordings ===
+  drafts: {
+    save: (input: unknown): Promise<void> => ipcRenderer.invoke('drafts:save', input),
+    list: (): Promise<unknown> => ipcRenderer.invoke('drafts:list'),
+    load: (id: string): Promise<unknown> => ipcRenderer.invoke('drafts:load', id),
+    delete: (id: string): Promise<void> => ipcRenderer.invoke('drafts:delete', id)
+  },
+
   // === Run trace (Day 18) ===
   trace: {
     get: (id: string): Promise<unknown> => ipcRenderer.invoke('trace:get', id),
