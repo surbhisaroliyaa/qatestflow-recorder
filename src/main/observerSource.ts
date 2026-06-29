@@ -36,7 +36,11 @@ export function observerProgram(): void {
     __qaflowFrame?: unknown
     __qaflowInitActive?: boolean
     __qaflowInitPicking?: boolean
-    __qaflow?: { setActive: (v: boolean) => void; setPicking: (v: boolean) => void }
+    __qaflow?: {
+      setActive: (v: boolean) => void
+      setPicking: (v: boolean) => void
+      findByLabel: (label: string, role?: string) => unknown
+    }
   }
   if (g.__qaflowInstalled) {
     // Re-injected by main to push a fresh record/pick state. Main re-injects
@@ -246,7 +250,11 @@ export function observerProgram(): void {
     setPicking: (v: boolean): void => {
       picking = v
       if (!picking) clearHighlight()
-    }
+    },
+    // Day 18 (self-heal): main calls this on a replay failure to AUTO-find the
+    // element a broken step meant — by its recorded human label. Returns the
+    // best visible match's facts (same shape a manual pick produces) or null.
+    findByLabel: (label: string, role?: string): unknown => findElementByLabel(label, role)
   }
 
   // Timestamp until which the next click is ignored (implicit form submission
@@ -509,6 +517,88 @@ export function observerProgram(): void {
 
     collectDup(el, facts)
     return facts
+  }
+
+  // === Day 18: self-heal finder ====================================
+  // The visible "name" of an element the way a human reads it — used to match a
+  // broken step's recorded label back to an element on the (changed) page.
+  function accessibleNameOf(el: Element): string {
+    const aria = el.getAttribute('aria-label')
+    if (aria) return aria
+    if (el instanceof HTMLInputElement) {
+      if ((el.type === 'submit' || el.type === 'button' || el.type === 'reset') && el.value) {
+        return el.value
+      }
+      if (el.placeholder) return el.placeholder
+      if (el.id) {
+        const escaped =
+          (window as { CSS?: { escape?: (s: string) => string } }).CSS &&
+          window.CSS.escape
+            ? window.CSS.escape(el.id)
+            : el.id
+        const lab = document.querySelector('label[for="' + escaped + '"]')
+        if (lab && lab.textContent) return lab.textContent
+      }
+    }
+    if (el instanceof HTMLImageElement && el.alt) return el.alt
+    const ph = el.getAttribute('placeholder')
+    if (ph) return ph
+    const heading = el.querySelector && el.querySelector('h1, h2, h3, h4, h5, h6')
+    const text = (((heading && heading.textContent) || el.textContent) || '').trim()
+    if (text && text.length <= 80) return text
+    const title = el.getAttribute('title')
+    if (title) return title
+    return ''
+  }
+
+  // Find the single best VISIBLE element whose name matches `label`. Scores
+  // exact > contains > token-overlap, with a small bonus for the same role.
+  // Returns the same payload a manual pick sends, or null when nothing fits.
+  function findElementByLabel(rawLabel: string, role?: string): unknown {
+    const norm = (s: string): string =>
+      (s || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim()
+    const want = norm(rawLabel)
+    if (!want) return null
+    const wantTokens = want.split(' ').filter(Boolean)
+    const nodes = Array.prototype.slice.call(
+      document.querySelectorAll('a,button,input,select,textarea,label,img,[role],[data-test],[data-testid]')
+    ) as Element[]
+    let best: Element | null = null
+    let bestScore = 0
+    for (const el of nodes) {
+      const r = el.getBoundingClientRect()
+      if (!r.width && !r.height) continue
+      const cs = getComputedStyle(el)
+      if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') continue
+      const name = norm(accessibleNameOf(el))
+      if (!name) continue
+      let score = 0
+      if (name === want) score = 100
+      else if (name.indexOf(want) >= 0 || want.indexOf(name) >= 0) score = 70
+      else {
+        const nameTokens = new Set(name.split(' ').filter(Boolean))
+        const shared = wantTokens.filter((t) => nameTokens.has(t)).length
+        if (shared) score = Math.round((shared / wantTokens.length) * 55)
+      }
+      if (!score) continue
+      if (role && roleFor(el) === role) score += 15
+      if (score > bestScore) {
+        bestScore = score
+        best = el
+      }
+    }
+    if (!best || bestScore < 60) return null
+    const input = best instanceof HTMLInputElement ? best : null
+    return {
+      facts: collectFacts(best),
+      text: (best.textContent || '').trim().slice(0, 100) || undefined,
+      inputValue: input ? input.value : undefined,
+      disabled: 'disabled' in best ? !!(best as { disabled?: boolean }).disabled : undefined,
+      checked: input && (input.type === 'checkbox' || input.type === 'radio') ? input.checked : undefined
+    }
   }
 
   function meaningfulTarget(start: Element): Element {

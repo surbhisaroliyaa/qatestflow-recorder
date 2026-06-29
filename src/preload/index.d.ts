@@ -284,6 +284,12 @@ declare global {
     error: string
     screenshotPath?: string
     traceId?: string // Day 18: the run trace saved at the pause (openable now)
+    // Day 18: the failure was a broken/missing selector (vs an assertion or
+    // timing failure) — only then do self-heal / manual pick make sense.
+    selectorBroke?: boolean
+    // Day 18 (self-heal): an auto-found replacement element for the broken step
+    // (matched by its recorded label) — offered as a one-click fix.
+    suggestion?: PickedElement
     consoleErrors?: string[] // evidence so far — Explain works mid-pause (Day 13)
     networkErrors?: string[]
   }

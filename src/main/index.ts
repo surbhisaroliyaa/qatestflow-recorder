@@ -1406,6 +1406,58 @@ function createWindow(): void {
         }
       }
 
+      // Day 18 (self-heal): on a failure, AUTO-find the element a broken step
+      // meant — by its recorded label — and build a fresh selector ladder, so
+      // the recovery panel can offer a one-click fix. Returns a pick-shaped
+      // suggestion (or undefined). Best-effort; never throws into the loop.
+      const suggestHeal = async (step: ReplayStep): Promise<unknown> => {
+        const label = (step as { label?: string }).label
+        if (
+          !label ||
+          step.type === 'navigate' ||
+          step.type === 'wait' ||
+          step.type === 'back' ||
+          step.type === 'dialog' ||
+          step.type === 'download' ||
+          step.type === 'upload'
+        ) {
+          return undefined
+        }
+        try {
+          const frame = await resolveFrame(currentWC, step.frame)
+          if (!frame) return undefined
+          // Pass the step's role (if any candidate carries one) as a match bonus.
+          const role = (step.candidates ?? []).find((c) => c.role)?.role ?? ''
+          const found = (await frame.executeJavaScript(
+            `window.__qaflow && window.__qaflow.findByLabel(${JSON.stringify(label)}, ${JSON.stringify(role)})`,
+            true
+          )) as {
+            facts: ElementFacts
+            text?: string
+            inputValue?: string
+            disabled?: boolean
+            checked?: boolean
+          } | null
+          if (!found || !found.facts) return undefined
+          const { primary, candidates } = buildSelectors(found.facts)
+          // Don't suggest a selector replay would refuse (bare-tag last resort).
+          if (!candidates.some((c) => c.kind !== 'css')) return undefined
+          return {
+            label: labelFrom(found.facts),
+            selector: primary,
+            candidates,
+            frame: step.frame,
+            text: found.text,
+            inputValue: found.inputValue,
+            disabled: found.disabled,
+            checked: found.checked,
+            unreliable: false
+          }
+        } catch {
+          return undefined
+        }
+      }
+
       // Electron 32+ delivers the console params on the event object
       // (level is a string: 'error' | 'warning' | …); older versions used
       // positional args with numeric levels. Accept both shapes.
@@ -1948,11 +2000,21 @@ function createWindow(): void {
             // Day 18: save the trace NOW so a ⏺ recording button in the recovery
             // panel can open it mid-pause (not just after the run ends).
             await persistTrace(false, i)
+            // Day 18: healing a SELECTOR only makes sense when the selector
+            // actually broke (the element wasn't found). For other failures —
+            // an assertion mismatch, a found-but-not-visible element — the
+            // selector is fine, so don't offer self-heal / manual pick.
+            const selectorBroke = /element not found|no reliable selector/i.test(message)
+            // Self-heal: AUTO-find the element this step meant by its recorded
+            // label and offer a one-click fix. Best-effort; only when it broke.
+            const suggestion = selectorBroke ? await suggestHeal(step) : undefined
             mainWindow.webContents.send('recorder:replay-paused', {
               index: i,
               error: message,
               screenshotPath,
               traceId: tracePersisted ? traceRunId : undefined,
+              selectorBroke,
+              suggestion,
               // Day 13: evidence so far — the Explain button works mid-pause too
               consoleErrors: consoleErrors.slice(),
               networkErrors: networkErrors.slice()

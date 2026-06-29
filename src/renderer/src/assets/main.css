@@ -755,6 +755,29 @@ body {
   margin-top: 18px;
 }
 
+/* Day 18: self-heal suggestion in the recovery panel. */
+.self-heal {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  background: #14271c;
+  border: 1px solid #2f6a45;
+  border-radius: 8px;
+}
+.self-heal-text {
+  flex: 1;
+  min-width: 120px;
+  color: #b6e3cd;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.self-heal-accept {
+  flex: none;
+}
+
 .library-item {
   display: flex;
   flex-direction: column;

@@ -373,15 +373,27 @@ function App(): React.JSX.Element {
         .trim()
     const a = norm(original.label)
     const b = norm(picked.label)
-    const aTokens = new Set(a.split(' ').filter(Boolean))
-    const shared = b.split(' ').some((t) => t && aTokens.has(t))
-    const labelDiffers = !!a && !!b && a !== b && !shared
+    // A clean heal needs a STRONG label match — not just one shared word (the
+    // page is full of links like "Dynamic Loading" that share "Dynamic" with
+    // "Dynamic Controls"). Clean = exact, OR one contains the other, OR most of
+    // the original's words appear in the pick. Everything else (a different
+    // element, or an empty/unrelated pick) is a mismatch → confirm before heal.
+    let labelDiffers = false
+    if (a) {
+      const exactOrContains = !!b && (a === b || a.includes(b) || b.includes(a))
+      if (!exactOrContains) {
+        const aTokens = a.split(' ').filter(Boolean)
+        const bTokens = new Set(b.split(' ').filter(Boolean))
+        const shared = aTokens.filter((t) => bTokens.has(t)).length
+        labelDiffers = aTokens.length === 0 ? !!b : shared / aTokens.length < 0.6
+      }
+    }
     const oRole = primaryCandidate(original)?.role
     const pRole = picked.candidates.find((c) => c.locator === picked.selector)?.role
     const roleDiffers = !!oRole && !!pRole && oRole !== pRole
     if (!labelDiffers && !roleDiffers) return null
     const origDesc = original.label ? `"${original.label}"${oRole ? ` (${oRole})` : ''}` : 'it'
-    const gotDesc = `"${picked.label}"${pRole ? ` (${pRole})` : ''}`
+    const gotDesc = picked.label ? `"${picked.label}"${pRole ? ` (${pRole})` : ''}` : 'that element'
     return `You picked ${gotDesc}, but the original step targeted ${origDesc} — they look different. Heal anyway?`
   }
 
@@ -1991,17 +2003,35 @@ function App(): React.JSX.Element {
                   </button>
                 </div>
               ) : (
-                <div className="assert-actions recovery-actions">
-                  {recovery.screenshotPath && (
-                    <button
-                      type="button"
-                      className="shot-link"
-                      onClick={() => window.api.library.openScreenshot(recovery.screenshotPath!)}
-                      title="Open the failure screenshot"
-                    >
-                      📷
-                    </button>
+                <>
+                  {/* Day 18 (self-heal): the app auto-found a likely match for
+                      the broken step by its label — one click to accept it. */}
+                  {recovery.suggestion && (
+                    <div className="self-heal">
+                      <span className="self-heal-text">
+                        🔧 Self-heal found{' '}
+                        <strong>“{recovery.suggestion.label}”</strong> — use it to fix this step?
+                      </span>
+                      <button
+                        type="button"
+                        className="modal-btn primary self-heal-accept"
+                        onClick={() => applyHeal(recovery.suggestion!, recovery.index)}
+                      >
+                        ✓ Accept fix
+                      </button>
+                    </div>
                   )}
+                  <div className="assert-actions recovery-actions">
+                    {recovery.screenshotPath && (
+                      <button
+                        type="button"
+                        className="shot-link"
+                        onClick={() => window.api.library.openScreenshot(recovery.screenshotPath!)}
+                        title="Open the failure screenshot"
+                      >
+                        📷
+                      </button>
+                    )}
                   {/* Day 18: open the full run recording captured up to here */}
                   {recovery.traceId && (
                     <button
@@ -2037,18 +2067,18 @@ function App(): React.JSX.Element {
                   >
                     🔁 Retry
                   </button>
-                  <button
-                    className="modal-btn"
-                    onClick={handleRecoveryRepick}
-                    disabled={!steps[recovery.index]?.selector}
-                    title={
-                      steps[recovery.index]?.selector
-                        ? 'Point at the right element — heals the selector, then retries'
-                        : 'This step has no element to re-pick'
-                    }
-                  >
-                    🎯 Re-pick
-                  </button>
+                  {/* Day 18: manual pick heals a SELECTOR — only offer it when
+                      the selector actually broke (not for assertion/timing
+                      failures, where re-picking wouldn't help). */}
+                  {recovery.selectorBroke && steps[recovery.index]?.selector && (
+                    <button
+                      className="modal-btn"
+                      onClick={handleRecoveryRepick}
+                      title="Point at the right element yourself — heals the selector, then retries"
+                    >
+                      🎯 Pick manually
+                    </button>
+                  )}
                   <button
                     className="modal-btn"
                     onClick={() => answerRecovery('continue')}
@@ -2070,7 +2100,8 @@ function App(): React.JSX.Element {
                   >
                     ⏹ Stop
                   </button>
-                </div>
+                  </div>
+                </>
               )}
             </div>
           )}
