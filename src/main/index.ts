@@ -637,10 +637,13 @@ function createWindow(): void {
       const openerWindowId = recWindowIdOf(openerTab)
       const newWindowId = recWindowIdOf(tab)
       const last = lastInteractiveStepIdByTab.get(openerWindowId)
-      if (last && Date.now() - last.at < 250) {
-        // The opener click ALREADY arrived this same gesture (<250ms ago) — it's
-        // the opener; patch it after the fact. (A human can't fit an unrelated
-        // click into that window, so this won't mis-tag a previous click.)
+      if (last && Date.now() - last.at < 500) {
+        // The opener click ALREADY arrived this same gesture — it's the opener;
+        // patch it after the fact. Day 18: widened 250→500ms because the click
+        // IPC can land that much before window.open under load, and the tighter
+        // window was silently dropping the tag (orphan "tab N never opened").
+        // `last` is the tab's MOST RECENT click, which for a popup is virtually
+        // always the opener; and replay now recovers even if this still misses.
         mainWindow.webContents.send('recorder:step-patch', {
           id: last.id,
           opensWindow: newWindowId
@@ -1360,6 +1363,37 @@ function createWindow(): void {
         cdpReady = rec.ready
         return true
       }
+
+      // Day 18 (multi-tab hardening): a step says it runs in tab N, but N was
+      // never bound to a tab. The usual cause is a DROPPED opener tag — at
+      // record time the click that spawned the popup didn't get its
+      // `opensWindow` set (a known click-vs-window.open timing race), so replay
+      // never armed a wait for that popup. But the popup STILL opened during
+      // replay (the click ran window.open → wireTab's handler created a real
+      // tab) — it's just unbound. Recover by adopting the most recent live tab
+      // that isn't the base and isn't already mapped, binding it to N. Polls
+      // briefly since the popup opens asynchronously after the opener click.
+      const adoptUnboundPopup = async (windowId: number): Promise<boolean> => {
+        const deadline = Date.now() + 4000
+        for (;;) {
+          const bound = new Set(ordinalToTab.values())
+          const candidate = tabs
+            .filter(
+              (t) => t.id !== baseTab.id && !bound.has(t) && !t.view.webContents.isDestroyed()
+            )
+            .sort((a, b) => b.ordinal - a.ordinal)[0]
+          if (candidate) {
+            ordinalToTab.set(windowId, candidate)
+            const adoptedWC = candidate.view.webContents
+            attachTo(adoptedWC)
+            const loadDeadline = Date.now() + 8000
+            while (adoptedWC.isLoading() && Date.now() < loadDeadline) await wait(100)
+            return true
+          }
+          if (Date.now() > deadline) return false
+          await wait(100)
+        }
+      }
       switchTo(0) // attach the starting tab
 
       // Every exit from the replay goes through here so the CDP debugger is
@@ -1431,8 +1465,13 @@ function createWindow(): void {
         let popupWait: Promise<Tab> | null = null
         try {
           // Make this step's tab the current target. Tab 0 is always bound; a
-          // popup tab was bound when its opener step ran.
+          // popup tab was bound when its opener step ran. If it isn't bound, the
+          // opener tag was likely dropped at record time — try to adopt the
+          // popup that opened anyway (Day 18) before giving up.
           const stepWindowId = step.windowId ?? 0
+          if (!ordinalToTab.has(stepWindowId)) {
+            await adoptUnboundPopup(stepWindowId)
+          }
           if (!switchTo(stepWindowId)) {
             throw new Error(
               `This step runs in tab ${stepWindowId}, which was never opened during replay`
