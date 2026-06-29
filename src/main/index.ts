@@ -23,6 +23,18 @@ import {
 } from './library'
 import { explainFailure, type FailureEvidence } from './translator'
 import { observerProgram } from './observerSource'
+import {
+  saveTrace,
+  loadTrace,
+  readTraceAsset,
+  deleteTrace,
+  isSafeTraceId,
+  generateTraceHtml,
+  traceDir,
+  pruneTraces,
+  type TraceManifest,
+  type TraceStepRecord
+} from './trace'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -1137,7 +1149,7 @@ function createWindow(): void {
   // as a promise; this resolver is how the answer (retry/skip/stop) gets in.
   // 'abort' is the silent variant: Home was pressed, end with nothing to show.
   interface RecoveryDecision {
-    action: 'retry' | 'skip' | 'stop' | 'abort'
+    action: 'retry' | 'continue' | 'skip' | 'stop' | 'abort'
     step?: ReplayStep // a re-pick sends the healed step to retry with
   }
   let recoveryResolve: ((decision: RecoveryDecision) => void) | null = null
@@ -1159,11 +1171,13 @@ function createWindow(): void {
       _event,
       steps: ReplayStep[],
       interactive?: boolean,
-      storageState?: string
+      storageState?: string,
+      traceOpts?: { mode: 'always' | 'failure' | 'off'; stepTexts?: string[]; testName?: string }
     ): Promise<{
       ok: boolean
       failedAt?: number
       error?: string
+      traceId?: string
       screenshotPath?: string
       aborted?: boolean
       consoleErrors?: string[]
@@ -1242,6 +1256,149 @@ function createWindow(): void {
       let evidenceStep = 0 // index of the step currently running
       const addEvidence = (arr: string[], line: string): void => {
         if (arr.length < 30) arr.push(`[step ${evidenceStep + 1}] ${line}`)
+      }
+
+      // === Run trace capture (Day 18) ==================================
+      // When tracing is on, snapshot each step (screenshot + thumbnail + DOM +
+      // that step's console/network) into memory, keyed by index so a recovery
+      // retry overwrites rather than duplicates. We persist the bundle in
+      // finish() only if the policy says so (always, or — like Playwright's
+      // retain-on-failure — only when the run failed).
+      const traceMode = traceOpts?.mode ?? 'off'
+      const traceEnabled = traceMode !== 'off'
+      // One stable id for the whole run, so a trace saved at the failure PAUSE
+      // and re-saved at the end (after retries) lands in the same folder.
+      const traceRunId = traceEnabled ? `trace-${Date.now()}` : ''
+      let tracePersisted = false
+      const traceStepMap = new Map<number, TraceStepRecord>()
+      const traceAssets = new Map<string, Buffer>() // filename -> bytes (overwrite-safe)
+      const stripStepTag = (line: string): string => line.replace(/^\[step \d+\]\s*/, '')
+      // Console/network for a step = the lines that appeared while it ran. We
+      // remember each array's length at the step's start and slice the rest.
+      let traceConsoleCursor = 0
+      let traceNetworkCursor = 0
+      const captureTraceStep = async (
+        i: number,
+        status: 'done' | 'error' | 'skipped',
+        startMs: number,
+        error?: string,
+        // Day 18: for a failure step, reuse the ANNOTATED capture (red banner +
+        // outline) so the trace shows WHERE it failed, not a clean page.
+        preImage?: Electron.NativeImage
+      ): Promise<void> => {
+        if (!traceEnabled) return
+        const num = i + 1
+        const rec: TraceStepRecord = {
+          index: i,
+          type: list[i]?.type ?? 'step',
+          text: traceOpts?.stepTexts?.[i] ?? list[i]?.type ?? `Step ${num}`,
+          status,
+          durationMs: Math.max(0, Date.now() - startMs),
+          error,
+          consoleErrors: consoleErrors.slice(traceConsoleCursor).map(stripStepTag),
+          networkErrors: networkErrors.slice(traceNetworkCursor).map(stripStepTag)
+        }
+        // Skipped steps never ran — record the row, but no page shot.
+        if (status !== 'skipped') {
+          try {
+            rec.url = currentWC.getURL()
+          } catch {
+            // url unavailable — fine
+          }
+          try {
+            const image = preImage ?? (await currentWC.capturePage())
+            rec.screenshotFile = `step-${num}.png`
+            traceAssets.set(rec.screenshotFile, image.toPNG())
+            rec.thumbFile = `thumb-${num}.png`
+            traceAssets.set(rec.thumbFile, image.resize({ width: 240 }).toPNG())
+          } catch {
+            // capture can fail if the page is gone — keep the row without a shot
+          }
+          try {
+            const html = await currentWC.executeJavaScript(
+              'document.documentElement.outerHTML',
+              true
+            )
+            if (typeof html === 'string') {
+              // Raw outerHTML has no base, so its relative CSS/img/script paths
+              // 404 and the snapshot renders broken. Inject a <base href> (the
+              // page's URL) so those resolve against the real site, and a
+              // doctype so the browser renders in standards mode.
+              const baseTag = rec.url ? `<base href="${rec.url.replace(/"/g, '%22')}">` : ''
+              const withBase = baseTag
+                ? /<head[^>]*>/i.test(html)
+                  ? html.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`)
+                  : `<head>${baseTag}</head>${html}`
+                : html
+              rec.domFile = `step-${num}.html`
+              traceAssets.set(rec.domFile, Buffer.from(`<!DOCTYPE html>\n${withBase}`, 'utf-8'))
+            }
+          } catch {
+            // DOM snapshot is best-effort
+          }
+        }
+        traceStepMap.set(i, rec)
+      }
+
+      // Write the trace bundle so far to its (stable) run folder — called at the
+      // failure pause (so the recovery panel can open it) and again at the end.
+      // Best-effort: a trace problem must never change the run result.
+      const persistTrace = async (ok: boolean, failedAt?: number): Promise<void> => {
+        if (!traceEnabled || !traceStepMap.size) return
+        try {
+          // Walk EVERY step in order so the viewer shows the whole test:
+          //  - captured steps (done / error) as recorded;
+          //  - a DISABLED step (skipped during recovery, OR turned off in the
+          //    editor and skipped on a fresh replay) shown as 'skipped' — with
+          //    its failure screenshot if we have one, otherwise no shot;
+          //  - a step we never reached (run stopped earlier): a 'pending' row.
+          const orderedSteps: TraceStepRecord[] = []
+          for (let idx = 0; idx < list.length; idx++) {
+            const captured = traceStepMap.get(idx)
+            const stepText = traceOpts?.stepTexts?.[idx] ?? list[idx].type
+            if (list[idx].disabled) {
+              orderedSteps.push(
+                captured ?? {
+                  index: idx,
+                  type: list[idx].type,
+                  text: stepText,
+                  status: 'skipped',
+                  durationMs: 0,
+                  consoleErrors: [],
+                  networkErrors: []
+                }
+              )
+              continue
+            }
+            orderedSteps.push(
+              captured ?? {
+                index: idx,
+                type: list[idx].type,
+                text: stepText,
+                status: 'pending',
+                durationMs: 0,
+                consoleErrors: [],
+                networkErrors: []
+              }
+            )
+          }
+          const manifest: TraceManifest = {
+            id: traceRunId,
+            testName: traceOpts?.testName,
+            at: new Date().toISOString(),
+            ok,
+            failedAt,
+            stepCount: orderedSteps.length,
+            steps: orderedSteps
+          }
+          await saveTrace(
+            manifest,
+            [...traceAssets.entries()].map(([file, data]) => ({ file, data }))
+          )
+          tracePersisted = true
+        } catch {
+          // ignore — tracing never breaks a run
+        }
       }
 
       // Electron 32+ delivers the console params on the event object
@@ -1398,7 +1555,7 @@ function createWindow(): void {
 
       // Every exit from the replay goes through here so the CDP debugger is
       // always released, pass or fail.
-      const finish = (outcome: {
+      const finish = async (outcome: {
         ok: boolean
         failedAt?: number
         error?: string
@@ -1406,7 +1563,8 @@ function createWindow(): void {
         aborted?: boolean
         consoleErrors?: string[]
         networkErrors?: string[]
-      }): {
+        traceId?: string
+      }): Promise<{
         ok: boolean
         failedAt?: number
         error?: string
@@ -1414,7 +1572,8 @@ function createWindow(): void {
         aborted?: boolean
         consoleErrors?: string[]
         networkErrors?: string[]
-      } => {
+        traceId?: string
+      }> => {
         // Detach EVERY tab we touched (console + CDP), and clear the replay flag
         // in each so normal browsing gets its real native dialogs back.
         onPopupOpened = null // drop any unfired one-shot popup hook
@@ -1439,6 +1598,22 @@ function createWindow(): void {
           }
         }
         isReplaying = false
+        // Day 18: keep the trace per the policy — always, or (retain-on-failure)
+        // only when the run failed. An aborted run (Home mid-pause) is moot, so
+        // skip it.
+        if (traceEnabled && !outcome.aborted) {
+          if (traceMode === 'always' || !outcome.ok) {
+            await persistTrace(outcome.ok, outcome.failedAt) // overwrite final state
+            if (tracePersisted) {
+              outcome.traceId = traceRunId
+              await pruneTraces()
+            }
+          } else if (tracePersisted) {
+            // Policy is on-failure but the run RECOVERED to a pass (retry/skip) —
+            // discard the trace we saved at the pause.
+            await deleteTrace(traceRunId)
+          }
+        }
         return outcome
       }
 
@@ -1453,12 +1628,24 @@ function createWindow(): void {
       replayDownloadCursor = 0
       currentWC.executeJavaScript('window.__qaflowReplaying=true').catch(() => {})
 
+      // Day 18: 'Continue' bypasses a failure to check later steps — the run is
+      // STILL failed overall. Remember the FIRST bypassed failure so the run
+      // reports it at the end (and the trace is kept).
+      let bypassedFailAt: number | null = null
+      let bypassedError = ''
+      let bypassedShot: string | undefined
+
       for (let i = 0; i < list.length; i++) {
         const step = list[i]
         // Steps turned off in the editor are skipped — leave their row neutral
         // (no running/done/error) so the UI shows them as inert, not run.
         if (step.disabled) continue
         evidenceStep = i // tag captured console/network lines with this step
+        // Day 18 trace: remember where this step's console/network begins + when
+        // it started, so captureTraceStep can attribute the right slice + timing.
+        traceConsoleCursor = consoleErrors.length
+        traceNetworkCursor = networkErrors.length
+        const stepStartMs = Date.now()
         mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
         // Day 17 (Phase 4): if THIS step opens a new tab, arm a one-shot to
         // capture it so we can bind it to `opensWindow` after the action runs.
@@ -1706,6 +1893,7 @@ function createWindow(): void {
             }
           }
           mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'done' })
+          await captureTraceStep(i, 'done', stepStartMs)
           await wait(450)
         } catch (err) {
           onPopupOpened = null // disarm any popup hook if the step failed
@@ -1714,6 +1902,7 @@ function createWindow(): void {
           // for a human now and required input for Day 13's AI translator.
           // Best-effort: a screenshot problem must never mask the real error.
           let screenshotPath: string | undefined
+          let annotatedImage: Electron.NativeImage | undefined
           try {
             // Day 12.9: annotate the evidence first — red error banner, plus
             // an outline around the culprit element when it still resolves.
@@ -1724,11 +1913,11 @@ function createWindow(): void {
             } catch {
               // decoration failed — capture the plain screenshot anyway
             }
-            const image = await currentWC.capturePage()
+            annotatedImage = await currentWC.capturePage()
             const dir = join(libraryDir(), '_failures')
             await mkdir(dir, { recursive: true })
             screenshotPath = join(dir, `failure-${Date.now()}.png`)
-            await writeFile(screenshotPath, image.toPNG())
+            await writeFile(screenshotPath, annotatedImage.toPNG())
           } catch {
             screenshotPath = undefined
           }
@@ -1742,15 +1931,23 @@ function createWindow(): void {
             status: 'error',
             error: message
           })
+          // Day 18: the trace's failure shot reuses the ANNOTATED image (red
+          // banner + culprit outline) so it shows WHERE it failed. DOM is grabbed
+          // clean here (the marks were just erased above).
+          await captureTraceStep(i, 'error', stepStartMs, message, annotatedImage)
           // Day 12: in an interactive replay we PAUSE here instead of ending.
           // The browser is sitting in the exact state where things broke —
           // ideal for retrying or re-picking the element. The loop holds on
           // this promise until the user's decision arrives over IPC.
           if (interactive) {
+            // Day 18: save the trace NOW so a ⏺ recording button in the recovery
+            // panel can open it mid-pause (not just after the run ends).
+            await persistTrace(false, i)
             mainWindow.webContents.send('recorder:replay-paused', {
               index: i,
               error: message,
               screenshotPath,
+              traceId: tracePersisted ? traceRunId : undefined,
               // Day 13: evidence so far — the Explain button works mid-pause too
               consoleErrors: consoleErrors.slice(),
               networkErrors: networkErrors.slice()
@@ -1764,7 +1961,28 @@ function createWindow(): void {
               i-- // run the same index again
               continue
             }
+            if (decision.action === 'continue') {
+              // DEBUG bypass: keep going to check the later steps, but the run is
+              // STILL failed (remember the first one). The step keeps its 'error'
+              // mark + screenshot (no 'skipped' progress sent) — we don't pretend
+              // it passed; we only deferred dealing with it. The trace shows it
+              // red with its shot (we left the 'error' capture in place).
+              if (bypassedFailAt === null) {
+                bypassedFailAt = i
+                bypassedError = message
+                bypassedShot = screenshotPath
+              }
+              continue
+            }
             if (decision.action === 'skip') {
+              // PERMANENT skip: disable the step so it's skipped this run AND in
+              // future (the renderer disables its own copy to persist on save).
+              // It doesn't count as a failure. KEEP its capture but mark it
+              // 'skipped' (with its failure screenshot) so the recording still
+              // shows it happened — a complete, honest log.
+              list[i].disabled = true
+              const cap = traceStepMap.get(i)
+              if (cap) cap.status = 'skipped'
               mainWindow.webContents.send('recorder:replay-progress', {
                 index: i,
                 status: 'skipped'
@@ -1773,11 +1991,11 @@ function createWindow(): void {
             }
             if (decision.action === 'abort') {
               // Home was pressed mid-pause — end quietly, nothing to report.
-              return finish({ ok: false, failedAt: i, error: message, aborted: true })
+              return await finish({ ok: false, failedAt: i, error: message, aborted: true })
             }
             // 'stop' falls through to the normal failure return below.
           }
-          return finish({
+          return await finish({
             ok: false,
             failedAt: i,
             error: message,
@@ -1787,7 +2005,19 @@ function createWindow(): void {
           })
         }
       }
-      return finish({ ok: true })
+      // Day 18: if a failure was bypassed with 'Continue', the run is FAILED even
+      // though we reached the end — report the first one (and keep the trace).
+      if (bypassedFailAt !== null) {
+        return await finish({
+          ok: false,
+          failedAt: bypassedFailAt,
+          error: bypassedError,
+          screenshotPath: bypassedShot,
+          consoleErrors: consoleErrors.slice(),
+          networkErrors: networkErrors.slice()
+        })
+      }
+      return await finish({ ok: true })
     }
   )
 
@@ -1819,6 +2049,69 @@ function createWindow(): void {
   // library folder are allowed — this is a viewer, not a general file opener.
   ipcMain.handle('library:openScreenshot', (_event, path: string) => {
     if (typeof path === 'string' && path.startsWith(libraryDir())) shell.openPath(path)
+  })
+
+  // === Run trace (Day 18) ============================================
+  // The viewer asks for the manifest (with each step's thumbnail inlined as a
+  // data URL for the filmstrip), then the full screenshot for the selected
+  // step on demand, and can open the full image / DOM html externally.
+  const pngDataUrl = (buf: Buffer): string => `data:image/png;base64,${buf.toString('base64')}`
+  ipcMain.handle('trace:get', async (_event, id: string) => {
+    const manifest = await loadTrace(id)
+    if (!manifest) return null
+    // Inline the small thumbnails so the filmstrip renders without N round-trips.
+    for (const step of manifest.steps) {
+      if (step.thumbFile) {
+        const buf = await readTraceAsset(id, step.thumbFile)
+        if (buf) (step as TraceStepRecord & { thumbData?: string }).thumbData = pngDataUrl(buf)
+      }
+    }
+    return manifest
+  })
+  ipcMain.handle('trace:getImage', async (_event, id: string, file: string) => {
+    const buf = await readTraceAsset(id, file)
+    return buf ? pngDataUrl(buf) : null
+  })
+  ipcMain.handle('trace:openFile', (_event, id: string, file: string) => {
+    // readTraceAsset's guards (id + file shape) keep this inside the trace dir.
+    if (typeof id !== 'string' || typeof file !== 'string') return
+    if (!/^trace-[a-zA-Z0-9_-]+$/.test(id) || !/^[a-zA-Z0-9_.-]+$/.test(file)) return
+    shell.openPath(join(traceDir(id), file))
+  })
+  // Copy the whole recording to a folder the user picks (so it survives pruning
+  // and can be shared), then reveal it. Returns the destination path or null.
+  ipcMain.handle('trace:export', async (_event, id: string): Promise<string | null> => {
+    if (typeof id !== 'string' || !isSafeTraceId(id)) return null
+    const manifest = await loadTrace(id)
+    if (!manifest) return null
+    // Save as ONE self-contained .html file — images + DOM embedded as data
+    // URLs — so the recording is a single, shareable, double-clickable file
+    // (no folder of loose screenshots).
+    const slug = (manifest.testName || id).replace(/[^a-zA-Z0-9-_]+/g, '-').slice(0, 60)
+    const picked = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save recording',
+      defaultPath: `recording-${slug}.html`,
+      filters: [{ name: 'HTML report', extensions: ['html'] }]
+    })
+    if (picked.canceled || !picked.filePath) return null
+    try {
+      // Embed every referenced asset as a data: URL keyed by its filename.
+      const assets: Record<string, string> = {}
+      for (const step of manifest.steps) {
+        for (const file of [step.thumbFile, step.screenshotFile, step.domFile]) {
+          if (!file || assets[file]) continue
+          const buf = await readTraceAsset(id, file)
+          if (!buf) continue
+          const mime = file.endsWith('.html') ? 'text/html;charset=utf-8' : 'image/png'
+          assets[file] = `data:${mime};base64,${buf.toString('base64')}`
+        }
+      }
+      await writeFile(picked.filePath, generateTraceHtml(manifest, assets), 'utf-8')
+      shell.openPath(picked.filePath)
+      return picked.filePath
+    } catch {
+      return null
+    }
   })
 
   // Day 16(+): reveal a downloaded file in the OS file explorer (highlighted),

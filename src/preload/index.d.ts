@@ -36,6 +36,16 @@ interface ReplayResult {
   aborted?: boolean // ended by Home mid-recovery — show nothing (Day 12)
   consoleErrors?: string[] // page JS errors during the run (Day 13)
   networkErrors?: string[] // failed / 4xx / 5xx requests during the run (Day 13)
+  traceId?: string // Day 18: a recorded run trace was kept (open it in the viewer)
+}
+
+// Day 18: how aggressively to keep a run trace (mirrors Playwright's `trace`).
+type TraceMode = 'always' | 'failure' | 'off'
+
+interface TraceOptions {
+  mode: TraceMode
+  stepTexts?: string[] // the human sentence per step (renderer-computed)
+  testName?: string
 }
 
 interface RecorderAPI {
@@ -60,7 +70,8 @@ interface RecorderAPI {
   replay: (
     steps: RecorderStep[],
     interactive?: boolean,
-    storageState?: string
+    storageState?: string,
+    traceOpts?: TraceOptions
   ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
@@ -103,12 +114,26 @@ interface TranslatorAPI {
   saveReport: (markdown: string, defaultName: string) => Promise<string | null>
 }
 
+// === Run trace (Day 18) ===
+interface TraceAPI {
+  // The manifest, with each step's thumbnail inlined as a data: URL for the
+  // filmstrip. Null if the trace is missing.
+  get: (id: string) => Promise<TraceManifest | null>
+  // A full-size asset (screenshot) as a data: URL, loaded on demand.
+  getImage: (id: string, file: string) => Promise<string | null>
+  // Open an asset (full screenshot / DOM html) in the OS default app.
+  openFile: (id: string, file: string) => Promise<void>
+  // Copy the whole recording to a folder the user picks. Returns the path.
+  export: (id: string) => Promise<string | null>
+}
+
 interface API {
   browser: BrowserAPI
   recorder: RecorderAPI
   library: LibraryAPI
   translator: TranslatorAPI
   session: SessionAPI
+  trace: TraceAPI
 }
 
 declare global {
@@ -131,6 +156,36 @@ declare global {
     failedAt?: number
     error?: string
     screenshotPath?: string // page capture at the failing step (Day 11.5)
+    traceId?: string // Day 18: the kept run trace, openable in the viewer
+  }
+
+  // === Run trace (Day 18) ===
+  // One step inside a recorded run trace. Asset file names are relative to
+  // the trace folder; `thumbData` is a data: URL the viewer can show inline.
+  interface TraceStep {
+    index: number
+    type: string
+    text: string
+    status: 'done' | 'error' | 'skipped' | 'pending'
+    durationMs: number
+    error?: string
+    url?: string
+    screenshotFile?: string
+    thumbFile?: string
+    thumbData?: string
+    domFile?: string
+    consoleErrors: string[]
+    networkErrors: string[]
+  }
+
+  interface TraceManifest {
+    id: string
+    testName?: string
+    at: string
+    ok: boolean
+    failedAt?: number
+    stepCount: number
+    steps: TraceStep[]
   }
 
   // One row in the library list (no steps — kept light for listing).
@@ -192,6 +247,7 @@ declare global {
     index: number
     error: string
     screenshotPath?: string
+    traceId?: string // Day 18: the run trace saved at the pause (openable now)
     consoleErrors?: string[] // evidence so far — Explain works mid-pause (Day 13)
     networkErrors?: string[]
   }
@@ -229,8 +285,11 @@ declare global {
   // The human's answer to a pause: retry the step (optionally swapped for a
   // re-picked, healed version), skip it for this run only, or stop the run.
   // 'abort' is internal — Home pressed mid-pause; the run ends silently.
+  // 'continue' = DEBUG bypass: ignore this failure and keep going to check the
+  // later steps; the run is still failed and the test is unchanged. 'skip' =
+  // permanently skip the step (the renderer disables it in the test).
   interface RecoveryDecision {
-    action: 'retry' | 'skip' | 'stop' | 'abort'
+    action: 'retry' | 'continue' | 'skip' | 'stop' | 'abort'
     step?: RecorderStep
   }
 

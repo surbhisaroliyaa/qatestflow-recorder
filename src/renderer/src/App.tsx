@@ -164,6 +164,16 @@ function App(): React.JSX.Element {
   const [newSuiteInput, setNewSuiteInput] = useState('')
   // Day 11.5 — failure screenshot of the LAST replay (📷 in the banner).
   const [lastScreenshotPath, setLastScreenshotPath] = useState<string | null>(null)
+  // Day 18 — run trace. `traceMode` mirrors Playwright's retain policy; the
+  // viewer opens a saved trace (manifest + the selected step's full image).
+  const [traceMode, setTraceMode] = useState<'always' | 'failure' | 'off'>(
+    () => (localStorage.getItem('qaflow.traceMode') as 'always' | 'failure' | 'off') || 'failure'
+  )
+  const [lastTraceId, setLastTraceId] = useState<string | null>(null)
+  const [traceView, setTraceView] = useState<TraceManifest | null>(null)
+  const [traceStepIdx, setTraceStepIdx] = useState(0)
+  const [traceImg, setTraceImg] = useState<string | null>(null)
+  const [traceSavedAt, setTraceSavedAt] = useState<string | null>(null)
   // Day 11.5 — suite runner: which section is running, per-test outcomes so
   // far, and whether the run has finished (summary shows then).
   interface SuiteRunEntry {
@@ -452,8 +462,15 @@ function App(): React.JSX.Element {
   // to hide it (else it covers the modal).
   const suiteSummaryOpen = suiteRun !== null && !suiteRun.running
   useEffect(() => {
-    window.api.browser.setOverlay(exportCode !== null || suiteSummaryOpen || analysisOpen)
-  }, [exportCode, suiteSummaryOpen, analysisOpen])
+    window.api.browser.setOverlay(
+      exportCode !== null || suiteSummaryOpen || analysisOpen || traceView !== null
+    )
+  }, [exportCode, suiteSummaryOpen, analysisOpen, traceView])
+
+  // Day 18: remember the trace policy across sessions.
+  useEffect(() => {
+    localStorage.setItem('qaflow.traceMode', traceMode)
+  }, [traceMode])
 
   // Follow replay progress so we can highlight running / done / failed steps.
   useEffect(() => {
@@ -635,24 +652,33 @@ function App(): React.JSX.Element {
     error?: string
     screenshotPath?: string
     aborted?: boolean
+    traceId?: string
   }> => {
     setFailedIndex(null)
     setReplayError(null)
     setDoneIndices(new Set())
     setReplayingIndex(null)
     setLastScreenshotPath(null)
+    setLastTraceId(null)
     setSkippedIndices(new Set())
     setRecovery(null)
     setLastConsoleErrors([])
     setLastNetworkErrors([])
     setIsReplaying(true)
-    const result = await window.api.recorder.replay(list, interactive, sessionFile)
+    // Day 18: hand main the trace policy + the human step sentences (so the
+    // saved trace is self-contained) + the test name for the manifest.
+    const result = await window.api.recorder.replay(list, interactive, sessionFile, {
+      mode: traceMode,
+      stepTexts: list.map((s) => stepText(s)),
+      testName: testName || undefined
+    })
     setIsReplaying(false)
     setReplayingIndex(null)
     setRecovery(null)
     // Aborted = Home was pressed mid-recovery. The run is moot — no failure
     // banner, no run recorded.
     if (result.aborted) return result
+    setLastTraceId(result.traceId ?? null)
     if (!result.ok) {
       setFailedIndex(result.failedAt ?? null)
       setReplayError(result.error ?? 'Replay failed')
@@ -668,10 +694,47 @@ function App(): React.JSX.Element {
         at: new Date().toISOString(),
         failedAt: result.failedAt,
         error: result.error,
-        screenshotPath: result.screenshotPath
+        screenshotPath: result.screenshotPath,
+        traceId: result.traceId
       })
     }
     return result
+  }
+
+  // === Day 18: run-trace viewer ======================================
+  // Open a saved trace: load its manifest (thumbnails inlined), jump to the
+  // failed step if any, and fetch that step's full screenshot.
+  const loadTraceImage = async (manifest: TraceManifest, pos: number): Promise<void> => {
+    setTraceImg(null)
+    const step = manifest.steps[pos]
+    if (step?.screenshotFile) {
+      const img = await window.api.trace.getImage(manifest.id, step.screenshotFile)
+      setTraceImg(img)
+    }
+  }
+  const openTrace = async (id: string): Promise<void> => {
+    const manifest = await window.api.trace.get(id)
+    if (!manifest) return
+    setTraceView(manifest)
+    const failPos = manifest.steps.findIndex((s) => s.status === 'error')
+    const pos = failPos >= 0 ? failPos : 0
+    setTraceStepIdx(pos)
+    loadTraceImage(manifest, pos)
+  }
+  const selectTraceStep = (pos: number): void => {
+    if (!traceView) return
+    setTraceStepIdx(pos)
+    loadTraceImage(traceView, pos)
+  }
+  const closeTrace = (): void => {
+    setTraceView(null)
+    setTraceImg(null)
+    setTraceSavedAt(null)
+  }
+  const saveTraceRecording = async (): Promise<void> => {
+    if (!traceView) return
+    const dest = await window.api.trace.export(traceView.id)
+    if (dest) setTraceSavedAt(dest)
   }
 
   // Replay: run all recorded steps in the embedded browser and watch them go.
@@ -681,11 +744,21 @@ function App(): React.JSX.Element {
   }
 
   // === Day 12: recovery — answer a paused replay ====================
-  const answerRecovery = (action: 'retry' | 'skip' | 'stop'): void => {
+  const answerRecovery = (action: 'retry' | 'continue' | 'skip' | 'stop'): void => {
     setRecovery(null)
     setRecoveryWarning(null)
     setRepickPending(null)
     window.api.recorder.recovery({ action })
+  }
+
+  // Day 18: PERMANENT skip — disable the failed step (skipped now and in future
+  // runs) and continue. setSteps directly (like a re-pick heal) to keep the
+  // live replay marks; 💾 Save persists the disable.
+  const handleRecoverySkipStep = (): void => {
+    if (!recovery) return
+    const i = recovery.index
+    setSteps((prev) => prev.map((s, idx) => (idx === i ? { ...s, disabled: true } : s)))
+    answerRecovery('skip')
   }
 
   // Re-pick: open the Day 9 element picker; the onPicked handler above heals
@@ -1389,17 +1462,28 @@ function App(): React.JSX.Element {
                                       <div className="run-error-msg">
                                         {run.error || 'No error message was recorded.'}
                                       </div>
-                                      {run.screenshotPath && (
-                                        <button
-                                          type="button"
-                                          className="run-error-shot"
-                                          onClick={() =>
-                                            window.api.library.openScreenshot(run.screenshotPath!)
-                                          }
-                                        >
-                                          📷 View failure screenshot
-                                        </button>
-                                      )}
+                                      <div className="run-fail-actions">
+                                        {run.screenshotPath && (
+                                          <button
+                                            type="button"
+                                            className="run-error-shot"
+                                            onClick={() =>
+                                              window.api.library.openScreenshot(run.screenshotPath!)
+                                            }
+                                          >
+                                            📷 View failure screenshot
+                                          </button>
+                                        )}
+                                        {run.traceId && (
+                                          <button
+                                            type="button"
+                                            className="run-error-shot"
+                                            onClick={() => openTrace(run.traceId!)}
+                                          >
+                                            ⏺ Open recording
+                                          </button>
+                                        )}
+                                      </div>
                                     </div>
                                   ))}
                                 </div>
@@ -1598,6 +1682,21 @@ function App(): React.JSX.Element {
                 >
                   ▶ {isReplaying ? 'Replaying…' : 'Replay'}
                 </button>
+                {/* Day 18: when to keep a full run recording (trace), like
+                    Playwright's trace: retain-on-failure. */}
+                <select
+                  className="trace-mode"
+                  value={traceMode}
+                  onChange={(e) =>
+                    setTraceMode(e.target.value as 'always' | 'failure' | 'off')
+                  }
+                  disabled={isReplaying || isRecording}
+                  title="When to keep a full run recording (every step's screenshot, console & network)"
+                >
+                  <option value="failure">⏺ on failure</option>
+                  <option value="always">⏺ always</option>
+                  <option value="off">⏺ off</option>
+                </select>
                 <button
                   className="export-btn"
                   onClick={handleExport}
@@ -1636,6 +1735,17 @@ function App(): React.JSX.Element {
           {replayBanner && (
             <div className={`replay-status ${replayBanner.tone}`}>
               {replayBanner.text}
+              {/* Day 18: open the full run recording (trace) for this run */}
+              {!isReplaying && lastTraceId && (
+                <button
+                  type="button"
+                  className="shot-link trace-link"
+                  onClick={() => openTrace(lastTraceId)}
+                  title="Open the full run recording (every step's screenshot, console & network)"
+                >
+                  ⏺ recording
+                </button>
+              )}
               {/* Day 11.5: the page photographed at the failing step */}
               {replayBanner.tone === 'failed' && lastScreenshotPath && (
                 <button
@@ -1721,6 +1831,17 @@ function App(): React.JSX.Element {
                       📷
                     </button>
                   )}
+                  {/* Day 18: open the full run recording captured up to here */}
+                  {recovery.traceId && (
+                    <button
+                      type="button"
+                      className="shot-link trace-link"
+                      onClick={() => openTrace(recovery.traceId!)}
+                      title="Open the full run recording (every step's screenshot, console & network)"
+                    >
+                      ⏺
+                    </button>
+                  )}
                   {/* Day 13: ask for a diagnosis while deciding what to do */}
                   <button
                     type="button"
@@ -1759,10 +1880,17 @@ function App(): React.JSX.Element {
                   </button>
                   <button
                     className="modal-btn"
-                    onClick={() => answerRecovery('skip')}
-                    title="Skip this step for THIS run and continue"
+                    onClick={() => answerRecovery('continue')}
+                    title="Ignore this failure and continue, to check the later steps. The run is still marked failed; the test isn't changed."
                   >
-                    ⏭ Skip
+                    ⤵ Continue
+                  </button>
+                  <button
+                    className="modal-btn"
+                    onClick={handleRecoverySkipStep}
+                    title="Permanently skip this step — disable it now and in future runs. 💾 Save to keep it."
+                  >
+                    ⊘ Skip step
                   </button>
                   <button
                     className="modal-btn danger"
@@ -2368,6 +2496,139 @@ function App(): React.JSX.Element {
                   </button>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === Day 18: run-trace viewer — filmstrip of every step on the left,
+           the selected step's screenshot + console/network on the right. === */}
+      {traceView && (
+        <div className="modal-backdrop" onClick={closeTrace}>
+          <div className="trace-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="trace-header">
+              <span className="trace-title">
+                ⏺ Run recording{traceView.testName ? ` — ${traceView.testName}` : ''}
+              </span>
+              <span className={`trace-result ${traceView.ok ? 'ok' : 'fail'}`}>
+                {traceView.ok ? '✓ passed' : '✗ failed'}
+              </span>
+              <span className="trace-when">{new Date(traceView.at).toLocaleString()}</span>
+              {traceSavedAt ? (
+                <span className="trace-saved" title={traceSavedAt}>
+                  ✓ saved
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="trace-save"
+                  onClick={saveTraceRecording}
+                  title="Copy this recording to a folder you choose"
+                >
+                  💾 Save recording
+                </button>
+              )}
+              <button className="trace-close" onClick={closeTrace} aria-label="Close">
+                ✕
+              </button>
+            </div>
+            <div className="trace-body">
+              <ol className="trace-steps">
+                {traceView.steps.map((s, pos) => (
+                  <li
+                    key={pos}
+                    className={`trace-step ${s.status}${pos === traceStepIdx ? ' active' : ''}`}
+                    onClick={() => selectTraceStep(pos)}
+                  >
+                    <span className="trace-step-num">{s.index + 1}</span>
+                    {s.thumbData ? (
+                      <img className="trace-thumb" src={s.thumbData} alt="" />
+                    ) : (
+                      <span className="trace-thumb empty" />
+                    )}
+                    <span className="trace-step-text">{s.text}</span>
+                    <span className={`trace-dot ${s.status}`} />
+                  </li>
+                ))}
+              </ol>
+              <div className="trace-preview">
+                {(() => {
+                  const step = traceView.steps[traceStepIdx]
+                  if (!step) return null
+                  return (
+                    <>
+                      <div className="trace-preview-head">
+                        <span className="trace-preview-title">
+                          Step {step.index + 1}: {step.text}
+                        </span>
+                        <span className="trace-preview-meta">
+                          {step.durationMs} ms · {step.status}
+                        </span>
+                      </div>
+                      {step.error && <div className="trace-error">{step.error}</div>}
+                      <div className="trace-shot">
+                        {traceImg ? (
+                          <img src={traceImg} alt="step screenshot" />
+                        ) : (
+                          <span className="trace-shot-loading">
+                            {step.screenshotFile
+                              ? 'Loading screenshot…'
+                              : step.status === 'pending'
+                                ? "This step didn't run — the run stopped before reaching it."
+                                : step.status === 'skipped'
+                                  ? 'This step was skipped — it did not run.'
+                                  : 'No screenshot for this step'}
+                          </span>
+                        )}
+                      </div>
+                      {(step.consoleErrors.length > 0 || step.networkErrors.length > 0) && (
+                        <div className="trace-evidence">
+                          {step.consoleErrors.length > 0 && (
+                            <div className="trace-ev-block">
+                              <div className="trace-ev-label">Console</div>
+                              {step.consoleErrors.map((l, i) => (
+                                <div key={i} className="trace-ev-line">
+                                  {l}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {step.networkErrors.length > 0 && (
+                            <div className="trace-ev-block">
+                              <div className="trace-ev-label">Network</div>
+                              {step.networkErrors.map((l, i) => (
+                                <div key={i} className="trace-ev-line">
+                                  {l}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      <div className="trace-file-actions">
+                        {step.screenshotFile && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              window.api.trace.openFile(traceView.id, step.screenshotFile!)
+                            }
+                          >
+                            🖼 Open full image
+                          </button>
+                        )}
+                        {step.domFile && (
+                          <button
+                            type="button"
+                            onClick={() => window.api.trace.openFile(traceView.id, step.domFile!)}
+                          >
+                            {'</>'} Open page HTML
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )
+                })()}
+              </div>
             </div>
           </div>
         </div>

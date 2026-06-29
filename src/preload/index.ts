@@ -124,9 +124,10 @@ const api = {
     replay: (
       steps: unknown[],
       interactive?: boolean,
-      storageState?: string
+      storageState?: string,
+      traceOpts?: unknown
     ): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
-      ipcRenderer.invoke('recorder:replay', steps, interactive, storageState),
+      ipcRenderer.invoke('recorder:replay', steps, interactive, storageState, traceOpts),
 
     // === Recovery (Day 12) ===
     // An interactive replay paused at a failed step — main's loop is holding,
@@ -205,6 +206,16 @@ const api = {
   session: {
     save: (name: string): Promise<string | null> => ipcRenderer.invoke('session:save', name),
     list: (): Promise<string[]> => ipcRenderer.invoke('session:list')
+  },
+
+  // === Run trace (Day 18) ===
+  trace: {
+    get: (id: string): Promise<unknown> => ipcRenderer.invoke('trace:get', id),
+    getImage: (id: string, file: string): Promise<string | null> =>
+      ipcRenderer.invoke('trace:getImage', id, file),
+    openFile: (id: string, file: string): Promise<void> =>
+      ipcRenderer.invoke('trace:openFile', id, file),
+    export: (id: string): Promise<string | null> => ipcRenderer.invoke('trace:export', id)
   }
 }
 
