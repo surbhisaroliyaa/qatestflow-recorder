@@ -63,6 +63,8 @@ export function stepText(step: RecorderStep): string {
   switch (step.type) {
     case 'navigate':
       return `Go to ${step.url}`
+    case 'back':
+      return 'Go back'
     case 'click':
       return `Click ${step.label}`
     case 'type':
@@ -170,6 +172,10 @@ function actionFor(
       url = url.slice(baseURL.length) || '/'
     }
     return `await ${pageVar}.goto(${quote(url)})`
+  }
+
+  if (step.type === 'back') {
+    return `await ${pageVar}.goBack()`
   }
 
   if (step.type === 'wait') {
@@ -480,8 +486,10 @@ export function generatePageObjectTest(
       if (line) specBody.push(`  ${line}`)
       continue
     }
-    // An action step → into the current method buffer.
-    if (step.type === 'wait') {
+    // An action step → into the current method buffer. wait + back have no
+    // element of their own (page-level actions), so handle them before the
+    // no-selector skip below.
+    if (step.type === 'wait' || step.type === 'back') {
       const line = actionFor(step, baseURL, 'this.page')
       if (line) buffer.push(`    ${line}`)
       continue

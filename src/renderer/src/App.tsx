@@ -137,6 +137,8 @@ function App(): React.JSX.Element {
   // Day 11 — test library. The current test's identity (empty/null = an
   // unsaved recording) + the saved-tests list shown on the welcome screen.
   const [savedTests, setSavedTests] = useState<SavedTestSummary[]>([])
+  // Welcome screen: which test's last-run error detail is expanded (by fileName).
+  const [errorOpenFor, setErrorOpenFor] = useState<string | null>(null)
   const [testName, setTestName] = useState('')
   const [testFileName, setTestFileName] = useState<string | null>(null)
   const [baseURL, setBaseURL] = useState('')
@@ -1287,8 +1289,22 @@ function App(): React.JSX.Element {
                         <p className="library-empty">No tests yet — save one with 💾</p>
                       ) : (
                         <ul className="library-list">
-                          {tests.map((test) => (
+                          {tests.map((test) => {
+                            // Every recorded run (newest-first). Older files kept
+                            // only `lastRun`; treat that as a one-run history.
+                            const allRuns =
+                              test.runs && test.runs.length
+                                ? test.runs
+                                : test.lastRun
+                                  ? [test.lastRun]
+                                  : []
+                            // Each failure can be a DIFFERENT error at a different
+                            // time — keep them all so the user sees why AND when.
+                            const failedRuns = allRuns.filter((r) => r.status === 'failed')
+                            const currentlyFailing = test.lastRun?.status === 'failed'
+                            return (
                             <li key={test.fileName} className="library-item">
+                              <div className="library-item-head">
                               <button
                                 type="button"
                                 className="library-row"
@@ -1324,6 +1340,29 @@ function App(): React.JSX.Element {
                                   {new Date(test.updatedAt).toLocaleDateString()}
                                 </span>
                               </button>
+                              {/* Any failure — current OR past — is inspectable
+                                  here. A test that passes now but failed before
+                                  gets a calmer "Past fail(s)" label so it doesn't
+                                  read as currently broken. */}
+                              {failedRuns.length > 0 && (
+                                <button
+                                  type="button"
+                                  className={`library-why${errorOpenFor === test.fileName ? ' open' : ''}${currentlyFailing ? '' : ' past'}`}
+                                  onClick={() =>
+                                    setErrorOpenFor(
+                                      errorOpenFor === test.fileName ? null : test.fileName
+                                    )
+                                  }
+                                  title={currentlyFailing ? 'Why did it fail?' : 'Past failures'}
+                                >
+                                  ⚠{' '}
+                                  {failedRuns.length > 1
+                                    ? `${failedRuns.length} fails`
+                                    : currentlyFailing
+                                      ? 'Why?'
+                                      : 'Past fail'}
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className="library-delete"
@@ -1333,8 +1372,41 @@ function App(): React.JSX.Element {
                               >
                                 ✕
                               </button>
+                              </div>
+                              {errorOpenFor === test.fileName && failedRuns.length > 0 && (
+                                <div className="run-error-detail">
+                                  {/* One entry per failed run — each shows WHEN it
+                                      failed and WHY (the errors can differ run to
+                                      run), with a jump to that run's screenshot. */}
+                                  {failedRuns.map((run, ri) => (
+                                    <div key={ri} className="run-fail-entry">
+                                      <div className="run-fail-when">
+                                        {new Date(run.at).toLocaleString()}
+                                        {run.failedAt !== undefined
+                                          ? ` · step ${run.failedAt + 1}`
+                                          : ''}
+                                      </div>
+                                      <div className="run-error-msg">
+                                        {run.error || 'No error message was recorded.'}
+                                      </div>
+                                      {run.screenshotPath && (
+                                        <button
+                                          type="button"
+                                          className="run-error-shot"
+                                          onClick={() =>
+                                            window.api.library.openScreenshot(run.screenshotPath!)
+                                          }
+                                        >
+                                          📷 View failure screenshot
+                                        </button>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
                             </li>
-                          ))}
+                            )
+                          })}
                         </ul>
                       )}
                     </div>

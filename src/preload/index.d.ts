@@ -286,6 +286,7 @@ declare global {
   interface RecorderStep {
     type:
       | 'navigate'
+      | 'back'
       | 'click'
       | 'type'
       | 'select'

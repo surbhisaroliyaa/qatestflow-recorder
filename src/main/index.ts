@@ -432,6 +432,11 @@ function createWindow(): void {
   ipcMain.handle('browser:goBack', (): boolean => {
     const history = activeWC().navigationHistory
     if (history.canGoBack()) {
+      // Going Back is a real user action with no click standing in for it, so
+      // it deserves its own recorded step (unlike a link nav, which is treated
+      // as a consequence of the recorded click). Record it BEFORE we move, so
+      // it lands in order; replay re-walks history one entry back (Day 18).
+      if (isRecording) sendStep({ type: 'back' })
       history.goBack()
       return true
     }
@@ -1478,6 +1483,22 @@ function createWindow(): void {
                 await currentWC.loadURL(currentWC.getURL()).catch(() => {})
               }
             }
+          } else if (step.type === 'back') {
+            // Day 18: re-walk the browser's history one entry back, mirroring
+            // the ← Back press that was recorded. The navigate/click steps run
+            // so far have built up this tab's history, so goBack lands on the
+            // previous page. Wait for it to commit + finish loading before the
+            // next step runs (its smart-wait then does the real verifying).
+            hasNavigated = true
+            resizeEmbedded()
+            const history = currentWC.navigationHistory
+            if (!history.canGoBack()) {
+              throw new Error('Cannot go Back — there is no previous page in history')
+            }
+            history.goBack()
+            await wait(100)
+            const backDeadline = Date.now() + 8000
+            while (currentWC.isLoading() && Date.now() < backDeadline) await wait(100)
           } else if (step.type === 'wait') {
             // An explicit pause — no element involved, just time (Day 9).
             const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
@@ -1561,22 +1582,51 @@ function createWindow(): void {
             // document-relative, so it needs no changes — only the frame it
             // runs in differs. The finder still resolves the element through
             // the full candidate ladder (role / text / CSS), strongest-first.
-            const targetFrame = await resolveFrame(currentWC, step.frame)
-            if (!targetFrame) {
-              throw new Error(
-                'Could not find the iframe for this step (it never appeared on the page)'
-              )
+            //
+            // Day 18 (replay stability): the injected script POLLS (an assert
+            // waits up to 3s), so it can still be running while the page is
+            // navigating — e.g. a check right after a login redirect. When the
+            // page navigates, Electron DESTROYS the frame the script runs in
+            // before it returns ("…destroyed without running the callback").
+            // That's transient, not a test failure: wait for the page to
+            // settle, re-resolve the frame (the old handle is now stale), and
+            // retry. Asserts/finders are read-only + idempotent, so re-running
+            // just yields the real answer instead of a cryptic Electron error.
+            let result: { ok: boolean; error?: string; hoverAt?: { x: number; y: number } } | null =
+              null
+            const execDeadline = Date.now() + 10000
+            for (;;) {
+              // Don't fire into a page that's still mid-navigation.
+              while (currentWC.isLoading() && Date.now() < execDeadline) await wait(100)
+              const targetFrame = await resolveFrame(currentWC, step.frame)
+              if (!targetFrame) {
+                throw new Error(
+                  'Could not find the iframe for this step (it never appeared on the page)'
+                )
+              }
+              // Day 16: if the NEXT step is a dialog, this action is what
+              // triggers it — pre-arm the override in this frame so the dialog
+              // answers itself instead of blocking. Also flag replay so any
+              // UNEXPECTED dialog auto-accepts rather than hanging the run.
+              await armNextDialog(targetFrame, list[i + 1])
+              try {
+                result = (await targetFrame.executeJavaScript(buildActionScript(step), true)) as {
+                  ok: boolean
+                  error?: string
+                  hoverAt?: { x: number; y: number }
+                } | null
+                break
+              } catch (execErr) {
+                const m = execErr instanceof Error ? execErr.message : String(execErr)
+                const transient =
+                  m.includes('destroyed without running the callback') ||
+                  m.includes('frame was disposed')
+                if (!transient || Date.now() > execDeadline) throw execErr
+                // The frame navigated/reloaded mid-execute — let it settle, then
+                // loop to re-resolve a fresh frame and try the script again.
+                await wait(250)
+              }
             }
-            // Day 16: if the NEXT step is a dialog, this action is what triggers
-            // it — pre-arm the override in this frame so the dialog answers
-            // itself instead of blocking. Also flag replay so any UNEXPECTED
-            // dialog auto-accepts rather than hanging the run.
-            await armNextDialog(targetFrame, list[i + 1])
-            const result = (await targetFrame.executeJavaScript(buildActionScript(step), true)) as {
-              ok: boolean
-              error?: string
-              hoverAt?: { x: number; y: number }
-            } | null
             if (!result || !result.ok) throw new Error(result?.error || 'Action failed')
             // A hover step: the page script located the trigger and returned
             // its center. Move the engine-level mouse there via CDP (sets CSS

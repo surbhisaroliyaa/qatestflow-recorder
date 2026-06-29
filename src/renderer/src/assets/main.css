@@ -704,8 +704,104 @@ body {
 
 .library-item {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.library-item-head {
+  display: flex;
   align-items: stretch;
   gap: 4px;
+}
+
+/* "⚠ Why?" — shown on a failed test; expands the error detail below the row. */
+.library-why {
+  flex: none;
+  padding: 0 10px;
+  background: #2a1f15;
+  border: 1px solid #5a3a1a;
+  border-radius: 8px;
+  color: #f0b37e;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.library-why:hover,
+.library-why.open {
+  background: #3a2a18;
+  border-color: #c9893f;
+  color: #ffce9e;
+}
+
+/* Passes now but failed before — calmer (grey), not alarm-red. */
+.library-why.past {
+  background: #20262e;
+  border-color: #3a4250;
+  color: #9aa4b2;
+}
+
+.library-why.past:hover,
+.library-why.past.open {
+  background: #283039;
+  border-color: #5a6270;
+  color: #c5cdd9;
+}
+
+/* The expanded failure detail: one entry per failed run. */
+.run-error-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #241317;
+  border: 1px solid #5a2a2a;
+  border-radius: 8px;
+}
+
+/* One failed run: when it failed, the error, and a jump to its screenshot.
+   Stacked, divided so multiple failures read as a list. */
+.run-fail-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.run-fail-entry + .run-fail-entry {
+  padding-top: 10px;
+  border-top: 1px solid #4a2424;
+}
+
+.run-fail-when {
+  color: #d98b8b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.run-error-msg {
+  color: #ffb3ae;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.run-error-shot {
+  align-self: flex-start;
+  padding: 5px 10px;
+  background: #2a1715;
+  border: 1px solid #4a2422;
+  border-radius: 6px;
+  color: #ffce9e;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.run-error-shot:hover {
+  border-color: #c9893f;
+  background: #3a2018;
 }
 
 .library-row {
