@@ -2397,7 +2397,7 @@ function App(): React.JSX.Element {
                           title={
                             (step.windowId ?? 0) === 0
                               ? 'Runs on the main (original) tab'
-                              : `Runs on tab ${step.windowId}`
+                              : `Runs on tab ${step.windowId} — a stable id = the order this tab was opened in the recording (like Playwright's page0/page1…). Ids never repeat, so a number can be higher than the count of tabs open right now.`
                           }
                         >
                           ⧉ {(step.windowId ?? 0) === 0 ? 'main tab' : `tab ${step.windowId}`}
@@ -2406,7 +2406,7 @@ function App(): React.JSX.Element {
                       {step.opensWindow !== undefined && (
                         <span
                           className="window-badge opens"
-                          title={`This action opens tab ${step.opensWindow}`}
+                          title={`This click opens tab ${step.opensWindow} — a new browser tab. Tab numbers are stable open-order ids and never reuse, so they can climb past the number of tabs currently open.`}
                         >
                           ↗ opens tab {step.opensWindow}
                         </span>

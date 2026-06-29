@@ -388,6 +388,7 @@ declare global {
     type:
       | 'navigate'
       | 'back'
+      | 'closeTab'
       | 'click'
       | 'type'
       | 'select'

@@ -723,7 +723,17 @@ function createWindow(): void {
   // Close a tab from the strip's ✕ (the original tab can't be closed).
   ipcMain.handle('browser:closeTab', (_event, ordinal: number) => {
     const tab = tabByOrdinal(ordinal)
-    if (tab) closeTab(tab)
+    if (!tab) return
+    // Day 18: a USER closing a tab via ✕ is a real action — record it (tagged
+    // with that tab's recording-local windowId) so replay closes it too. Only
+    // the explicit ✕ is recorded here; self-closing popups (page window.close)
+    // come through the wc 'destroyed' handler and aren't recorded — replay
+    // reproduces those naturally when the page closes itself.
+    if (isRecording) {
+      const wid = recWindowIdOf(tab)
+      if (wid !== 0) sendStep({ type: 'closeTab' }, wid)
+    }
+    closeTab(tab)
   })
 
   // === Recording =====================================================
@@ -1713,13 +1723,17 @@ function createWindow(): void {
           // opener tag was likely dropped at record time — try to adopt the
           // popup that opened anyway (Day 18) before giving up.
           const stepWindowId = step.windowId ?? 0
-          if (!ordinalToTab.has(stepWindowId)) {
-            await adoptUnboundPopup(stepWindowId)
-          }
-          if (!switchTo(stepWindowId)) {
-            throw new Error(
-              `This step runs in tab ${stepWindowId}, which was never opened during replay`
-            )
+          // A closeTab step acts ON a tab (closes it) rather than running inside
+          // one, so it doesn't switch in / require the tab to still be there.
+          if (step.type !== 'closeTab') {
+            if (!ordinalToTab.has(stepWindowId)) {
+              await adoptUnboundPopup(stepWindowId)
+            }
+            if (!switchTo(stepWindowId)) {
+              throw new Error(
+                `This step runs in tab ${stepWindowId}, which was never opened during replay`
+              )
+            }
           }
           if (step.opensWindow !== undefined) {
             popupWait = new Promise<Tab>((resolve) => {
@@ -1782,6 +1796,17 @@ function createWindow(): void {
             await wait(100)
             const backDeadline = Date.now() + 8000
             while (currentWC.isLoading() && Date.now() < backDeadline) await wait(100)
+          } else if (step.type === 'closeTab') {
+            // Day 18: close the recorded tab. If it was the current target, fall
+            // back to the main tab so the rest of the run has a live tab. A tab
+            // that isn't bound is already gone — nothing to do (idempotent).
+            const tab = ordinalToTab.get(stepWindowId)
+            if (tab) {
+              ordinalToTab.delete(stepWindowId)
+              const wasCurrent = currentWC === tab.view.webContents
+              closeTab(tab)
+              if (wasCurrent) switchTo(0)
+            }
           } else if (step.type === 'wait') {
             // An explicit pause — no element involved, just time (Day 9).
             const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)

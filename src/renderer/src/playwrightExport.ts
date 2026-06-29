@@ -65,6 +65,8 @@ export function stepText(step: RecorderStep): string {
       return `Go to ${step.url}`
     case 'back':
       return 'Go back'
+    case 'closeTab':
+      return `Close tab ${step.windowId ?? ''}`.trim()
     case 'click':
       return `Click ${step.label}`
     case 'type':
@@ -176,6 +178,10 @@ function actionFor(
 
   if (step.type === 'back') {
     return `await ${pageVar}.goBack()`
+  }
+
+  if (step.type === 'closeTab') {
+    return `await ${pageVar}.close()`
   }
 
   if (step.type === 'wait') {
