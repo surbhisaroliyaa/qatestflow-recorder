@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { generatePlaywrightTest, generatePageObjectTest, stepText } from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
+import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
@@ -176,6 +177,14 @@ function App(): React.JSX.Element {
     () => (localStorage.getItem('qaflow.traceMode') as 'always' | 'failure' | 'off') || 'failure'
   )
   const [lastTraceId, setLastTraceId] = useState<string | null>(null)
+  // Day 20: every failed step of the last replay (Continue can bypass several),
+  // so the banner can surface each one's screenshot/explanation. `failDetail`
+  // is which inline list is expanded ('shots' | 'explain' | null) — only when
+  // more than one step failed.
+  const [lastFailures, setLastFailures] = useState<
+    { index: number; error: string; screenshotPath?: string }[]
+  >([])
+  const [failDetail, setFailDetail] = useState<'shots' | 'explain' | null>(null)
   const [traceView, setTraceView] = useState<TraceManifest | null>(null)
   const [traceStepIdx, setTraceStepIdx] = useState(0)
   const [traceImg, setTraceImg] = useState<string | null>(null)
@@ -198,6 +207,38 @@ function App(): React.JSX.Element {
     results: SuiteRunEntry[]
     running: boolean
   } | null>(null)
+
+  // Day 20 — data-driven runs. The table of rows this test runs against (each
+  // row = a { column: value } map; columns are DERIVED from the {{tokens}} in
+  // the steps, so they're never stored separately). `dataPanelOpen` toggles the
+  // grid; `dataRun` mirrors suiteRun for the per-row run summary.
+  const [dataRows, setDataRows] = useState<Record<string, string>[]>([])
+  const [dataPanelOpen, setDataPanelOpen] = useState(false)
+  interface DataRunEntry {
+    label: string
+    status: 'passed' | 'failed'
+    failedAt?: number
+    error?: string
+    screenshotPath?: string
+    traceId?: string // Day 20: this row's run recording, openable per row
+    consoleErrors?: string[] // this row's evidence — for per-row 💡 Explain
+    networkErrors?: string[]
+  }
+  const [dataRun, setDataRun] = useState<{
+    total: number
+    current: number // 1-based index of the row running now
+    currentLabel: string
+    results: DataRunEntry[]
+    running: boolean
+  } | null>(null)
+  // Which inline tab is expanded under the data-run banner (null = just the
+  // banner). The tabs + their content live IN the steps panel, not a modal:
+  // 'evidence' = each failed row's screenshot + recording; 'explain' = each
+  // failed row, opened one by one for a diagnosis.
+  const [dataTab, setDataTab] = useState<'evidence' | 'explain' | null>(null)
+  // The overview popup that auto-appears when a data run finishes (the quick
+  // "X passed, Y failed" summary). Dismissing it leaves the inline panel tabs.
+  const [dataPopupDismissed, setDataPopupDismissed] = useState(false)
 
   // Welcome-screen accordion: which sections are EXPANDED. Starts empty, so
   // every launch begins compact — section headers only (Surbhi's call);
@@ -267,6 +308,10 @@ function App(): React.JSX.Element {
   // runs on (incl. the original "main tab") — otherwise the original tab is the
   // only one with no badge, which reads as missing/confusing.
   const multiWindow = steps.some((s) => (s.windowId ?? 0) > 0 || s.opensWindow !== undefined)
+  // Day 20: the data columns this test references (derived from the {{tokens}}
+  // in step values / URLs). Non-empty = this is a data-driven test.
+  const dataCols = dataColumns(steps)
+  const isDataDriven = dataCols.length > 0
 
   // The test's base URL when none was set yet: the ORIGIN of the first
   // navigation (https://site.com/login -> https://site.com).
@@ -305,13 +350,14 @@ function App(): React.JSX.Element {
         suite: testSuite,
         storageState,
         viewport,
+        dataRows,
         steps
       })
     }, 700)
     return () => {
       if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current)
     }
-  }, [steps, testFileName, testName, baseURL, testSuite, storageState, viewport])
+  }, [steps, testFileName, testName, baseURL, testSuite, storageState, viewport, dataRows])
 
   // Sync the URL bar whenever the embedded browser navigates.
   // Mark hasNavigated true so we switch from welcome -> chrome view.
@@ -508,11 +554,18 @@ function App(): React.JSX.Element {
   // any full-window overlay is open (export modal, suite summary) we ask main
   // to hide it (else it covers the modal).
   const suiteSummaryOpen = suiteRun !== null && !suiteRun.running
+  // Day 20: the overview popup auto-appears when a data run finishes; the
+  // detailed tabs live inline in the panel (no overlay needed for those).
+  const dataPopupOpen = dataRun !== null && !dataRun.running && !dataPopupDismissed
   useEffect(() => {
     window.api.browser.setOverlay(
-      exportCode !== null || suiteSummaryOpen || analysisOpen || traceView !== null
+      exportCode !== null ||
+        suiteSummaryOpen ||
+        dataPopupOpen ||
+        analysisOpen ||
+        traceView !== null
     )
-  }, [exportCode, suiteSummaryOpen, analysisOpen, traceView])
+  }, [exportCode, suiteSummaryOpen, dataPopupOpen, analysisOpen, traceView])
 
   // Day 18: remember the trace policy across sessions.
   useEffect(() => {
@@ -558,6 +611,9 @@ function App(): React.JSX.Element {
     if (steps.length === 0) return
     if (!window.confirm(`Clear all ${steps.length} steps and start over?`)) return
     editSteps([])
+    // Day 20: clearing the steps drops the data table with them.
+    setDataRows([])
+    setDataPanelOpen(false)
     // Day 18: "start over" discards the current draft too.
     if (draftIdRef.current) {
       window.api.drafts.delete(draftIdRef.current)
@@ -603,6 +659,7 @@ function App(): React.JSX.Element {
         suite: testSuite,
         storageState,
         viewport,
+        dataRows,
         steps
       })
     }
@@ -622,6 +679,10 @@ function App(): React.JSX.Element {
     setTestSuite('')
     setSavePanelOpen(false)
     setSuiteRun(null)
+    // Day 20: drop the data table + any data-run state on a fresh start.
+    setDataRows([])
+    setDataPanelOpen(false)
+    setDataRun(null)
     setLastScreenshotPath(null)
     // Day 12: main answers any paused replay with a silent abort on Home —
     // mirror that here so no recovery UI survives the trip to welcome.
@@ -649,7 +710,11 @@ function App(): React.JSX.Element {
       name: testName || undefined,
       baseURL: baseURL || deriveBaseURL(steps) || undefined,
       storageState,
-      viewport
+      viewport,
+      // Day 20: pass the data table so a data-driven test exports as a
+      // `for (const data of dataset)` loop. The generators ignore it when
+      // there are no columns/rows, so a plain test stays byte-identical.
+      data: isDataDriven ? { columns: dataCols, rows: dataRows } : undefined
     }
     if (pageObject) {
       const pom = generatePageObjectTest(steps, opts)
@@ -721,11 +786,16 @@ function App(): React.JSX.Element {
     screenshotPath?: string
     aborted?: boolean
     traceId?: string
+    consoleErrors?: string[]
+    networkErrors?: string[]
+    failures?: { index: number; error: string; screenshotPath?: string }[]
   }> => {
     setFailedIndex(null)
     setReplayError(null)
     setDoneIndices(new Set())
     setReplayingIndex(null)
+    setLastFailures([])
+    setFailDetail(null)
     setLastScreenshotPath(null)
     setLastTraceId(null)
     setSkippedIndices(new Set())
@@ -753,6 +823,7 @@ function App(): React.JSX.Element {
       setLastScreenshotPath(result.screenshotPath ?? null)
       setLastConsoleErrors(result.consoleErrors ?? [])
       setLastNetworkErrors(result.networkErrors ?? [])
+      setLastFailures(result.failures ?? [])
     }
     // A SAVED test remembers its outcomes — the library shows the latest as
     // a green/red dot and the last 10 as a history row (mini CI dashboard).
@@ -807,8 +878,113 @@ function App(): React.JSX.Element {
 
   // Replay: run all recorded steps in the embedded browser and watch them go.
   // Interactive — a failed step pauses for recovery instead of ending the run.
+  // Day 20: a DATA-DRIVEN test runs the WHOLE matrix (every row), same as
+  // 🧪 Data ▸ Run — "Replay" should mean "run my test", and a data test IS all
+  // its rows. (A test with variables but no rows yet falls through to a single
+  // row-0 run so the button still does something.) Data runs are non-interactive
+  // — recovery/heal can't substitute tokens, so it would mislead mid-row.
   const handleReplay = async (): Promise<void> => {
+    if (isDataDriven && dataRows.length > 0) {
+      await handleRunData()
+      return
+    }
+    if (isDataDriven) {
+      const row = dataRows[0] ?? {}
+      const envMap = await window.api.recorder.resolveEnv(envVarNames(steps, [row]))
+      const list = substituteSteps(steps, resolveRow(row, envMap), envMap)
+      await runOnce(list, testFileName, false)
+      return
+    }
+    setDataRun(null) // a plain single replay clears any stale matrix banner
     await runOnce(steps, testFileName, true)
+  }
+
+  // === Day 20: data-driven runs ======================================
+  // Turn one step's fixed value into a {{variable}} (a column the data table
+  // fills). The column name comes from the step's label; a secret password
+  // field becomes a normal placeholder (its real value now comes per-row, and
+  // real secrets can use a {{env:NAME}} cell). Opens the data grid.
+  const handleParameterize = (i: number): void => {
+    const step = steps[i]
+    const col = toColumnName(step.label)
+    editSteps(steps.map((s, idx) => (idx === i ? { ...s, value: `{{${col}}}`, secret: false } : s)))
+    // Seed one empty row so the grid isn't blank the first time.
+    if (dataRows.length === 0) setDataRows([{ [col]: '' }])
+    setDataPanelOpen(true)
+  }
+
+  // Steps whose value can become a variable: typed/selected inputs and
+  // value-bearing assertions (the "expected result" columns).
+  const canParameterize = (step: RecorderStep): boolean =>
+    step.type === 'type' ||
+    step.type === 'select' ||
+    (step.type === 'assert' && !!step.assertKind && assertNeedsValue(step.assertKind))
+
+  // A readable name for a row in the run summary: its first column's value, else
+  // a positional fallback.
+  const rowLabel = (row: Record<string, string>, i: number): string => {
+    const first = dataCols[0] ? row[dataCols[0]] : ''
+    return first ? first : `Row ${i + 1}`
+  }
+
+  // Grid editing — pure mutations of the dataRows array.
+  const setCell = (r: number, col: string, val: string): void =>
+    setDataRows((prev) => prev.map((row, idx) => (idx === r ? { ...row, [col]: val } : row)))
+  const addDataRow = (): void =>
+    setDataRows((prev) => [...prev, Object.fromEntries(dataCols.map((c) => [c, '']))])
+  const deleteDataRow = (r: number): void =>
+    setDataRows((prev) => prev.filter((_, idx) => idx !== r))
+
+  // Run the flow once PER ROW, continuing past failures (each row gets a clean
+  // browser via the existing replay isolation), then show a per-row summary —
+  // the data-driven cousin of the suite runner.
+  const handleRunData = async (): Promise<void> => {
+    if (dataRows.length === 0 || !isDataDriven) return
+    setDataPanelOpen(false)
+    setDataTab(null)
+    setDataPopupDismissed(false)
+    const envMap = await window.api.recorder.resolveEnv(envVarNames(steps, dataRows))
+    setDataRun({ total: dataRows.length, current: 0, currentLabel: '', results: [], running: true })
+    const results: DataRunEntry[] = []
+    for (let i = 0; i < dataRows.length; i++) {
+      const label = rowLabel(dataRows[i], i)
+      setDataRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: label } : prev))
+      const list = substituteSteps(steps, resolveRow(dataRows[i], envMap), envMap)
+      // fileName null: don't stamp a run per row — record ONE aggregate below.
+      const result = await runOnce(list, null, false)
+      if (result.aborted) {
+        setDataRun(null)
+        return
+      }
+      const entry: DataRunEntry = {
+        label,
+        status: result.ok ? 'passed' : 'failed',
+        failedAt: result.failedAt,
+        error: result.error,
+        screenshotPath: result.screenshotPath,
+        traceId: result.traceId,
+        consoleErrors: result.consoleErrors,
+        networkErrors: result.networkErrors
+      }
+      results.push(entry)
+      setDataRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
+    }
+    setDataRun((prev) => (prev ? { ...prev, running: false } : prev))
+    // A saved test remembers the run as ONE outcome: green only if every row
+    // passed, else red with a "N/M rows failed" summary.
+    if (testFileName) {
+      const failed = results.filter((r) => r.status === 'failed')
+      const first = failed[0]
+      window.api.library.recordRun(testFileName, {
+        status: failed.length ? 'failed' : 'passed',
+        at: new Date().toISOString(),
+        failedAt: first?.failedAt,
+        error: failed.length
+          ? `${failed.length}/${results.length} rows failed — e.g. ${first.label}: ${first.error}`
+          : undefined,
+        screenshotPath: first?.screenshotPath
+      })
+    }
   }
 
   // === Day 12: recovery — answer a paused replay ====================
@@ -979,7 +1155,8 @@ function App(): React.JSX.Element {
       suite,
       steps,
       storageState,
-      viewport
+      viewport,
+      dataRows // Day 20: data-driven table travels with the test
     })
     // Renaming or re-sectioning = a MOVE: the save created the new file, so
     // drop the old one (otherwise stale copies pile up under the old name).
@@ -1011,6 +1188,8 @@ function App(): React.JSX.Element {
     setBaseURL(test.baseURL)
     setStorageState(test.storageState)
     applyViewport(test.viewport)
+    setDataRows(test.dataRows ?? []) // Day 20: data-driven table
+    setDataPanelOpen(false)
     setHasNavigated(true)
     const firstNav = test.steps.find((s) => s.type === 'navigate' && s.url)
     if (firstNav?.url) {
@@ -1032,6 +1211,8 @@ function App(): React.JSX.Element {
     setBaseURL(d.baseURL || '')
     setStorageState(d.storageState)
     applyViewport(d.viewport)
+    setDataRows(d.dataRows ?? []) // Day 20: data-driven table
+    setDataPanelOpen(false)
     draftIdRef.current = d.id
     setDraftDismissed(true)
     setHasNavigated(true)
@@ -1159,6 +1340,8 @@ function App(): React.JSX.Element {
     setReplayingIndex(null)
     setSkippedIndices(new Set()) // skip marks describe the old order too
     setHealedIndices(new Set()) // healed indices may have shifted — drop the hint
+    setDataRun(null) // Day 20: a past data-run summary describes the old steps
+    setFailDetail(null)
   }
 
   // Day 10(c): hand-pick a selector candidate as the step's primary. The pick
@@ -1358,8 +1541,16 @@ function App(): React.JSX.Element {
   const replayBanner = ((): { tone: string; text: string } | null => {
     if (recovery) return null
     if (isReplaying) return { tone: 'running', text: 'Replaying…' }
-    if (failedIndex !== null)
+    if (failedIndex !== null) {
+      // Day 20: Continue can leave SEVERAL failed steps — name them all.
+      if (lastFailures.length > 1) {
+        return {
+          tone: 'failed',
+          text: `✗ Failed at steps ${lastFailures.map((f) => f.index + 1).join(', ')}`
+        }
+      }
       return { tone: 'failed', text: `✗ Failed at step ${failedIndex + 1}: ${replayError}` }
+    }
     if (doneIndices.size > 0 && doneIndices.size + skippedIndices.size === enabledCount) {
       return skippedIndices.size > 0
         ? {
@@ -1565,119 +1756,123 @@ function App(): React.JSX.Element {
                             const failedRuns = allRuns.filter((r) => r.status === 'failed')
                             const currentlyFailing = test.lastRun?.status === 'failed'
                             return (
-                            <li key={test.fileName} className="library-item">
-                              <div className="library-item-head">
-                              <button
-                                type="button"
-                                className="library-row"
-                                onClick={() => handleLoadTest(test.fileName)}
-                                title={`Open "${test.name}"`}
-                              >
-                                <span
-                                  className={`run-dot ${test.lastRun?.status ?? 'none'}`}
-                                  title={
-                                    test.lastRun
-                                      ? `Last replay ${test.lastRun.status} — ${new Date(test.lastRun.at).toLocaleString()}`
-                                      : 'Never replayed'
-                                  }
-                                />
-                                <span className="library-name">{test.name}</span>
-                                {/* Day 11.5: last runs, oldest → newest — flakiness at a glance */}
-                                {test.runs && test.runs.length > 1 && (
-                                  <span className="history-dots">
-                                    {test.runs
-                                      .slice()
-                                      .reverse()
-                                      .map((run, i) => (
-                                        <span
-                                          key={i}
-                                          className={`history-dot ${run.status}`}
-                                          title={`${run.status} — ${new Date(run.at).toLocaleString()}`}
-                                        />
-                                      ))}
-                                  </span>
-                                )}
-                                <span className="library-meta">
-                                  {test.stepCount} steps ·{' '}
-                                  {new Date(test.updatedAt).toLocaleDateString()}
-                                </span>
-                              </button>
-                              {/* Any failure — current OR past — is inspectable
+                              <li key={test.fileName} className="library-item">
+                                <div className="library-item-head">
+                                  <button
+                                    type="button"
+                                    className="library-row"
+                                    onClick={() => handleLoadTest(test.fileName)}
+                                    title={`Open "${test.name}"`}
+                                  >
+                                    <span
+                                      className={`run-dot ${test.lastRun?.status ?? 'none'}`}
+                                      title={
+                                        test.lastRun
+                                          ? `Last replay ${test.lastRun.status} — ${new Date(test.lastRun.at).toLocaleString()}`
+                                          : 'Never replayed'
+                                      }
+                                    />
+                                    <span className="library-name">{test.name}</span>
+                                    {/* Day 11.5: last runs, oldest → newest — flakiness at a glance */}
+                                    {test.runs && test.runs.length > 1 && (
+                                      <span className="history-dots">
+                                        {test.runs
+                                          .slice()
+                                          .reverse()
+                                          .map((run, i) => (
+                                            <span
+                                              key={i}
+                                              className={`history-dot ${run.status}`}
+                                              title={`${run.status} — ${new Date(run.at).toLocaleString()}`}
+                                            />
+                                          ))}
+                                      </span>
+                                    )}
+                                    <span className="library-meta">
+                                      {test.stepCount} steps ·{' '}
+                                      {new Date(test.updatedAt).toLocaleDateString()}
+                                    </span>
+                                  </button>
+                                  {/* Any failure — current OR past — is inspectable
                                   here. A test that passes now but failed before
                                   gets a calmer "Past fail(s)" label so it doesn't
                                   read as currently broken. */}
-                              {failedRuns.length > 0 && (
-                                <button
-                                  type="button"
-                                  className={`library-why${errorOpenFor === test.fileName ? ' open' : ''}${currentlyFailing ? '' : ' past'}`}
-                                  onClick={() =>
-                                    setErrorOpenFor(
-                                      errorOpenFor === test.fileName ? null : test.fileName
-                                    )
-                                  }
-                                  title={currentlyFailing ? 'Why did it fail?' : 'Past failures'}
-                                >
-                                  ⚠{' '}
-                                  {failedRuns.length > 1
-                                    ? `${failedRuns.length} fails`
-                                    : currentlyFailing
-                                      ? 'Why?'
-                                      : 'Past fail'}
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                className="library-delete"
-                                onClick={() => handleDeleteTest(test)}
-                                title="Delete test"
-                                aria-label={`Delete ${test.name}`}
-                              >
-                                ✕
-                              </button>
-                              </div>
-                              {errorOpenFor === test.fileName && failedRuns.length > 0 && (
-                                <div className="run-error-detail">
-                                  {/* One entry per failed run — each shows WHEN it
+                                  {failedRuns.length > 0 && (
+                                    <button
+                                      type="button"
+                                      className={`library-why${errorOpenFor === test.fileName ? ' open' : ''}${currentlyFailing ? '' : ' past'}`}
+                                      onClick={() =>
+                                        setErrorOpenFor(
+                                          errorOpenFor === test.fileName ? null : test.fileName
+                                        )
+                                      }
+                                      title={
+                                        currentlyFailing ? 'Why did it fail?' : 'Past failures'
+                                      }
+                                    >
+                                      ⚠{' '}
+                                      {failedRuns.length > 1
+                                        ? `${failedRuns.length} fails`
+                                        : currentlyFailing
+                                          ? 'Why?'
+                                          : 'Past fail'}
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    className="library-delete"
+                                    onClick={() => handleDeleteTest(test)}
+                                    title="Delete test"
+                                    aria-label={`Delete ${test.name}`}
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                                {errorOpenFor === test.fileName && failedRuns.length > 0 && (
+                                  <div className="run-error-detail">
+                                    {/* One entry per failed run — each shows WHEN it
                                       failed and WHY (the errors can differ run to
                                       run), with a jump to that run's screenshot. */}
-                                  {failedRuns.map((run, ri) => (
-                                    <div key={ri} className="run-fail-entry">
-                                      <div className="run-fail-when">
-                                        {new Date(run.at).toLocaleString()}
-                                        {run.failedAt !== undefined
-                                          ? ` · step ${run.failedAt + 1}`
-                                          : ''}
+                                    {failedRuns.map((run, ri) => (
+                                      <div key={ri} className="run-fail-entry">
+                                        <div className="run-fail-when">
+                                          {new Date(run.at).toLocaleString()}
+                                          {run.failedAt !== undefined
+                                            ? ` · step ${run.failedAt + 1}`
+                                            : ''}
+                                        </div>
+                                        <div className="run-error-msg">
+                                          {run.error || 'No error message was recorded.'}
+                                        </div>
+                                        <div className="run-fail-actions">
+                                          {run.screenshotPath && (
+                                            <button
+                                              type="button"
+                                              className="run-error-shot"
+                                              onClick={() =>
+                                                window.api.library.openScreenshot(
+                                                  run.screenshotPath!
+                                                )
+                                              }
+                                            >
+                                              📷 View failure screenshot
+                                            </button>
+                                          )}
+                                          {run.traceId && (
+                                            <button
+                                              type="button"
+                                              className="run-error-shot"
+                                              onClick={() => openTrace(run.traceId!)}
+                                            >
+                                              ⏺ Open recording
+                                            </button>
+                                          )}
+                                        </div>
                                       </div>
-                                      <div className="run-error-msg">
-                                        {run.error || 'No error message was recorded.'}
-                                      </div>
-                                      <div className="run-fail-actions">
-                                        {run.screenshotPath && (
-                                          <button
-                                            type="button"
-                                            className="run-error-shot"
-                                            onClick={() =>
-                                              window.api.library.openScreenshot(run.screenshotPath!)
-                                            }
-                                          >
-                                            📷 View failure screenshot
-                                          </button>
-                                        )}
-                                        {run.traceId && (
-                                          <button
-                                            type="button"
-                                            className="run-error-shot"
-                                            onClick={() => openTrace(run.traceId!)}
-                                          >
-                                            ⏺ Open recording
-                                          </button>
-                                        )}
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </li>
+                                    ))}
+                                  </div>
+                                )}
+                              </li>
                             )
                           })}
                         </ul>
@@ -1885,9 +2080,7 @@ function App(): React.JSX.Element {
                 <select
                   className="trace-mode"
                   value={traceMode}
-                  onChange={(e) =>
-                    setTraceMode(e.target.value as 'always' | 'failure' | 'off')
-                  }
+                  onChange={(e) => setTraceMode(e.target.value as 'always' | 'failure' | 'off')}
                   disabled={isReplaying || isRecording}
                   title="When to keep a full run recording (every step's screenshot, console & network)"
                 >
@@ -1895,6 +2088,15 @@ function App(): React.JSX.Element {
                   <option value="always">⏺ always</option>
                   <option value="off">⏺ off</option>
                 </select>
+                {/* Day 20: open the data-driven table (run the flow per row) */}
+                <button
+                  className={`data-btn${isDataDriven ? ' active' : ''}`}
+                  onClick={() => setDataPanelOpen((o) => !o)}
+                  disabled={isReplaying || isRecording}
+                  title="Data-driven runs: run this flow once per row of a data table"
+                >
+                  🧪 Data{isDataDriven && dataRows.length > 0 ? ` (${dataRows.length})` : ''}
+                </button>
                 <button
                   className="export-btn"
                   onClick={handleExport}
@@ -1930,52 +2132,245 @@ function App(): React.JSX.Element {
               {suiteRun.currentName ? `: ${suiteRun.currentName}` : ''}
             </div>
           )}
-          {replayBanner && (
-            <div className={`replay-status ${replayBanner.tone}`}>
-              {replayBanner.text}
-              {/* Day 18: open the full run recording (trace) for this run */}
-              {!isReplaying && lastTraceId && (
-                <button
-                  type="button"
-                  className="shot-link trace-link"
-                  onClick={() => openTrace(lastTraceId)}
-                  title="Open the full run recording (every step's screenshot, console & network)"
-                >
-                  ⏺ recording
-                </button>
-              )}
-              {/* Day 11.5: the page photographed at the failing step */}
-              {replayBanner.tone === 'failed' && lastScreenshotPath && (
-                <button
-                  type="button"
-                  className="shot-link"
-                  onClick={() => window.api.library.openScreenshot(lastScreenshotPath)}
-                  title="Open the failure screenshot"
-                >
-                  📷 view screenshot
-                </button>
-              )}
-              {/* Day 13: turn the failure into a plain-English diagnosis */}
-              {replayBanner.tone === 'failed' && failedIndex !== null && replayError && (
-                <button
-                  type="button"
-                  className="shot-link explain-link"
-                  onClick={() =>
-                    handleExplain(
-                      failedIndex,
-                      replayError,
-                      lastScreenshotPath,
-                      lastConsoleErrors,
-                      lastNetworkErrors
-                    )
-                  }
-                  title="Explain this failure: app bug, test bug, or just timing?"
-                >
-                  💡 explain
-                </button>
-              )}
+          {/* Day 20: data-driven run progress ("row 2 of 5: locked_out_user") */}
+          {dataRun?.running && (
+            <div className="replay-status running">
+              Running row {dataRun.current} of {dataRun.total}
+              {dataRun.currentLabel ? `: ${dataRun.currentLabel}` : ''}
             </div>
           )}
+          {/* Day 20: after a data run, the banner summarizes the whole MATRIX
+              (all rows) and reopens the per-row summary — not just the last
+              row, which the single-run banner would otherwise show. */}
+          {dataRun && !dataRun.running ? (
+            (() => {
+              const failedRows = dataRun.results.filter((r) => r.status === 'failed')
+              // Rows that actually CAPTURED something — drives whether the
+              // Screenshots & recordings tab appears at all. With "⏺ on failure"
+              // an all-pass run captures nothing, so the tab is hidden; "⏺ always"
+              // records every row, so it shows all of them.
+              const evidenceRows = dataRun.results.filter((r) => r.screenshotPath || r.traceId)
+              const tone = failedRows.length ? 'failed' : 'passed'
+              const plural = dataRun.total === 1 ? '' : 's'
+              const toggle = (tab: 'evidence' | 'explain'): void =>
+                setDataTab(dataTab === tab ? null : tab)
+              return (
+                <div className="data-result">
+                  <div className={`replay-status ${tone}`}>
+                    {failedRows.length
+                      ? `✗ ${failedRows.length} of ${dataRun.total} row${plural} failed`
+                      : `✓ All ${dataRun.total} row${plural} passed`}
+                    {/* Day 20: two tabs, expanded INLINE below (not a modal).
+                        Each appears only when it has something to show. */}
+                    {evidenceRows.length > 0 && (
+                      <button
+                        type="button"
+                        className={`data-tab${dataTab === 'evidence' ? ' active' : ''}`}
+                        onClick={() => toggle('evidence')}
+                        title="Each captured row's screenshot and run recording"
+                      >
+                        📷 Screenshots &amp; recordings
+                      </button>
+                    )}
+                    {failedRows.length > 0 && (
+                      <button
+                        type="button"
+                        className={`data-tab${dataTab === 'explain' ? ' active' : ''}`}
+                        onClick={() => toggle('explain')}
+                        title="Explain each failed row, one by one"
+                      >
+                        💡 Explain
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Tab 1 — every captured row, with its screenshot + recording. */}
+                  {dataTab === 'evidence' && evidenceRows.length > 0 && (
+                    <div className="data-tab-content">
+                      {evidenceRows.map((r, idx) => (
+                        <div key={idx} className="data-evi-row">
+                          <span className={`run-dot ${r.status}`} />
+                          <span className="data-evi-name">{r.label}</span>
+                          {r.screenshotPath && (
+                            <button
+                              type="button"
+                              className="shot-link"
+                              onClick={() => window.api.library.openScreenshot(r.screenshotPath!)}
+                              title="Open this row's screenshot"
+                            >
+                              📷
+                            </button>
+                          )}
+                          {r.traceId && (
+                            <button
+                              type="button"
+                              className="shot-link trace-link"
+                              onClick={() => openTrace(r.traceId!)}
+                              title="Open this row's run recording"
+                            >
+                              ⏺
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Tab 2 — failed rows, click one to explain it. */}
+                  {dataTab === 'explain' && (
+                    <div className="data-tab-content">
+                      {failedRows.map((r, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          className="data-explain-row"
+                          onClick={() =>
+                            handleExplain(
+                              r.failedAt ?? 0,
+                              r.error ?? 'Replay failed',
+                              r.screenshotPath,
+                              r.consoleErrors ?? [],
+                              r.networkErrors ?? []
+                            )
+                          }
+                          title={`Explain why "${r.label}" failed`}
+                        >
+                          <span className="run-dot failed" />
+                          <span className="data-evi-name">{r.label}</span>
+                          <span className="data-explain-cta">💡</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })()
+          ) : replayBanner ? (
+            <>
+              <div className={`replay-status ${replayBanner.tone}`}>
+                {replayBanner.text}
+                {/* Day 18: open the full run recording (trace) for this run */}
+                {!isReplaying && lastTraceId && (
+                  <button
+                    type="button"
+                    className="shot-link trace-link"
+                    onClick={() => openTrace(lastTraceId)}
+                    title="Open the full run recording (every step's screenshot, console & network)"
+                  >
+                    ⏺ recording
+                  </button>
+                )}
+                {replayBanner.tone === 'failed' && lastFailures.length > 1 ? (
+                  /* Day 20: several steps failed (Continue) — reveal EACH one's
+                     screenshot / explanation inline, not just the first. */
+                  <>
+                    <button
+                      type="button"
+                      className={`data-tab${failDetail === 'shots' ? ' active' : ''}`}
+                      onClick={() => setFailDetail(failDetail === 'shots' ? null : 'shots')}
+                      title="Each failed step's screenshot"
+                    >
+                      📷 Screenshots
+                    </button>
+                    <button
+                      type="button"
+                      className={`data-tab${failDetail === 'explain' ? ' active' : ''}`}
+                      onClick={() => setFailDetail(failDetail === 'explain' ? null : 'explain')}
+                      title="Explain each failed step, one by one"
+                    >
+                      💡 Explain
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {/* Day 11.5: the page photographed at the (single) failing step */}
+                    {replayBanner.tone === 'failed' && lastScreenshotPath && (
+                      <button
+                        type="button"
+                        className="shot-link"
+                        onClick={() => window.api.library.openScreenshot(lastScreenshotPath)}
+                        title="Open the failure screenshot"
+                      >
+                        📷 view screenshot
+                      </button>
+                    )}
+                    {/* Day 13: turn the failure into a plain-English diagnosis */}
+                    {replayBanner.tone === 'failed' && failedIndex !== null && replayError && (
+                      <button
+                        type="button"
+                        className="shot-link explain-link"
+                        onClick={() =>
+                          handleExplain(
+                            failedIndex,
+                            replayError,
+                            lastScreenshotPath,
+                            lastConsoleErrors,
+                            lastNetworkErrors
+                          )
+                        }
+                        title="Explain this failure: app bug, test bug, or just timing?"
+                      >
+                        💡 explain
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Day 20: inline lists when MORE THAN ONE step failed. */}
+              {replayBanner.tone === 'failed' &&
+                lastFailures.length > 1 &&
+                failDetail === 'shots' && (
+                  <div className="data-tab-content fail-detail">
+                    {lastFailures.map((f, idx) => (
+                      <div key={idx} className="data-evi-row">
+                        <span className="run-dot failed" />
+                        <span className="data-evi-name">Step {f.index + 1}</span>
+                        {f.screenshotPath ? (
+                          <button
+                            type="button"
+                            className="shot-link"
+                            onClick={() => window.api.library.openScreenshot(f.screenshotPath!)}
+                            title={`Open step ${f.index + 1}'s screenshot`}
+                          >
+                            📷
+                          </button>
+                        ) : (
+                          <span className="data-evi-none">no shot</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              {replayBanner.tone === 'failed' &&
+                lastFailures.length > 1 &&
+                failDetail === 'explain' && (
+                  <div className="data-tab-content fail-detail">
+                    {lastFailures.map((f, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        className="data-explain-row"
+                        onClick={() =>
+                          handleExplain(
+                            f.index,
+                            f.error,
+                            f.screenshotPath,
+                            lastConsoleErrors,
+                            lastNetworkErrors
+                          )
+                        }
+                        title={`Explain step ${f.index + 1}`}
+                      >
+                        <span className="run-dot failed" />
+                        <span className="data-evi-name">Step {f.index + 1}</span>
+                        <span className="data-explain-cta">💡</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+            </>
+          ) : null}
 
           {/* === Day 12: recovery panel — the replay is paused on a failed
               step, browser frozen at the scene. Not a modal: the page must
@@ -2024,8 +2419,8 @@ function App(): React.JSX.Element {
                   {recovery.suggestion && (
                     <div className="self-heal">
                       <span className="self-heal-text">
-                        🔧 Self-heal found{' '}
-                        <strong>“{recovery.suggestion.label}”</strong> — use it to fix this step?
+                        🔧 Self-heal found <strong>“{recovery.suggestion.label}”</strong> — use it
+                        to fix this step?
                       </span>
                       <button
                         type="button"
@@ -2047,92 +2442,92 @@ function App(): React.JSX.Element {
                         📷
                       </button>
                     )}
-                  {/* Day 18: open the full run recording captured up to here */}
-                  {recovery.traceId && (
+                    {/* Day 18: open the full run recording captured up to here */}
+                    {recovery.traceId && (
+                      <button
+                        type="button"
+                        className="shot-link trace-link"
+                        onClick={() => openTrace(recovery.traceId!)}
+                        title="Open the full run recording (every step's screenshot, console & network)"
+                      >
+                        ⏺
+                      </button>
+                    )}
+                    {/* Day 13: ask for a diagnosis while deciding what to do */}
                     <button
                       type="button"
-                      className="shot-link trace-link"
-                      onClick={() => openTrace(recovery.traceId!)}
-                      title="Open the full run recording (every step's screenshot, console & network)"
+                      className="shot-link explain-link"
+                      onClick={() =>
+                        handleExplain(
+                          recovery.index,
+                          recovery.error,
+                          recovery.screenshotPath,
+                          recovery.consoleErrors ?? [],
+                          recovery.networkErrors ?? []
+                        )
+                      }
+                      title="Explain this failure: app bug, test bug, or just timing?"
                     >
-                      ⏺
+                      💡
                     </button>
-                  )}
-                  {/* Day 13: ask for a diagnosis while deciding what to do */}
-                  <button
-                    type="button"
-                    className="shot-link explain-link"
-                    onClick={() =>
-                      handleExplain(
-                        recovery.index,
-                        recovery.error,
-                        recovery.screenshotPath,
-                        recovery.consoleErrors ?? [],
-                        recovery.networkErrors ?? []
-                      )
-                    }
-                    title="Explain this failure: app bug, test bug, or just timing?"
-                  >
-                    💡
-                  </button>
-                  <button
-                    className="modal-btn"
-                    onClick={() => answerRecovery('retry')}
-                    title="Run the same step again (maybe the page was just slow)"
-                  >
-                    🔁 Retry
-                  </button>
-                  {/* Day 19: a visual snapshot differs — if the new look is
-                      intended, adopt it as the new baseline, then retry (passes). */}
-                  {recovery.visual?.baselineId && (
                     <button
                       className="modal-btn"
-                      onClick={async () => {
-                        const v = recovery.visual!
-                        const ok = await window.api.visual.updateBaseline(
-                          v.baselineId!,
-                          v.currentPath
-                        )
-                        if (ok) answerRecovery('retry')
-                      }}
-                      title="Adopt the current look as the new baseline (the visual change is intended), then retry"
+                      onClick={() => answerRecovery('retry')}
+                      title="Run the same step again (maybe the page was just slow)"
                     >
-                      📸 Update baseline
+                      🔁 Retry
                     </button>
-                  )}
-                  {/* Day 18: manual pick heals a SELECTOR — only offer it when
+                    {/* Day 19: a visual snapshot differs — if the new look is
+                      intended, adopt it as the new baseline, then retry (passes). */}
+                    {recovery.visual?.baselineId && (
+                      <button
+                        className="modal-btn"
+                        onClick={async () => {
+                          const v = recovery.visual!
+                          const ok = await window.api.visual.updateBaseline(
+                            v.baselineId!,
+                            v.currentPath
+                          )
+                          if (ok) answerRecovery('retry')
+                        }}
+                        title="Adopt the current look as the new baseline (the visual change is intended), then retry"
+                      >
+                        📸 Update baseline
+                      </button>
+                    )}
+                    {/* Day 18: manual pick heals a SELECTOR — only offer it when
                       the selector actually broke (not for assertion/timing
                       failures, where re-picking wouldn't help). */}
-                  {recovery.selectorBroke && steps[recovery.index]?.selector && (
+                    {recovery.selectorBroke && steps[recovery.index]?.selector && (
+                      <button
+                        className="modal-btn"
+                        onClick={handleRecoveryRepick}
+                        title="Point at the right element yourself — heals the selector, then retries"
+                      >
+                        🎯 Pick manually
+                      </button>
+                    )}
                     <button
                       className="modal-btn"
-                      onClick={handleRecoveryRepick}
-                      title="Point at the right element yourself — heals the selector, then retries"
+                      onClick={() => answerRecovery('continue')}
+                      title="Ignore this failure and continue, to check the later steps. The run is still marked failed; the test isn't changed."
                     >
-                      🎯 Pick manually
+                      ⤵ Continue
                     </button>
-                  )}
-                  <button
-                    className="modal-btn"
-                    onClick={() => answerRecovery('continue')}
-                    title="Ignore this failure and continue, to check the later steps. The run is still marked failed; the test isn't changed."
-                  >
-                    ⤵ Continue
-                  </button>
-                  <button
-                    className="modal-btn"
-                    onClick={handleRecoverySkipStep}
-                    title="Permanently skip this step — disable it now and in future runs. 💾 Save to keep it."
-                  >
-                    ⊘ Skip step
-                  </button>
-                  <button
-                    className="modal-btn danger"
-                    onClick={() => answerRecovery('stop')}
-                    title="End the run as failed"
-                  >
-                    ⏹ Stop
-                  </button>
+                    <button
+                      className="modal-btn"
+                      onClick={handleRecoverySkipStep}
+                      title="Permanently skip this step — disable it now and in future runs. 💾 Save to keep it."
+                    >
+                      ⊘ Skip step
+                    </button>
+                    <button
+                      className="modal-btn danger"
+                      onClick={() => answerRecovery('stop')}
+                      title="End the run as failed"
+                    >
+                      ⏹ Stop
+                    </button>
                   </div>
                 </>
               )}
@@ -2270,6 +2665,91 @@ function App(): React.JSX.Element {
               </div>
             </div>
           )}
+          {/* === Day 20: data-driven table — run the flow once per row === */}
+          {dataPanelOpen && (
+            <div className="assert-panel data-panel">
+              <div className="assert-target">
+                <span className="assert-title">🧪 Data-driven runs</span>
+                <button
+                  className="modal-close"
+                  onClick={() => setDataPanelOpen(false)}
+                  aria-label="Close"
+                >
+                  ✕
+                </button>
+              </div>
+              {!isDataDriven ? (
+                <p className="data-hint">
+                  No variables yet. On a <strong>Type</strong>, <strong>Select</strong>, or value{' '}
+                  <strong>Check</strong> step, click <code>{'{}'}</code> to turn its value into a
+                  variable like <code>{'{{username}}'}</code> — or ✎ edit a value and type the token
+                  yourself. Each variable becomes a column here, and the flow runs once per row.
+                </p>
+              ) : (
+                <>
+                  <div className="data-grid-wrap">
+                    <table className="data-grid">
+                      <thead>
+                        <tr>
+                          {dataCols.map((c) => (
+                            <th key={c} title={`Variable {{${c}}}`}>
+                              {c}
+                            </th>
+                          ))}
+                          <th className="data-grid-rowact" aria-label="row actions" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {dataRows.map((row, r) => (
+                          <tr key={r}>
+                            {dataCols.map((c) => (
+                              <td key={c}>
+                                <input
+                                  className="data-cell"
+                                  value={row[c] ?? ''}
+                                  onChange={(e) => setCell(r, c, e.target.value)}
+                                  placeholder={c}
+                                  spellCheck={false}
+                                />
+                              </td>
+                            ))}
+                            <td className="data-grid-rowact">
+                              <button
+                                className="data-row-del"
+                                onClick={() => deleteDataRow(r)}
+                                title="Delete this row"
+                                aria-label="Delete row"
+                              >
+                                ✕
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="data-note">
+                    Tip: a cell can be <code>{'{{env:NAME}}'}</code> to pull a real secret from your
+                    environment instead of typing it here.
+                  </div>
+                  <div className="assert-actions">
+                    <button className="modal-btn" onClick={addDataRow}>
+                      ＋ Add row
+                    </button>
+                    <button
+                      className="modal-btn primary"
+                      onClick={handleRunData}
+                      disabled={isReplaying || isRecording || dataRows.length === 0}
+                      title="Run the whole flow once for every row"
+                    >
+                      ▶ Run {dataRows.length} row{dataRows.length === 1 ? '' : 's'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {isPicking && repickIndex === null && (
             <div className="replay-status running">
               Click an element in the page to check it (Esc cancels)
@@ -2548,6 +3028,18 @@ function App(): React.JSX.Element {
                             ✎
                           </button>
                         )}
+                        {/* Day 20: turn this value into a {{variable}} for the
+                            data table (the only way to parameterize a password). */}
+                        {canParameterize(step) && (
+                          <button
+                            className="step-action"
+                            onClick={() => handleParameterize(i)}
+                            title="Make this value a variable ({{…}}) for data-driven runs"
+                            aria-label="Make variable"
+                          >
+                            {'{}'}
+                          </button>
+                        )}
                         <button
                           className="step-action"
                           onClick={() => handleToggleDisabled(i)}
@@ -2621,6 +3113,51 @@ function App(): React.JSX.Element {
             </ul>
             <div className="modal-footer">
               <button className="modal-btn primary" onClick={() => setSuiteRun(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === Day 20: data-run overview popup — auto-appears when the matrix
+           finishes (which rows passed / failed). Drilling into a row's
+           screenshot/recording/explanation is done from the inline panel tabs. */}
+      {dataPopupOpen && dataRun && (
+        <div className="modal-backdrop" onClick={() => setDataPopupDismissed(true)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">
+                Data run: {dataRun.results.filter((r) => r.status === 'passed').length} passed,{' '}
+                {dataRun.results.filter((r) => r.status === 'failed').length} failed
+              </span>
+              <button
+                className="modal-close"
+                onClick={() => setDataPopupDismissed(true)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <ul className="suite-summary">
+              {dataRun.results.map((r, ri) => (
+                <li key={ri} className="suite-result">
+                  <span className={`run-dot ${r.status}`} />
+                  <span className="suite-result-name">{r.label}</span>
+                  {r.status === 'failed' && (
+                    <span className="suite-result-error">
+                      {r.failedAt !== undefined ? `step ${r.failedAt + 1} — ` : ''}
+                      {r.error}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="modal-footer">
+              <span className="data-popup-hint">
+                Screenshots, recordings &amp; explanations are in the panel tabs.
+              </span>
+              <button className="modal-btn primary" onClick={() => setDataPopupDismissed(true)}>
                 Close
               </button>
             </div>

@@ -2385,3 +2385,223 @@ body {
     transform: translateY(0);
   }
 }
+
+/* === Day 20: data-driven runs =================================== */
+/* The 🧪 Data toggle in the steps header — matches export/replay sizing. */
+.data-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  color: #e0e0e0;
+}
+.data-btn:hover:not(:disabled) {
+  background: #4a4a4a;
+}
+.data-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* Active = this test actually has variables (a tinted accent). */
+.data-btn.active {
+  background: #2a3550;
+  border-color: #4a5f8f;
+  color: #cdd9ff;
+}
+
+/* The data table panel reuses the assert-panel shell. */
+.data-panel .modal-close {
+  margin-left: auto;
+}
+.data-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #aab4c0;
+}
+.data-hint code,
+.data-note code {
+  padding: 1px 5px;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 4px;
+  color: #cdd9ff;
+  font-size: 12px;
+}
+
+.data-grid-wrap {
+  overflow-x: auto;
+  border: 1px solid #2c4a66;
+  border-radius: 6px;
+}
+.data-grid {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+.data-grid th {
+  padding: 6px 8px;
+  text-align: left;
+  background: #1b2430;
+  border-bottom: 1px solid #2c4a66;
+  color: #8ab4dd;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.data-grid td {
+  padding: 2px;
+  border-bottom: 1px solid #232c38;
+}
+.data-grid .data-grid-rowact {
+  width: 28px;
+  text-align: center;
+}
+.data-cell {
+  width: 100%;
+  min-width: 90px;
+  height: 26px;
+  padding: 0 6px;
+  background: #1e1e1e;
+  border: 1px solid #2b2b2b;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+.data-cell:focus {
+  border-color: #4a5f8f;
+}
+.data-row-del {
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: none;
+  color: #8a8a8a;
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 4px;
+}
+.data-row-del:hover {
+  background: #5a2a2a;
+  color: #ffd5d5;
+}
+.data-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #8a96a4;
+}
+
+/* Day 20: the data-run result + its two INLINE tabs, in the steps panel. */
+.data-result {
+  margin: 0 10px 8px;
+}
+.data-result .replay-status {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* The two tab buttons on the result banner. */
+.data-tab {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #cfd6e0;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+.data-tab:hover {
+  background: #353535;
+}
+.data-tab.active {
+  background: #2a3550;
+  border-color: #4a5f8f;
+  color: #cdd9ff;
+}
+/* The expanded tab content, just under the banner. */
+.data-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 8px;
+  background: #161d26;
+  border: 1px solid #2c4a66;
+  border-radius: 8px;
+}
+.data-tab-empty {
+  font-size: 12px;
+  color: #8a96a4;
+}
+/* One failed row in the evidence tab (label + 📷 + ⏺). */
+.data-evi-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #e0e0e0;
+}
+.data-evi-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+/* One failed row in the Explain tab — a full-width clickable button. */
+.data-explain-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  background: #1e1e1e;
+  border: 1px solid #3a2630;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.data-explain-row:hover {
+  background: #2a1f26;
+  border-color: #6a3550;
+}
+.data-explain-cta {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #2a3550;
+  border: 1px solid #4a5f8f;
+  color: #cdd9ff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Day 20: data-run overview popup footer hint (points to the panel tabs). */
+.data-popup-hint {
+  margin-right: auto;
+  font-size: 11px;
+  color: #8a96a4;
+}
+
+/* Day 20: inline failed-step lists under the single-replay banner (when
+   Continue left more than one failure). */
+.fail-detail {
+  margin: 6px 10px 0;
+}
+.data-evi-none {
+  font-size: 11px;
+  color: #8a96a4;
+}

@@ -45,6 +45,9 @@ export interface SavedTestFile {
   // Day 17: render the test at a fixed viewport (device emulation). Undefined =
   // fill the window (desktop, the default).
   viewport?: { width: number; height: number }
+  // Day 20 (data-driven): the table of rows this test runs against. Each row is
+  // a { column: value } map; columns are derived from the {{tokens}} in steps.
+  dataRows?: Record<string, string>[]
   steps: unknown[]
 }
 
@@ -139,6 +142,7 @@ export async function saveTest(input: {
   steps: unknown[]
   storageState?: string
   viewport?: { width: number; height: number }
+  dataRows?: Record<string, string>[]
 }): Promise<SavedTestSummary> {
   await ensureDir()
   const suite = safeSegment(input.suite)
@@ -156,6 +160,7 @@ export async function saveTest(input: {
     runs: previous?.runs,
     storageState: input.storageState,
     viewport: input.viewport,
+    dataRows: input.dataRows,
     steps: input.steps
   }
   await writeFile(join(libraryDir(), fileName), JSON.stringify(test, null, 2), 'utf-8')
@@ -237,6 +242,7 @@ export interface DraftFile {
   suite: string
   storageState?: string
   viewport?: { width: number; height: number }
+  dataRows?: Record<string, string>[] // Day 20: data-driven table rows
   updatedAt: string
   steps: unknown[]
 }
@@ -260,6 +266,7 @@ export async function saveDraft(input: {
   suite: string
   storageState?: string
   viewport?: { width: number; height: number }
+  dataRows?: Record<string, string>[]
   steps: unknown[]
 }): Promise<void> {
   if (!SAFE_DRAFT_ID.test(input.id)) return
@@ -271,6 +278,7 @@ export async function saveDraft(input: {
     suite: input.suite,
     storageState: input.storageState,
     viewport: input.viewport,
+    dataRows: input.dataRows,
     updatedAt: new Date().toISOString(),
     steps: input.steps
   }

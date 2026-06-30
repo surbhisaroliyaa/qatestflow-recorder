@@ -1221,6 +1221,9 @@ function createWindow(): void {
       aborted?: boolean
       consoleErrors?: string[]
       networkErrors?: string[]
+      // Day 20: EVERY failed step in this run (not just the first) — so the
+      // banner can surface each one's screenshot when Continue bypassed several.
+      failures?: { index: number; error: string; screenshotPath?: string }[]
     }> => {
       // A dangling pause from a previous replay can never be answered — clear it.
       resolveRecovery({ action: 'abort' })
@@ -1655,6 +1658,7 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
         traceId?: string
+        failures?: { index: number; error: string; screenshotPath?: string }[]
       }): Promise<{
         ok: boolean
         failedAt?: number
@@ -1664,6 +1668,7 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
         traceId?: string
+        failures?: { index: number; error: string; screenshotPath?: string }[]
       }> => {
         // Detach EVERY tab we touched (console + CDP), and clear the replay flag
         // in each so normal browsing gets its real native dialogs back.
@@ -1725,6 +1730,10 @@ function createWindow(): void {
       let bypassedFailAt: number | null = null
       let bypassedError = ''
       let bypassedShot: string | undefined
+      // Day 20: EVERY failed step this run (Continue-bypassed ones + a final
+      // Stop), so the banner can show each failure's screenshot — not just the
+      // first. The trace already keeps all; this surfaces them in the result.
+      const failures: { index: number; error: string; screenshotPath?: string }[] = []
 
       for (let i = 0; i < list.length; i++) {
         const step = list[i]
@@ -1740,9 +1749,13 @@ function createWindow(): void {
         // Day 19: set when a `snapshot` step fails its visual diff — the catch
         // then uses the diff image as the evidence (not a fresh page capture)
         // and offers an "Update baseline" recovery.
-        let pendingVisual:
-          | { baselineId?: string; currentPath: string; diffPath?: string; ratioPct: number; thresholdPct: number }
-          | null = null
+        let pendingVisual: {
+          baselineId?: string
+          currentPath: string
+          diffPath?: string
+          ratioPct: number
+          thresholdPct: number
+        } | null = null
         mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
         // Day 17 (Phase 4): if THIS step opens a new tab, arm a one-shot to
         // capture it so we can bind it to `opensWindow` after the action runs.
@@ -2151,6 +2164,7 @@ function createWindow(): void {
                 bypassedError = message
                 bypassedShot = screenshotPath
               }
+              failures.push({ index: i, error: message, screenshotPath })
               continue
             }
             if (decision.action === 'skip') {
@@ -2174,11 +2188,15 @@ function createWindow(): void {
             }
             // 'stop' falls through to the normal failure return below.
           }
+          // This step is a real failure (Stop, or a non-interactive run that
+          // ends at the first failure) — record it before returning.
+          failures.push({ index: i, error: message, screenshotPath })
           return await finish({
             ok: false,
             failedAt: i,
             error: message,
             screenshotPath,
+            failures,
             consoleErrors: consoleErrors.slice(),
             networkErrors: networkErrors.slice()
           })
@@ -2192,6 +2210,7 @@ function createWindow(): void {
           failedAt: bypassedFailAt,
           error: bypassedError,
           screenshotPath: bypassedShot,
+          failures,
           consoleErrors: consoleErrors.slice(),
           networkErrors: networkErrors.slice()
         })
@@ -2214,9 +2233,22 @@ function createWindow(): void {
         steps: unknown[]
         storageState?: string
         viewport?: { width: number; height: number }
+        dataRows?: Record<string, string>[]
       }
     ) => saveTest(input)
   )
+
+  // === Data-driven (Day 20) ==========================================
+  // Resolve {{env:NAME}} tokens against this process's environment, so a real
+  // secret stays out of the saved test + the export. Missing var → '' (the
+  // step then runs with an empty value, which fails honestly).
+  ipcMain.handle('env:get', (_event, names: string[]): Record<string, string> => {
+    const out: Record<string, string> = {}
+    for (const name of Array.isArray(names) ? names : []) {
+      out[name] = process.env[name] ?? ''
+    }
+    return out
+  })
   ipcMain.handle('library:list', () => listTests())
   ipcMain.handle('library:listSuites', () => listSuites())
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))

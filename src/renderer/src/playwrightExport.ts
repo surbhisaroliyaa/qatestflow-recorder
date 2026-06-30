@@ -6,9 +6,72 @@
 // we mostly wrap it with the right action (click / fill / selectOption).
 // =====================================================================
 
+import { TOKEN_RE, extractTokens } from './dataDriven'
+
 // Safely wrap a value in quotes (handles quotes/newlines inside it).
 function quote(value: string): string {
   return JSON.stringify(value)
+}
+
+// A valid JS identifier? Decides `data.col` vs `data["col"]` (and the same for
+// process.env access).
+function isIdent(name: string): boolean {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
+}
+
+// === Data-driven values (Day 20) ===
+// A recognized {{token}} becomes a JS reference; everything else is a literal.
+//   {{env:NAME}}  → process.env.NAME ?? ''   (a real secret, never inlined)
+//   {{column}}    → data.column              (when `column` is a data column)
+//   {{unknown}}   → null                     (left as literal text)
+function tokenRef(name: string, columns: string[]): string | null {
+  if (name.startsWith('env:')) {
+    const v = name.slice('env:'.length).trim()
+    return isIdent(v) ? `process.env.${v} ?? ''` : `process.env[${quote(v)}] ?? ''`
+  }
+  if (columns.includes(name)) return isIdent(name) ? `data.${name}` : `data[${quote(name)}]`
+  return null
+}
+
+// Turn a possibly-tokenized user value into a JS EXPRESSION for the export:
+//   "secret_sauce"        → "secret_sauce"            (a quoted string)
+//   "{{password}}"        → data.password             (a bare reference)
+//   "Hi {{name}}!"        → `Hi ${data.name}!`        (a template literal)
+// With no recognized tokens it's identical to quote(), so a normal (non-data)
+// export is byte-for-byte unchanged.
+function valueExpr(raw: string, columns: string[]): string {
+  const recognized = extractTokens(raw).some((t) => tokenRef(t, columns) !== null)
+  if (!recognized) return quote(raw)
+  // Whole string is exactly one recognized token → a bare reference.
+  const whole = raw.match(/^\s*\{\{\s*([A-Za-z0-9_:.\- ]+?)\s*\}\}\s*$/)
+  if (whole) {
+    const ref = tokenRef(whole[1].trim(), columns)
+    if (ref) return ref
+  }
+  // Mixed text + tokens → a template literal. Escape the literal parts first
+  // (backtick / backslash / $), then swap each recognized token for ${ref}.
+  const tpl = raw.replace(/[`\\$]/g, '\\$&').replace(TOKEN_RE, (m, name) => {
+    const ref = tokenRef(String(name).trim(), columns)
+    return ref ? '${' + ref + '}' : m
+  })
+  return '`' + tpl + '`'
+}
+
+// Whether a value carries at least one recognized token (so a regex/number
+// spot must build an expression instead of a compile-time literal).
+function hasRefs(raw: string, columns: string[]): boolean {
+  return extractTokens(raw).some((t) => tokenRef(t, columns) !== null)
+}
+
+// A data row as an object literal for the exported `dataset` array. Cells can
+// only carry env tokens (not data refs — that would be circular), so columns
+// is empty here: a {{env:…}} cell becomes process.env, anything else a string.
+function rowLiteral(row: Record<string, string>, columns: string[]): string {
+  const props = columns.map((c) => {
+    const key = isIdent(c) ? c : quote(c)
+    return `${key}: ${valueExpr(row[c] ?? '', [])}`
+  })
+  return `{ ${props.join(', ')} }`
 }
 
 // Day 17 (page-object export): turn a step's human label into a camelCase JS
@@ -168,14 +231,18 @@ function actionFor(
   pageVar: string,
   // Day 17 (page-object export): when set, the step's element is referenced via
   // this pre-declared const (e.g. `loginButton`) instead of an inline locator.
-  elementLocator?: string
+  elementLocator?: string,
+  // Day 20 (data-driven): the data columns in play. A value containing a
+  // {{column}} or {{env:…}} token is emitted as an expression (data.x /
+  // process.env.X) instead of a quoted literal. Empty = no data → quote().
+  columns: string[] = []
 ): string | null {
   if (step.type === 'navigate') {
     let url = step.url ?? ''
     if (baseURL && url.startsWith(baseURL)) {
       url = url.slice(baseURL.length) || '/'
     }
-    return `await ${pageVar}.goto(${quote(url)})`
+    return `await ${pageVar}.goto(${valueExpr(url, columns)})`
   }
 
   if (step.type === 'back') {
@@ -200,10 +267,14 @@ function actionFor(
   // Page-level checks assert on the page itself — no element, so they must run
   // BEFORE the no-selector bail-out below.
   if (step.type === 'assert' && step.assertKind === 'url-contains') {
-    return `await expect(${pageVar}).toHaveURL(${regexContains(step.value ?? '')})`
+    const v = step.value ?? ''
+    // A tokenized expected URL can't be regex-escaped at codegen time — wrap
+    // the runtime value in a RegExp instead.
+    const arg = hasRefs(v, columns) ? `new RegExp(${valueExpr(v, columns)})` : regexContains(v)
+    return `await expect(${pageVar}).toHaveURL(${arg})`
   }
   if (step.type === 'assert' && step.assertKind === 'title') {
-    return `await expect(${pageVar}).toHaveTitle(${quote(step.value ?? '')})`
+    return `await expect(${pageVar}).toHaveTitle(${valueExpr(step.value ?? '', columns)})`
   }
 
   if (!step.selector) return null
@@ -214,11 +285,11 @@ function actionFor(
   if (step.type === 'assert') {
     switch (step.assertKind) {
       case 'text-equals':
-        return `await expect(${locator}).toHaveText(${quote(step.value ?? '')})`
+        return `await expect(${locator}).toHaveText(${valueExpr(step.value ?? '', columns)})`
       case 'text-contains':
-        return `await expect(${locator}).toContainText(${quote(step.value ?? '')})`
+        return `await expect(${locator}).toContainText(${valueExpr(step.value ?? '', columns)})`
       case 'value':
-        return `await expect(${locator}).toHaveValue(${quote(step.value ?? '')})`
+        return `await expect(${locator}).toHaveValue(${valueExpr(step.value ?? '', columns)})`
       case 'enabled':
         return `await expect(${locator}).toBeEnabled()`
       case 'disabled':
@@ -239,16 +310,20 @@ function actionFor(
       case 'empty':
         return `await expect(${locator}).toBeEmpty()`
       case 'attribute':
-        return `await expect(${locator}).toHaveAttribute(${quote(step.attrName ?? '')}, ${quote(step.value ?? '')})`
+        return `await expect(${locator}).toHaveAttribute(${quote(step.attrName ?? '')}, ${valueExpr(step.value ?? '', columns)})`
       case 'class':
         // toContainClass matches ONE class token (Playwright ≥1.52) — unlike
         // toHaveClass, which demands the element's ENTIRE class string.
-        return `await expect(${locator}).toContainClass(${quote(step.value ?? '')})`
+        return `await expect(${locator}).toContainClass(${valueExpr(step.value ?? '', columns)})`
       case 'count': {
         // The recorded selector pinpoints ONE element (maybe via .nth) — a
         // count check is about the GROUP, so assert on the selector minus nth.
         const group = (step.selector ?? '').replace(/\.nth\(\d+\)$/, '')
-        const n = Math.max(0, parseInt(step.value ?? '0', 10) || 0)
+        const v = step.value ?? '0'
+        // A tokenized count comes through as a string → coerce with Number().
+        const n = hasRefs(v, columns)
+          ? `Number(${valueExpr(v, columns)})`
+          : Math.max(0, parseInt(v, 10) || 0)
         return `await expect(${base}.${group}).toHaveCount(${n})`
       }
       default:
@@ -264,10 +339,10 @@ function actionFor(
         // Don't leak secrets — read the password from an environment variable.
         return `await ${locator}.fill(process.env.PASSWORD ?? '') // password field — set the PASSWORD env var`
       }
-      return `await ${locator}.fill(${quote(step.value ?? '')})`
+      return `await ${locator}.fill(${valueExpr(step.value ?? '', columns)})`
     case 'select':
       // We stored the option's VISIBLE text, so select by label.
-      return `await ${locator}.selectOption({ label: ${quote(step.value ?? '')} })`
+      return `await ${locator}.selectOption({ label: ${valueExpr(step.value ?? '', columns)} })`
     case 'press':
       // Playwright's .press() is a real key press — it triggers form submit.
       return `await ${locator}.press(${quote(step.key ?? 'Enter')})`
@@ -300,10 +375,17 @@ export function generatePlaywrightTest(
     baseURL?: string
     storageState?: string
     viewport?: { width: number; height: number }
+    // Day 20 (data-driven): a table of rows. When present (and non-empty), the
+    // test body is wrapped in `for (const data of dataset)` and tokenized
+    // values become data.* / process.env.* references.
+    data?: { columns: string[]; rows: Record<string, string>[] }
   }
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const enabled = steps.filter((step) => !step.disabled)
+  // Day 20: data mode is on only when there are both columns and rows.
+  const dataMode = !!(options?.data && options.data.rows.length && options.data.columns.length)
+  const columns = dataMode ? options!.data!.columns : []
 
   // Day 17 (multiple windows): is this a multi-tab test? Only then do we switch
   // from the single `page` fixture to per-tab `page0`/`page1`/… variables (and
@@ -344,7 +426,7 @@ export function generatePlaywrightTest(
     if (next && next.type === 'download') {
       lines.push(`  const download${i + 1}Promise = ${pageVar}.waitForEvent('download')`)
     }
-    const action = actionFor(step, baseURL, pageVar)
+    const action = actionFor(step, baseURL, pageVar, undefined, columns)
     if (!action) continue
     // Day 17: a step that OPENS a tab must set up the page wait BEFORE the click,
     // so wrap it in Promise.all([context.waitForEvent('page'), <action>]) and
@@ -390,6 +472,35 @@ export function generatePlaywrightTest(
   }
   const use = useProps.length ? `\ntest.use({ ${useProps.join(', ')} })\n` : ''
 
+  // Day 20 (data-driven): emit a `dataset` array and run the same body once per
+  // row inside a for-loop, giving each row its own test (named by the first
+  // column so a failing row is identifiable). The body references `data.*`.
+  if (dataMode) {
+    const rows = options!.data!.rows
+    const dataset = rows.map((r) => `  ${rowLiteral(r, columns)}`).join(',\n')
+    const disc = columns[0]
+    const discRef = isIdent(disc) ? `data.${disc}` : `data[${quote(disc)}]`
+    const base = (options?.name || 'recorded flow').replace(/[`\\$]/g, '\\$&')
+    const title = '`' + base + ' — ${' + discRef + '}`'
+    // Re-indent the body one level deeper (inside the for-loop). Indentation is
+    // cosmetic to Playwright; this just keeps the file readable.
+    const inner = body
+      .split('\n')
+      .map((l) => (l ? `  ${l}` : l))
+      .join('\n')
+    return `${header}${use}
+const dataset = [
+${dataset}
+]
+
+for (const data of dataset) {
+  test(${title}, async ({ page }) => {
+${inner}
+  })
+}
+`
+  }
+
   return `${header}${use}
 test(${quote(options?.name || 'recorded flow')}, async ({ page }) => {
 ${body}
@@ -416,13 +527,17 @@ export function generatePageObjectTest(
     baseURL?: string
     storageState?: string
     viewport?: { width: number; height: number }
+    // Day 20: present (with rows) for a data-driven test — POM falls back to
+    // the inline export, which knows how to wrap the body in the data loop.
+    data?: { columns: string[]; rows: Record<string, string>[] }
   }
 ): { spec: string; page: string; pageFileName: string; className: string } | null {
   const enabled = steps.filter((s) => !s.disabled)
   const multiWindow = enabled.some((s) => (s.windowId ?? 0) > 0 || s.opensWindow !== undefined)
   const hasFrames = enabled.some((s) => s.frame?.length)
   const hasAwkward = enabled.some((s) => s.type === 'dialog' || s.type === 'download')
-  if (multiWindow || hasFrames || hasAwkward) return null
+  const hasData = !!(options?.data && options.data.rows.length)
+  if (multiWindow || hasFrames || hasAwkward || hasData) return null
 
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const className = `${pascalName(options?.name || 'recorded flow')}Page`

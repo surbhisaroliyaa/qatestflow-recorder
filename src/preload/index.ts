@@ -169,7 +169,12 @@ const api = {
     },
 
     // Day 19: capture the current page as a visual baseline + add a snapshot step.
-    snapshot: (): Promise<void> => ipcRenderer.invoke('recorder:snapshot')
+    snapshot: (): Promise<void> => ipcRenderer.invoke('recorder:snapshot'),
+
+    // Day 20 (data-driven): resolve {{env:NAME}} tokens from the real process
+    // environment for a run (renderer can't read arbitrary env vars itself).
+    resolveEnv: (names: string[]): Promise<Record<string, string>> =>
+      ipcRenderer.invoke('env:get', names)
   },
 
   // === Visual regression (Day 19) ===
@@ -202,6 +207,7 @@ const api = {
       steps: unknown[]
       storageState?: string
       viewport?: { width: number; height: number }
+      dataRows?: Record<string, string>[]
     }): Promise<unknown> => ipcRenderer.invoke('library:save', input),
     list: (): Promise<unknown[]> => ipcRenderer.invoke('library:list'),
     listSuites: (): Promise<string[]> => ipcRenderer.invoke('library:listSuites'),

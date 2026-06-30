@@ -37,6 +37,9 @@ interface ReplayResult {
   consoleErrors?: string[] // page JS errors during the run (Day 13)
   networkErrors?: string[] // failed / 4xx / 5xx requests during the run (Day 13)
   traceId?: string // Day 18: a recorded run trace was kept (open it in the viewer)
+  // Day 20: every failed step in this run (not just the first) — surfaced when
+  // Continue bypassed several, so each one's screenshot is reachable.
+  failures?: { index: number; error: string; screenshotPath?: string }[]
 }
 
 // Day 18: how aggressively to keep a run trace (mirrors Playwright's `trace`).
@@ -81,6 +84,9 @@ interface RecorderAPI {
   onPickCancel: (callback: () => void) => () => void
   // Day 19: capture the current page as a visual baseline + add a snapshot step.
   snapshot: () => Promise<void>
+  // Day 20 (data-driven): resolve {{env:NAME}} tokens against the running
+  // process environment, so a real secret never sits in the data table.
+  resolveEnv: (names: string[]) => Promise<Record<string, string>>
 }
 
 // === Visual regression (Day 19) ===
@@ -99,6 +105,7 @@ interface LibraryAPI {
     steps: RecorderStep[]
     storageState?: string
     viewport?: { width: number; height: number }
+    dataRows?: Record<string, string>[] // Day 20: data-driven table rows
   }) => Promise<SavedTestSummary>
   list: () => Promise<SavedTestSummary[]>
   listSuites: () => Promise<string[]>
@@ -134,6 +141,7 @@ interface DraftAPI {
     storageState?: string
     viewport?: { width: number; height: number }
     steps: RecorderStep[]
+    dataRows?: Record<string, string>[] // Day 20: data-driven table rows
   }) => Promise<void>
   list: () => Promise<DraftSummary[]>
   load: (id: string) => Promise<DraftData | null>
@@ -231,6 +239,7 @@ declare global {
     suite: string
     storageState?: string
     viewport?: { width: number; height: number }
+    dataRows?: Record<string, string>[] // Day 20: data-driven table rows
     updatedAt: string
     steps: RecorderStep[]
   }
@@ -258,6 +267,7 @@ declare global {
     updatedAt: string
     storageState?: string // Day 17: attached session (start logged in)
     viewport?: { width: number; height: number } // Day 17: device emulation
+    dataRows?: Record<string, string>[] // Day 20: data-driven table rows
     lastRun?: RunInfo
     steps: RecorderStep[]
   }
