@@ -153,11 +153,28 @@ function App(): React.JSX.Element {
   // logged in), and the list of saved sessions to pick from.
   const [storageState, setStorageState] = useState<string | undefined>(undefined)
   const [sessions, setSessions] = useState<string[]>([])
+  // Day 17(+): seed a saved session into the LIVE browser so a NEW recording
+  // starts already logged in. `useSessionSel` = the chosen session on the welcome
+  // screen; `applyingSession` gates the button while it seeds.
+  const [useSessionSel, setUseSessionSel] = useState('')
+  const [applyingSession, setApplyingSession] = useState(false)
+  const [useSessionError, setUseSessionError] = useState<string | null>(null)
   // Day 17 — viewport emulation: the device viewport this test renders at
   // (undefined = desktop / fill the window).
   const [viewport, setViewport] = useState<{ width: number; height: number } | undefined>(undefined)
   const [savePanelOpen, setSavePanelOpen] = useState(false)
   const [saveNameInput, setSaveNameInput] = useState('')
+  // Pillar 4 — reusable step blocks: named, saved step sequences you record once
+  // and insert into other tests. `blocks` = the saved list; the panel both SAVES
+  // a range of the current steps as a block and INSERTS a chosen block. When
+  // opened from a row's ＋ menu, `blockInsertAt` says where inserted steps land
+  // (null = append). `blockFrom`/`blockTo` are the 1-based range to save.
+  const [blocks, setBlocks] = useState<BlockSummary[]>([])
+  const [blocksPanelOpen, setBlocksPanelOpen] = useState(false)
+  const [blockNameInput, setBlockNameInput] = useState('')
+  const [blockInsertAt, setBlockInsertAt] = useState<number | null>(null)
+  const [blockFrom, setBlockFrom] = useState(1)
+  const [blockTo, setBlockTo] = useState(1)
   // Day 17 (session reuse): the name to save the current browser session under.
   const [sessionNameInput, setSessionNameInput] = useState('')
   // Inline editing of the test's base URL (the environment switch).
@@ -1156,6 +1173,28 @@ function App(): React.JSX.Element {
     }
   }
 
+  // Day 17(+): seed the chosen session into the live browser, then drop into the
+  // logged-in page so the user can record post-login steps without re-logging in.
+  const handleUseSession = async (): Promise<void> => {
+    if (!useSessionSel) return
+    setUseSessionError(null)
+    setApplyingSession(true)
+    // Open the URL the user typed (so a post-login page like /inventory.html
+    // opens directly, logged in) — or the session's own site if the box is empty.
+    const res = await window.api.session.apply(useSessionSel, urlInput.trim() || undefined)
+    setApplyingSession(false)
+    if (res?.ok) {
+      // Auto-attach: the session you used to RECORD is also the session the test
+      // needs to REPLAY — wire both halves so you pick it once. Saving the test
+      // (or a draft) now carries it automatically; the Save panel shows it set.
+      setStorageState(useSessionSel)
+      setHasNavigated(true) // welcome → chrome view
+      if (res.url) setUrlInput(res.url)
+    } else {
+      setUseSessionError(res?.error ?? 'Could not open that session')
+    }
+  }
+
   const handleSaveTest = async (): Promise<void> => {
     const name = saveNameInput.trim()
     if (!name) return
@@ -1444,6 +1483,45 @@ function App(): React.JSX.Element {
     editSteps([...steps.slice(0, i), step, ...steps.slice(i)])
   }
 
+  // === Pillar 4: reusable step blocks ================================
+  const refreshBlocks = async (): Promise<void> => {
+    setBlocks((await window.api.blocks.list()) ?? [])
+  }
+  // Open the blocks panel. `insertAt` = where a chosen block's steps land
+  // (null = append); also seed the save-range to the full current step list.
+  const openBlocksPanel = (insertAt: number | null): void => {
+    setBlockInsertAt(insertAt)
+    setBlockFrom(1)
+    setBlockTo(steps.length)
+    setBlockNameInput('')
+    setInsertMenuIndex(null)
+    setBlocksPanelOpen(true)
+    refreshBlocks()
+  }
+  // Save a 1-based range of the current steps as a named block (default: all).
+  const handleSaveBlock = async (): Promise<void> => {
+    const name = blockNameInput.trim()
+    if (!name || steps.length === 0) return
+    const from = Math.max(1, Math.min(blockFrom, steps.length))
+    const to = Math.max(from, Math.min(blockTo, steps.length))
+    await window.api.blocks.save({ name, steps: steps.slice(from - 1, to) })
+    setBlockNameInput('')
+    await refreshBlocks()
+  }
+  // Insert a saved block's steps into the current test (copy-in) at the
+  // panel's target position, then close.
+  const handleInsertBlock = async (fileName: string): Promise<void> => {
+    const block = await window.api.blocks.load(fileName)
+    if (!block || !block.steps.length) return
+    const at = blockInsertAt ?? steps.length
+    editSteps([...steps.slice(0, at), ...block.steps, ...steps.slice(at)])
+    setBlocksPanelOpen(false)
+  }
+  const handleDeleteBlock = async (fileName: string): Promise<void> => {
+    await window.api.blocks.delete(fileName)
+    await refreshBlocks()
+  }
+
   // Switching check type re-prefills the expected value from the element's
   // live state (its text for text checks, its value for the value check).
   const handleChooseKind = (kind: AssertKind): void => {
@@ -1609,6 +1687,42 @@ function App(): React.JSX.Element {
               </button>
             ))}
           </div>
+
+          {/* Day 17(+): start a new recording ALREADY logged in by seeding a
+              saved session into the live browser — no re-typing the password. */}
+          {sessions.length > 0 && (
+            <div className="use-session">
+              <span className="examples-label">🔑 Start logged in:</span>
+              <select
+                className="use-session-select"
+                value={useSessionSel}
+                onChange={(e) => {
+                  setUseSessionSel(e.target.value)
+                  setUseSessionError(null)
+                }}
+              >
+                <option value="">Choose a saved session…</option>
+                {sessions.map((s) => (
+                  <option key={s} value={s}>
+                    {s.replace(/\.json$/, '')}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="use-session-btn"
+                disabled={!useSessionSel || applyingSession}
+                onClick={handleUseSession}
+                title="Seed this session and open the URL above (or its own site) already logged in"
+              >
+                {applyingSession ? 'Opening…' : 'Use session'}
+              </button>
+              {useSessionError && <span className="use-session-error">{useSessionError}</span>}
+              {!useSessionError && (
+                <span className="use-session-hint">opens the URL above, logged in</span>
+              )}
+            </div>
+          )}
 
           {/* Day 18: recover the most recent unsaved recording (until dismissed). */}
           {!draftDismissed && drafts.length > 0 && (
@@ -2078,6 +2192,19 @@ function App(): React.JSX.Element {
               Steps
               {steps.length > 0 && <span className="steps-count">{steps.length}</span>}
             </span>
+            {/* Empty test: still offer Blocks, so you can START a test by
+                inserting a saved block (e.g. "Add to Cart") as the first steps. */}
+            {steps.length === 0 && !isRecording && (
+              <div className="steps-actions">
+                <button
+                  className="data-btn"
+                  onClick={() => openBlocksPanel(null)}
+                  title="Insert a saved block to start this test"
+                >
+                  🧩 Blocks
+                </button>
+              </div>
+            )}
             {steps.length > 0 && (
               <div className="steps-actions">
                 <button
@@ -2109,6 +2236,15 @@ function App(): React.JSX.Element {
                   title="Data-driven runs: run this flow once per row of a data table"
                 >
                   🧪 Data{isDataDriven && dataRows.length > 0 ? ` (${dataRows.length})` : ''}
+                </button>
+                {/* Pillar 4: save/insert reusable step blocks */}
+                <button
+                  className="data-btn"
+                  onClick={() => openBlocksPanel(null)}
+                  disabled={isReplaying || isRecording}
+                  title="Reusable step blocks: save these steps as a block, or insert a saved one"
+                >
+                  🧩 Blocks
                 </button>
                 <button
                   className="export-btn"
@@ -2555,6 +2691,91 @@ function App(): React.JSX.Element {
             </div>
           )}
 
+          {/* === Pillar 4: reusable step blocks (reuses the assert-panel look) === */}
+          {blocksPanelOpen && (
+            <div className="assert-panel">
+              <div className="assert-target">
+                <span className="assert-title">🧩 Reusable step blocks</span>
+              </div>
+
+              <div className="block-section-label">
+                Insert a block {blockInsertAt !== null ? `at step ${blockInsertAt + 1}` : 'at the end'}
+              </div>
+              {blocks.length === 0 ? (
+                <div className="block-empty">
+                  No saved blocks yet — save some steps below to reuse them across tests.
+                </div>
+              ) : (
+                <ul className="block-list">
+                  {blocks.map((b) => (
+                    <li key={b.fileName} className="block-row">
+                      <button
+                        type="button"
+                        className="block-insert"
+                        onClick={() => handleInsertBlock(b.fileName)}
+                        title={`Insert "${b.name}" (${b.stepCount} steps)`}
+                      >
+                        ＋ {b.name} <span className="block-count">{b.stepCount} steps</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="block-del"
+                        onClick={() => handleDeleteBlock(b.fileName)}
+                        title={`Delete block "${b.name}"`}
+                        aria-label={`Delete block ${b.name}`}
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="block-section-label">Save steps as a new block</div>
+              <input
+                className="assert-value"
+                value={blockNameInput}
+                onChange={(e) => setBlockNameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveBlock()
+                  else if (e.key === 'Escape') setBlocksPanelOpen(false)
+                }}
+                placeholder="block name (e.g. Login)…"
+                spellCheck={false}
+              />
+              <div className="block-range">
+                <span>Steps</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={steps.length}
+                  value={blockFrom}
+                  onChange={(e) => setBlockFrom(Number(e.target.value))}
+                />
+                <span>to</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={steps.length}
+                  value={blockTo}
+                  onChange={(e) => setBlockTo(Number(e.target.value))}
+                />
+                <span className="block-hint">of {steps.length}</span>
+              </div>
+              <div className="assert-actions">
+                <button className="modal-btn" onClick={() => setBlocksPanelOpen(false)}>
+                  Close
+                </button>
+                <button
+                  className="modal-btn primary"
+                  onClick={handleSaveBlock}
+                  disabled={!blockNameInput.trim() || steps.length === 0}
+                >
+                  Save block
+                </button>
+              </div>
+            </div>
+          )}
           {/* === Day 11: save panel (reuses the assert-panel look) === */}
           {savePanelOpen && (
             <div className="assert-panel">
@@ -2982,6 +3203,9 @@ function App(): React.JSX.Element {
                           </button>
                           <button type="button" onClick={() => handleAddWait(i + 1)}>
                             ⏱ Add 2s wait here
+                          </button>
+                          <button type="button" onClick={() => openBlocksPanel(i + 1)}>
+                            🧩 Insert block here
                           </button>
                         </div>
                       )}

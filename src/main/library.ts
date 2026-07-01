@@ -346,3 +346,84 @@ async function pruneDrafts(): Promise<void> {
     // best-effort
   }
 }
+
+// =====================================================================
+// REUSABLE STEP BLOCKS (Pillar 4) — a named, saved sequence of steps (e.g.
+// "Login") you record ONCE and INSERT into many tests. Stored like tests but in
+// a hidden _blocks folder. Inserting COPIES the steps into the test (v1: copy-in,
+// no live link), so replay + export need zero block awareness — a block is just
+// steps. Same-name save overwrites (an update), like tests.
+// =====================================================================
+export interface BlockFile {
+  version: 1
+  name: string
+  createdAt: string
+  updatedAt: string
+  steps: unknown[]
+}
+
+export interface BlockSummary {
+  fileName: string
+  name: string
+  stepCount: number
+  updatedAt: string
+}
+
+function blocksDir(): string {
+  return join(libraryDir(), '_blocks')
+}
+
+async function readBlockFile(fileName: string): Promise<BlockFile | null> {
+  try {
+    const raw = await readFile(join(blocksDir(), safeSegment(fileName)), 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed.name !== 'string' || !Array.isArray(parsed.steps)) return null
+    return parsed as BlockFile
+  } catch {
+    return null
+  }
+}
+
+export async function saveBlock(input: { name: string; steps: unknown[] }): Promise<BlockSummary> {
+  await mkdir(blocksDir(), { recursive: true })
+  const fileName = `${slugify(input.name)}.json`
+  const now = new Date().toISOString()
+  const previous = await readBlockFile(fileName)
+  const block: BlockFile = {
+    version: 1,
+    name: input.name,
+    createdAt: previous?.createdAt ?? now,
+    updatedAt: now,
+    steps: input.steps
+  }
+  await writeFile(join(blocksDir(), fileName), JSON.stringify(block, null, 2), 'utf-8')
+  return { fileName, name: block.name, stepCount: block.steps.length, updatedAt: block.updatedAt }
+}
+
+export async function listBlocks(): Promise<BlockSummary[]> {
+  let files: string[]
+  try {
+    files = await readdir(blocksDir())
+  } catch {
+    return [] // no blocks folder yet
+  }
+  const out: BlockSummary[] = []
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue
+    const b = await readBlockFile(f)
+    if (b) out.push({ fileName: f, name: b.name, stepCount: b.steps.length, updatedAt: b.updatedAt })
+  }
+  return out.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)) // newest first
+}
+
+export async function loadBlock(fileName: string): Promise<BlockFile | null> {
+  return readBlockFile(fileName)
+}
+
+export async function deleteBlock(fileName: string): Promise<void> {
+  try {
+    await unlink(join(blocksDir(), safeSegment(fileName)))
+  } catch {
+    // already gone — fine
+  }
+}

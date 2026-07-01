@@ -21,6 +21,10 @@ import {
   listDrafts,
   loadDraft,
   deleteDraft,
+  saveBlock,
+  listBlocks,
+  loadBlock,
+  deleteBlock,
   libraryDir,
   slugify,
   type RunInfo,
@@ -1070,6 +1074,87 @@ function createWindow(): void {
       return []
     }
   }
+
+  // Day 17(+): SEED a saved session into the LIVE browser (not just replay), so
+  // RECORDING a new test can start already logged in — no re-typing the password.
+  // Mirrors the replay seed dance: clear → set cookies → navigate to the origin →
+  // inject that origin's localStorage → reload. Returns the URL now showing.
+  ipcMain.handle(
+    'session:apply',
+    async (
+      _event,
+      file: string,
+      wantUrl?: string
+    ): Promise<{ ok: boolean; url?: string; error?: string }> => {
+      try {
+        const wc = activeWC()
+        // Start from a clean slate, like a real fresh login would.
+        try {
+          await wc.session.clearStorageData({ storages: ['cookies', 'localstorage'] })
+        } catch {
+          // best-effort
+        }
+        // clearStorageData resolves BEFORE the wipe settles — wait for the cookie
+        // store to actually empty so the seed we set next isn't erased by it.
+        for (let i = 0; i < 40; i++) {
+          try {
+            if ((await wc.session.cookies.get({})).length === 0) break
+          } catch {
+            break
+          }
+          await wait(50)
+        }
+        const seedOrigins = await seedSession(wc, file)
+        // Where to open: the URL the user typed (so a site like SauceDemo, whose
+        // ROOT is always the login page, can open a POST-login page like
+        // /inventory.html directly — the cookie is already seeded), else the
+        // session's localStorage origin, else a cookie's domain.
+        let target = ''
+        if (wantUrl && wantUrl.trim()) {
+          const t = wantUrl.trim()
+          target = /^https?:\/\//i.test(t) ? t : `https://${t}`
+        }
+        if (!target) target = seedOrigins[0]?.origin ?? ''
+        if (!target) {
+          const cookies = await wc.session.cookies.get({}).catch(() => [])
+          const dom = cookies.map((c) => (c.domain || '').replace(/^\./, '')).find(Boolean)
+          if (dom) target = `https://${dom}`
+        }
+        if (!target) return { ok: false, error: 'This session has no site to open.' }
+        overlayOpen = false
+        hasNavigated = true
+        await loadUrlTolerantly(target, wc)
+        resizeEmbedded() // unhide the embedded browser
+        // Wait for the page so the localStorage seed lands on a live document.
+        const deadline = Date.now() + 8000
+        while (wc.isLoading() && Date.now() < deadline) await wait(100)
+        // localStorage is per-origin — inject it now the page is at its origin,
+        // then reload so the app reads it (exactly what replay does on first nav).
+        let origin = ''
+        try {
+          origin = new URL(wc.getURL()).origin
+        } catch {
+          origin = ''
+        }
+        const match = seedOrigins.find((o) => o.origin === origin)
+        if (match && match.localStorage.length) {
+          const setLs = match.localStorage
+            .map(
+              (e) =>
+                `window.localStorage.setItem(${JSON.stringify(e.name)},${JSON.stringify(e.value)});`
+            )
+            .join('')
+          await wc.executeJavaScript(`(()=>{try{${setLs}}catch(e){}})()`).catch(() => {})
+          await wc.loadURL(wc.getURL()).catch(() => {})
+          while (wc.isLoading() && Date.now() < deadline) await wait(100)
+        }
+        notifyUrlChange(wc.getURL())
+        return { ok: true, url: wc.getURL() }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
 
   // Day 16: downloads — auto-save to a known folder so a download never stalls
   // a run behind a native "Save as" dialog. Recorded as a `download` step for
@@ -2262,6 +2347,14 @@ function createWindow(): void {
   ipcMain.handle('drafts:list', () => listDrafts())
   ipcMain.handle('drafts:load', (_event, id: string) => loadDraft(id))
   ipcMain.handle('drafts:delete', (_event, id: string) => deleteDraft(id))
+
+  // === Reusable step blocks (Pillar 4) ===============================
+  ipcMain.handle('blocks:save', (_event, input: { name: string; steps: unknown[] }) =>
+    saveBlock(input)
+  )
+  ipcMain.handle('blocks:list', () => listBlocks())
+  ipcMain.handle('blocks:load', (_event, fileName: string) => loadBlock(fileName))
+  ipcMain.handle('blocks:delete', (_event, fileName: string) => deleteBlock(fileName))
 
   // === Visual regression (Day 19) ====================================
   // Capture the current page as a baseline + emit a `snapshot` step. The

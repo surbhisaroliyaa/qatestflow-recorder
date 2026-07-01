@@ -222,7 +222,11 @@ const api = {
   // === Saved sessions (Day 17) — cookies + localStorage as storageState. ===
   session: {
     save: (name: string): Promise<string | null> => ipcRenderer.invoke('session:save', name),
-    list: (): Promise<string[]> => ipcRenderer.invoke('session:list')
+    list: (): Promise<string[]> => ipcRenderer.invoke('session:list'),
+    // Day 17(+): seed a saved session into the LIVE browser so recording starts
+    // logged in. Resolves { ok, url? } — the page it opened.
+    apply: (file: string, url?: string): Promise<{ ok: boolean; url?: string; error?: string }> =>
+      ipcRenderer.invoke('session:apply', file, url)
   },
 
   // === Drafts (Day 18) — auto-saved in-progress recordings ===
@@ -231,6 +235,15 @@ const api = {
     list: (): Promise<unknown> => ipcRenderer.invoke('drafts:list'),
     load: (id: string): Promise<unknown> => ipcRenderer.invoke('drafts:load', id),
     delete: (id: string): Promise<void> => ipcRenderer.invoke('drafts:delete', id)
+  },
+
+  // === Reusable step blocks (Pillar 4) — named, saved step sequences ===
+  blocks: {
+    save: (input: { name: string; steps: unknown[] }): Promise<unknown> =>
+      ipcRenderer.invoke('blocks:save', input),
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('blocks:list'),
+    load: (fileName: string): Promise<unknown> => ipcRenderer.invoke('blocks:load', fileName),
+    delete: (fileName: string): Promise<void> => ipcRenderer.invoke('blocks:delete', fileName)
   },
 
   // === Run trace (Day 18) ===

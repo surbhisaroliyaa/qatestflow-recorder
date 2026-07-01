@@ -123,6 +123,9 @@ interface SessionAPI {
   save: (name: string) => Promise<string | null>
   // List the saved session file names.
   list: () => Promise<string[]>
+  // Day 17(+): seed a saved session into the LIVE browser so recording starts
+  // logged in. Resolves { ok, url? } — the page it opened.
+  apply: (file: string, url?: string) => Promise<{ ok: boolean; url?: string; error?: string }>
 }
 
 // === Failure translator (Day 13) ===
@@ -148,6 +151,14 @@ interface DraftAPI {
   delete: (id: string) => Promise<void>
 }
 
+// === Reusable step blocks (Pillar 4) ===
+interface BlocksAPI {
+  save: (input: { name: string; steps: RecorderStep[] }) => Promise<BlockSummary>
+  list: () => Promise<BlockSummary[]>
+  load: (fileName: string) => Promise<BlockData | null>
+  delete: (fileName: string) => Promise<void>
+}
+
 // === Run trace (Day 18) ===
 interface TraceAPI {
   // The manifest, with each step's thumbnail inlined as a data: URL for the
@@ -169,6 +180,7 @@ interface API {
   session: SessionAPI
   trace: TraceAPI
   drafts: DraftAPI
+  blocks: BlocksAPI
   visual: VisualAPI
 }
 
@@ -240,6 +252,21 @@ declare global {
     storageState?: string
     viewport?: { width: number; height: number }
     dataRows?: Record<string, string>[] // Day 20: data-driven table rows
+    updatedAt: string
+    steps: RecorderStep[]
+  }
+
+  // === Reusable step blocks (Pillar 4) — a named, saved step sequence ===
+  interface BlockSummary {
+    fileName: string
+    name: string
+    stepCount: number
+    updatedAt: string
+  }
+  interface BlockData {
+    version: 1
+    name: string
+    createdAt: string
     updatedAt: string
     steps: RecorderStep[]
   }
