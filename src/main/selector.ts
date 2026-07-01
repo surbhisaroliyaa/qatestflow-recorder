@@ -37,11 +37,17 @@ export interface ElementFacts {
   // Per-strategy duplicate info — only present when a strategy matched MORE
   // than one element (absence means "unique", the happy path).
   dup?: Partial<Record<'testId' | 'id' | 'role' | 'name' | 'placeholder' | 'text', DupInfo>>
+  // Parent-anchored fallback: when the element has NO hook of its own, the
+  // observer scopes a selector to the nearest STABLE ancestor (non-generated
+  // id / test id / ARIA landmark) plus this element's position among matches.
+  // Computed IN-PAGE (like `dup`) because a click can navigate away first, and
+  // its `index` is counted with the SAME deepQueryAll replay uses.
+  anchor?: { css: string; count: number; index: number }
 }
 
 // How we found the element + how stable that strategy is (0–100).
 export interface SelectorCandidate {
-  kind: 'testId' | 'id' | 'role' | 'name' | 'placeholder' | 'text' | 'css'
+  kind: 'testId' | 'id' | 'role' | 'name' | 'placeholder' | 'text' | 'css' | 'anchored'
   score: number
   locator: string // a Playwright-style expression (used by Day 5 export)
   css: string | null // a CSS selector when expressible (used by Day 6 replay)
@@ -207,6 +213,24 @@ export function buildSelectors(facts: ElementFacts): BuiltSelector {
         dup.text
       )
     )
+  }
+
+  // 6.5 Parent-anchored — the element has no hook of its OWN, but a stable
+  // ANCESTOR does: scope to that ancestor + this element's tag/position. Ranks
+  // above the bare-tag last resort, below every real own-hook (so a genuine
+  // id/role/name/placeholder/text always wins and this only becomes primary for
+  // a truly hookless element). A UNIQUE scoped match is fairly safe; one that
+  // needs `.nth` is positional (more fragile → lower score).
+  if (facts.anchor) {
+    const a = facts.anchor
+    const many = a.count > 1
+    candidates.push({
+      kind: 'anchored',
+      score: many ? 45 : 55,
+      locator: many ? `locator('${esc(a.css)}').nth(${a.index})` : `locator('${esc(a.css)}')`,
+      css: a.css,
+      nth: many ? a.index : undefined
+    })
   }
 
   // 7. tag — last resort. Almost certainly not unique, so very low score.

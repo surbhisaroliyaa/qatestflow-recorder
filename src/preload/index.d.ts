@@ -399,7 +399,7 @@ declare global {
 
   // One ranked way to locate an element, with a 0–100 stability score.
   interface SelectorCandidate {
-    kind: 'testId' | 'id' | 'role' | 'name' | 'placeholder' | 'text' | 'css'
+    kind: 'testId' | 'id' | 'role' | 'name' | 'placeholder' | 'text' | 'css' | 'anchored'
     score: number
     locator: string // Playwright-style expression (Day 5 export)
     css: string | null // CSS selector when expressible (Day 6 replay)

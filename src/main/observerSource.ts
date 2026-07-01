@@ -471,6 +471,62 @@ export function observerProgram(): void {
     if (Object.keys(dup).length) facts.dup = dup
   }
 
+  // === Parent-anchored fallback ====================================
+  // For an element with no hook of its own, locate it via the nearest STABLE
+  // ancestor (a human-named id, a test id, or an ARIA landmark) + this element's
+  // tag/type/position. MIRROR WARNING: the index is counted with deepQueryAll,
+  // the SAME traversal replay's findByCandidate uses — so `.nth` can't drift.
+  const isGeneratedId = (id: string): boolean =>
+    /\d{4,}/.test(id) || /[a-f0-9]{8,}/i.test(id) || id.indexOf(':') !== -1
+  const LANDMARK_ROLES = ['navigation', 'main', 'form', 'search', 'banner', 'contentinfo', 'region']
+
+  // Ancestor selector(s) for the nearest stable ancestor. Returns a LIST because
+  // a test id spans two conventions ([data-test] / [data-testid]); id/landmark
+  // are a single entry. null = no stable ancestor within reach (keep the honest
+  // refusal rather than ship a global `body input` guess).
+  function anchorSelectorsFor(el: Element): string[] | null {
+    let node = el.parentElement
+    let depth = 0
+    let landmark: string | null = null // nearest ARIA landmark — a weaker fallback
+    while (node && depth < 6 && node !== document.body && node !== document.documentElement) {
+      const id = node.getAttribute('id')
+      if (id && !isGeneratedId(id) && /^[A-Za-z][\w-]*$/.test(id)) return ['#' + id]
+      const testId = node.getAttribute('data-test') || node.getAttribute('data-testid')
+      if (testId) {
+        return ['[data-test="' + attrEsc(testId) + '"]', '[data-testid="' + attrEsc(testId) + '"]']
+      }
+      if (!landmark) {
+        const tag = node.tagName.toLowerCase()
+        const role = node.getAttribute('role')
+        const ariaLabel = node.getAttribute('aria-label')
+        if (tag === 'form' || tag === 'nav' || tag === 'main') landmark = tag
+        else if (tag === 'section' && ariaLabel)
+          landmark = 'section[aria-label="' + attrEsc(ariaLabel) + '"]'
+        else if (role && LANDMARK_ROLES.indexOf(role) !== -1)
+          landmark = '[role="' + attrEsc(role) + '"]'
+      }
+      node = node.parentElement
+      depth++
+    }
+    return landmark ? [landmark] : null
+  }
+
+  function collectAnchor(el: Element, facts: ElementFacts): void {
+    const anchors = anchorSelectorsFor(el)
+    if (!anchors) return
+    const tag = el.tagName.toLowerCase()
+    const type = el instanceof HTMLInputElement ? el.type : ''
+    const descendant = tag + (type ? '[type="' + attrEsc(type) + '"]' : '')
+    // Distribute the descendant across EVERY ancestor branch — otherwise a
+    // comma-list ancestor ([data-test], [data-testid]) would leave the first
+    // branch matching the ancestor itself, not the descendant.
+    const scoped = anchors.map((a) => a + ' ' + descendant).join(', ')
+    const list = deepQueryAll(scoped, document)
+    const index = list.indexOf(el)
+    if (index < 0 || list.length === 0) return
+    facts.anchor = { css: scoped, count: list.length, index }
+  }
+
   function collectFacts(el: Element): ElementFacts {
     const facts: ElementFacts = { tag: el.tagName.toLowerCase() }
 
@@ -516,6 +572,10 @@ export function observerProgram(): void {
     }
 
     collectDup(el, facts)
+    // Parent-anchored fallback — only when the element has no strong hook of its
+    // own (a cheap attribute gate, not the full ladder, so we skip the ancestor
+    // walk + count for the common case). The engine ranks it above bare-tag.
+    if (!facts.testId && !facts.id && !facts.name && !facts.placeholder) collectAnchor(el, facts)
     return facts
   }
 

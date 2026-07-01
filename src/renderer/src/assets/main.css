@@ -2094,6 +2094,15 @@ body {
   color: #d29922;
 }
 
+/* Parent-anchored primary selector: located via an ancestor + position, so it's
+   lower-confidence than an own-hook. A soft amber flag, not an error. */
+.anchored-note {
+  align-self: flex-start;
+  font-size: 11px;
+  color: #d29922;
+  cursor: help;
+}
+
 /* Pick-time warning: the picked element has no reliable selector (Day 12). */
 .pick-warning {
   padding: 6px 8px;

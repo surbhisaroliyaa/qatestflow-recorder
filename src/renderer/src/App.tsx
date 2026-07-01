@@ -2947,6 +2947,14 @@ function App(): React.JSX.Element {
                           <span className="selector-caret">{expandedIndex === i ? '▾' : '▸'}</span>
                         </button>
                       )}
+                      {primaryCandidate(step)?.kind === 'anchored' && (
+                        <span
+                          className="anchored-note"
+                          title="No stable id / role / text of its own — located via a parent element and its position. Reliable for now, but may break if the page's structure changes."
+                        >
+                          ⚓ position-based
+                        </span>
+                      )}
                       {healedIndices.has(i) && (
                         <span
                           className="healed-tag"
