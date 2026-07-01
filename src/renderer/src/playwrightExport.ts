@@ -519,6 +519,12 @@ ${body}
 // steps (those need handlers registered around actions, which don't fit a clean
 // auto-POM). Returns null for anything outside that — the caller falls back to
 // the normal inline export.
+//
+// Day 20: DATA-DRIVEN tests ARE supported. The page class stays data-agnostic
+// (locators + methods); the spec emits a `dataset` array and runs one test per
+// row inside `for (const data of dataset)`. A method that fills a {{column}}
+// value takes the row as a `data` parameter (the class holds no data of its
+// own), while {{env:…}} tokens read process.env directly and need no parameter.
 // =====================================================================
 export function generatePageObjectTest(
   steps: RecorderStep[],
@@ -527,8 +533,8 @@ export function generatePageObjectTest(
     baseURL?: string
     storageState?: string
     viewport?: { width: number; height: number }
-    // Day 20: present (with rows) for a data-driven test — POM falls back to
-    // the inline export, which knows how to wrap the body in the data loop.
+    // Day 20: present (with rows) for a data-driven test — the spec wraps the
+    // page-object calls in a `for (const data of dataset)` loop.
     data?: { columns: string[]; rows: Record<string, string>[] }
   }
 ): { spec: string; page: string; pageFileName: string; className: string } | null {
@@ -536,8 +542,19 @@ export function generatePageObjectTest(
   const multiWindow = enabled.some((s) => (s.windowId ?? 0) > 0 || s.opensWindow !== undefined)
   const hasFrames = enabled.some((s) => s.frame?.length)
   const hasAwkward = enabled.some((s) => s.type === 'dialog' || s.type === 'download')
-  const hasData = !!(options?.data && options.data.rows.length)
-  if (multiWindow || hasFrames || hasAwkward || hasData) return null
+  if (multiWindow || hasFrames || hasAwkward) return null
+
+  // Day 20: data mode is on only when there are both columns and rows. `columns`
+  // drives which {{tokens}} become `data.*` references (vs. quoted literals).
+  const dataMode = !!(options?.data && options.data.rows.length && options.data.columns.length)
+  const columns = dataMode ? options!.data!.columns : []
+  // A step whose value/URL fills a DATA column (not just an env token) — its
+  // method must take the `data` row as a parameter, since the class has no data.
+  const stepUsesData = (step: RecorderStep): boolean =>
+    dataMode &&
+    [step.value, step.url].some(
+      (f) => typeof f === 'string' && extractTokens(f).some((t) => columns.includes(t))
+    )
 
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const className = `${pascalName(options?.name || 'recorded flow')}Page`
@@ -577,9 +594,10 @@ export function generatePageObjectTest(
 
   // Walk the steps: accumulate consecutive ACTIONS into a method buffer, and
   // flush it (as a method + a call in the spec) at each navigate/assert boundary.
-  const methods: { name: string; body: string[] }[] = []
+  const methods: { name: string; body: string[]; usesData: boolean }[] = []
   const specBody: string[] = []
   let buffer: string[] = []
+  let bufferUsesData = false
   let lastActionLabel = ''
   let actionsSeq = 0
   const flush = (): void => {
@@ -589,9 +607,11 @@ export function generatePageObjectTest(
     let n = 2
     while (used.has(name)) name = `${base}${n++}`
     used.add(name)
-    methods.push({ name, body: buffer })
-    specBody.push(`  await app.${name}()`)
+    methods.push({ name, body: buffer, usesData: bufferUsesData })
+    // A data-using method receives the row: `await app.login(data)`.
+    specBody.push(`  await app.${name}(${bufferUsesData ? 'data' : ''})`)
     buffer = []
+    bufferUsesData = false
     lastActionLabel = ''
   }
 
@@ -612,7 +632,9 @@ export function generatePageObjectTest(
     if (step.type === 'assert') {
       flush()
       const name = usesElement(step) ? nameForElement(step) : ''
-      const line = actionFor(step, baseURL, 'app.page', name ? `app.${name}` : undefined)
+      // The assert lives in the spec, where `data` is in scope (inside the
+      // per-row loop), so a tokenized expected value can stay a `data.*` ref.
+      const line = actionFor(step, baseURL, 'app.page', name ? `app.${name}` : undefined, columns)
       if (line) specBody.push(`  ${line}`)
       continue
     }
@@ -620,14 +642,16 @@ export function generatePageObjectTest(
     // element of their own (page-level actions), so handle them before the
     // no-selector skip below.
     if (step.type === 'wait' || step.type === 'back') {
-      const line = actionFor(step, baseURL, 'this.page')
+      const line = actionFor(step, baseURL, 'this.page', undefined, columns)
       if (line) buffer.push(`    ${line}`)
+      if (stepUsesData(step)) bufferUsesData = true
       continue
     }
     if (!step.selector) continue
     const name = nameForElement(step, step.type === 'click')
-    const line = actionFor(step, baseURL, 'this.page', `this.${name}`)
+    const line = actionFor(step, baseURL, 'this.page', `this.${name}`, columns)
     if (line) buffer.push(`    ${line}`)
+    if (stepUsesData(step)) bufferUsesData = true
     if (step.type === 'click' || step.type === 'press') lastActionLabel = step.label || ''
   }
   flush()
@@ -659,7 +683,10 @@ export function generatePageObjectTest(
   pageLines.push(`  }`)
   for (const m of methods) {
     pageLines.push('')
-    pageLines.push(`  async ${m.name}(): Promise<void> {`)
+    // A data-using method receives the current row; its body already references
+    // `data.column` (env tokens read process.env directly, so they need no arg).
+    const params = m.usesData ? 'data: Record<string, string>' : ''
+    pageLines.push(`  async ${m.name}(${params}): Promise<void> {`)
     for (const b of m.body) pageLines.push(b)
     pageLines.push(`  }`)
   }
@@ -680,9 +707,38 @@ export function generatePageObjectTest(
     )
   }
   const use = useProps.length ? `\ntest.use({ ${useProps.join(', ')} })\n` : ''
-  const spec =
+  const importLines =
     `import ${imports} from '@playwright/test'\n` +
-    `import { ${className} } from './pages/${className}'\n` +
+    `import { ${className} } from './pages/${className}'\n`
+
+  // Day 20: a data-driven spec — a `dataset` array and one test per row (named
+  // by the first column so a failing row is identifiable), each instantiating
+  // the page object and driving it with that row's `data`.
+  if (dataMode) {
+    const rows = options!.data!.rows
+    const dataset = rows.map((r) => `  ${rowLiteral(r, columns)}`).join(',\n')
+    const disc = columns[0]
+    const discRef = isIdent(disc) ? `data.${disc}` : `data[${quote(disc)}]`
+    const titleBase = (options?.name || 'recorded flow').replace(/[`\\$]/g, '\\$&')
+    const title = '`' + titleBase + ' — ${' + discRef + '}`'
+    // The per-row body (build the page object, then the recorded calls), indented
+    // one level deeper to sit inside the for-loop's test().
+    const inner = [`  const app = new ${className}(page)`, ...specBody]
+      .map((l) => (l ? `  ${l}` : l))
+      .join('\n')
+    const spec =
+      `${importLines}${use}\n` +
+      `const dataset = [\n${dataset}\n]\n\n` +
+      `for (const data of dataset) {\n` +
+      `  test(${title}, async ({ page }) => {\n` +
+      `${inner}\n` +
+      `  })\n` +
+      `}\n`
+    return { spec, page, pageFileName, className }
+  }
+
+  const spec =
+    `${importLines}` +
     `${use}\n` +
     `test(${quote(options?.name || 'recorded flow')}, async ({ page }) => {\n` +
     `  const app = new ${className}(page)\n` +

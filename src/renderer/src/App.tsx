@@ -805,14 +805,26 @@ function App(): React.JSX.Element {
     setIsReplaying(true)
     // Day 18: hand main the trace policy + the human step sentences (so the
     // saved trace is self-contained) + the test name for the manifest.
-    const result = await window.api.recorder.replay(list, interactive, sessionFile, {
-      mode: traceMode,
-      stepTexts: list.map((s) => stepText(s)),
-      testName: testName || undefined
-    })
-    setIsReplaying(false)
-    setReplayingIndex(null)
-    setRecovery(null)
+    // Day 20 (stuck-run fix): a replay MUST always release the UI — even if the
+    // main-process handler rejects unexpectedly. Without this finally, one failed
+    // IPC left isReplaying stuck `true`, which greys out every Replay / Run Data
+    // button — so after a run or two (especially a data matrix firing many
+    // replays back-to-back) the whole app looked frozen. Treat a rejection as an
+    // ordinary failed run so the matrix keeps going and the banner explains it.
+    let result: Awaited<ReturnType<typeof window.api.recorder.replay>>
+    try {
+      result = await window.api.recorder.replay(list, interactive, sessionFile, {
+        mode: traceMode,
+        stepTexts: list.map((s) => stepText(s)),
+        testName: testName || undefined
+      })
+    } catch (err) {
+      result = { ok: false, error: err instanceof Error ? err.message : String(err) }
+    } finally {
+      setIsReplaying(false)
+      setReplayingIndex(null)
+      setRecovery(null)
+    }
     // Aborted = Home was pressed mid-recovery. The run is moot — no failure
     // banner, no run recorded.
     if (result.aborted) return result
@@ -921,10 +933,11 @@ function App(): React.JSX.Element {
     (step.type === 'assert' && !!step.assertKind && assertNeedsValue(step.assertKind))
 
   // A readable name for a row in the run summary: its first column's value, else
-  // a positional fallback.
+  // a positional fallback. An empty first cell is tagged "(empty)" so a blank-
+  // credentials row reads as intentional next to the named rows, not just "Row 4".
   const rowLabel = (row: Record<string, string>, i: number): string => {
     const first = dataCols[0] ? row[dataCols[0]] : ''
-    return first ? first : `Row ${i + 1}`
+    return first ? first : `Row ${i + 1} (empty)`
   }
 
   // Grid editing — pure mutations of the dataRows array.
