@@ -175,6 +175,19 @@ function App(): React.JSX.Element {
   const [blockInsertAt, setBlockInsertAt] = useState<number | null>(null)
   const [blockFrom, setBlockFrom] = useState(1)
   const [blockTo, setBlockTo] = useState(1)
+  // Live-link blocks (v2): a `block` step is a REFERENCE. `blockCache` maps a
+  // block's file name → its steps, loaded on demand, so the UI can show a linked
+  // block's contents and derive its data columns. `editingBlockRef` is set while
+  // a block's steps are loaded into the editor to update the block itself.
+  const [blockCache, setBlockCache] = useState<Record<string, RecorderStep[]>>({})
+  const [editingBlockRef, setEditingBlockRef] = useState<string | null>(null)
+  // Replace each linked `block` step with the block's CACHED steps (a disabled
+  // block expands to nothing). Identity for a test with no block steps, so normal
+  // tests are unaffected. Used for display/data-columns (run uses expandForRun).
+  const expandSteps = (list: RecorderStep[]): RecorderStep[] =>
+    list.flatMap((s) =>
+      s.type === 'block' ? (s.disabled || !s.blockRef ? [] : (blockCache[s.blockRef] ?? [])) : [s]
+    )
   // Day 17 (session reuse): the name to save the current browser session under.
   const [sessionNameInput, setSessionNameInput] = useState('')
   // Inline editing of the test's base URL (the environment switch).
@@ -311,6 +324,13 @@ function App(): React.JSX.Element {
   // so it reads CURRENT values through refs instead of stale closed-over state.
   const repickIndexRef = useRef<number | null>(null)
   const stepsRef = useRef<RecorderStep[]>([])
+  // Live-link blocks: a run executes the EXPANDED step list (blocks flattened),
+  // but the UI shows the collapsed list. This maps each expanded index → its
+  // display-row index, so progress/failure marks land on the right row (a
+  // block's inner steps all map to the block's single row). null / identity for
+  // a test with no linked blocks.
+  const runPlanRef = useRef<number[] | null>(null)
+  const toDisplayIdx = (i: number): number => runPlanRef.current?.[i] ?? i
   // Mirror state into the refs AFTER render (React forbids touching refs
   // during render). The onPicked subscriber only reads them when an IPC
   // event arrives, which is always after the effect has run.
@@ -327,7 +347,7 @@ function App(): React.JSX.Element {
   const multiWindow = steps.some((s) => (s.windowId ?? 0) > 0 || s.opensWindow !== undefined)
   // Day 20: the data columns this test references (derived from the {{tokens}}
   // in step values / URLs). Non-empty = this is a data-driven test.
-  const dataCols = dataColumns(steps)
+  const dataCols = dataColumns(expandSteps(steps))
   const isDataDriven = dataCols.length > 0
 
   // The test's base URL when none was set yet: the ORIGIN of the first
@@ -592,15 +612,18 @@ function App(): React.JSX.Element {
   // Follow replay progress so we can highlight running / done / failed steps.
   useEffect(() => {
     const unsubscribe = window.api.recorder.onReplayProgress((p) => {
+      // Map the expanded run index onto the collapsed display row (identity when
+      // the test has no linked blocks).
+      const idx = runPlanRef.current?.[p.index] ?? p.index
       if (p.status === 'running') {
-        setReplayingIndex(p.index)
+        setReplayingIndex(idx)
         // A recovery retry re-runs a step that just failed — drop its red mark.
-        setFailedIndex((prev) => (prev === p.index ? null : prev))
-      } else if (p.status === 'done') setDoneIndices((prev) => new Set(prev).add(p.index))
-      else if (p.status === 'error') setFailedIndex(p.index)
+        setFailedIndex((prev) => (prev === idx ? null : prev))
+      } else if (p.status === 'done') setDoneIndices((prev) => new Set(prev).add(idx))
+      else if (p.status === 'error') setFailedIndex(idx)
       else if (p.status === 'skipped') {
-        setSkippedIndices((prev) => new Set(prev).add(p.index))
-        setFailedIndex((prev) => (prev === p.index ? null : prev))
+        setSkippedIndices((prev) => new Set(prev).add(idx))
+        setFailedIndex((prev) => (prev === idx ? null : prev))
       }
     })
     return unsubscribe
@@ -722,10 +745,13 @@ function App(): React.JSX.Element {
   // Generate the export and show it. Inline = one file; Page Object = two files
   // (a spec + a page class), unless the test is multi-tab/iframe/dialog/download
   // (POM falls back to inline, since those don't fit a clean auto-POM).
-  const showExport = (pageObject: boolean): void => {
+  const showExport = async (pageObject: boolean): Promise<void> => {
+    // Live-link: expand linked blocks to their current steps so the generated
+    // code contains the real actions (a block is just steps in the export).
+    const flat = await expandForRun(steps)
     const opts = {
       name: testName || undefined,
-      baseURL: baseURL || deriveBaseURL(steps) || undefined,
+      baseURL: baseURL || deriveBaseURL(flat) || undefined,
       storageState,
       viewport,
       // Day 20: pass the data table so a data-driven test exports as a
@@ -734,7 +760,7 @@ function App(): React.JSX.Element {
       data: isDataDriven ? { columns: dataCols, rows: dataRows } : undefined
     }
     if (pageObject) {
-      const pom = generatePageObjectTest(steps, opts)
+      const pom = generatePageObjectTest(flat, opts)
       if (pom) {
         setExportCode(pom.spec)
         setExportPage(pom.page)
@@ -744,7 +770,7 @@ function App(): React.JSX.Element {
       }
       // Unsupported for POM — fall back to inline so the user still gets output.
     }
-    setExportCode(generatePlaywrightTest(steps, opts))
+    setExportCode(generatePlaywrightTest(flat, opts))
     setExportPage(null)
   }
 
@@ -847,12 +873,14 @@ function App(): React.JSX.Element {
     if (result.aborted) return result
     setLastTraceId(result.traceId ?? null)
     if (!result.ok) {
-      setFailedIndex(result.failedAt ?? null)
+      // Map expanded run indices back onto display rows (linked blocks) so the
+      // red marks + failure banner point at the right rows. Identity otherwise.
+      setFailedIndex(result.failedAt != null ? toDisplayIdx(result.failedAt) : null)
       setReplayError(result.error ?? 'Replay failed')
       setLastScreenshotPath(result.screenshotPath ?? null)
       setLastConsoleErrors(result.consoleErrors ?? [])
       setLastNetworkErrors(result.networkErrors ?? [])
-      setLastFailures(result.failures ?? [])
+      setLastFailures((result.failures ?? []).map((f) => ({ ...f, index: toDisplayIdx(f.index) })))
     }
     // A SAVED test remembers its outcomes — the library shows the latest as
     // a green/red dot and the last 10 as a history row (mini CI dashboard).
@@ -917,15 +945,19 @@ function App(): React.JSX.Element {
       await handleRunData()
       return
     }
+    // Live-link: expand any linked blocks to their CURRENT steps before running,
+    // and record the expanded→display index map so marks land on the right rows.
+    const { flat, map } = await buildRunPlan(steps)
+    runPlanRef.current = map
     if (isDataDriven) {
       const row = dataRows[0] ?? {}
-      const envMap = await window.api.recorder.resolveEnv(envVarNames(steps, [row]))
-      const list = substituteSteps(steps, resolveRow(row, envMap), envMap)
+      const envMap = await window.api.recorder.resolveEnv(envVarNames(flat, [row]))
+      const list = substituteSteps(flat, resolveRow(row, envMap), envMap)
       await runOnce(list, testFileName, false)
       return
     }
     setDataRun(null) // a plain single replay clears any stale matrix banner
-    await runOnce(steps, testFileName, true)
+    await runOnce(flat, testFileName, true)
   }
 
   // === Day 20: data-driven runs ======================================
@@ -973,13 +1005,17 @@ function App(): React.JSX.Element {
     setDataPanelOpen(false)
     setDataTab(null)
     setDataPopupDismissed(false)
-    const envMap = await window.api.recorder.resolveEnv(envVarNames(steps, dataRows))
+    // Live-link: expand linked blocks once, then run every row against the same
+    // flattened flow (the index map lets per-row marks hit the right rows).
+    const { flat, map } = await buildRunPlan(steps)
+    runPlanRef.current = map
+    const envMap = await window.api.recorder.resolveEnv(envVarNames(flat, dataRows))
     setDataRun({ total: dataRows.length, current: 0, currentLabel: '', results: [], running: true })
     const results: DataRunEntry[] = []
     for (let i = 0; i < dataRows.length; i++) {
       const label = rowLabel(dataRows[i], i)
       setDataRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: label } : prev))
-      const list = substituteSteps(steps, resolveRow(dataRows[i], envMap), envMap)
+      const list = substituteSteps(flat, resolveRow(dataRows[i], envMap), envMap)
       // fileName null: don't stamp a run per row — record ONE aggregate below.
       const result = await runOnce(list, null, false)
       if (result.aborted) {
@@ -1329,7 +1365,13 @@ function App(): React.JSX.Element {
         setTestFileName(t.fileName)
         setTestSuite(suite)
         setBaseURL(data.baseURL)
-        const result = await runOnce(data.steps, t.fileName, false, data.storageState)
+        // Live-link: expand any linked blocks before running (a block ref must
+        // never reach the replay engine — it only understands real steps).
+        const { flat: flatSuite, map: suiteMap } = await buildRunPlan(
+          data.steps as RecorderStep[]
+        )
+        runPlanRef.current = suiteMap
+        const result = await runOnce(flatSuite, t.fileName, false, data.storageState)
         entry = {
           fileName: t.fileName,
           name: data.name,
@@ -1347,6 +1389,26 @@ function App(): React.JSX.Element {
   const handleDeleteTest = async (test: SavedTestSummary): Promise<void> => {
     if (!window.confirm(`Delete "${test.name}"? This cannot be undone.`)) return
     await window.api.library.remove(test.fileName)
+    setSavedTests(await window.api.library.list())
+  }
+
+  // Clone a saved test: duplicate it (steps + session + data + viewport) under a
+  // "(copy)" name in the same section, then refresh. Record a happy path once,
+  // clone it, and tweak the copy into a variant — no re-recording. Fresh copy =
+  // no run history (a new test hasn't been run yet). Reuses load + save; the
+  // saved-name slug makes repeat clones land on distinct files (…-copy, …-copy-2).
+  const handleCloneTest = async (test: SavedTestSummary): Promise<void> => {
+    const full = await window.api.library.load(test.fileName)
+    if (!full) return
+    await window.api.library.save({
+      name: `${full.name} (copy)`,
+      baseURL: full.baseURL,
+      suite: test.suite,
+      steps: full.steps,
+      storageState: full.storageState,
+      viewport: full.viewport,
+      dataRows: full.dataRows
+    })
     setSavedTests(await window.api.library.list())
   }
 
@@ -1498,29 +1560,136 @@ function App(): React.JSX.Element {
     setBlocksPanelOpen(true)
     refreshBlocks()
   }
+  // Replace each linked `block` step with the block's CURRENT steps loaded FRESH
+  // from disk (so a run/export always reflects the latest edit — the "live" in
+  // live-link). Flattens any nested block refs too. Identity for a test with no
+  // block steps. Used by replay + export; display uses the cached expandSteps.
+  const expandForRun = async (list: RecorderStep[]): Promise<RecorderStep[]> => {
+    const out: RecorderStep[] = []
+    for (const s of list) {
+      if (s.type === 'block') {
+        if (s.disabled || !s.blockRef) continue
+        const b = await window.api.blocks.load(s.blockRef)
+        if (b) out.push(...(await expandForRun(b.steps as RecorderStep[])))
+      } else {
+        out.push(s)
+      }
+    }
+    return out
+  }
+  // Like expandForRun, but ALSO returns a map from each expanded index → the
+  // display-row it came from (a block's inner steps all point back at the block
+  // row), so replay marks line up with the collapsed UI. Set into runPlanRef
+  // before a run. For a test with no linked blocks the map is the identity.
+  const buildRunPlan = async (
+    display: RecorderStep[]
+  ): Promise<{ flat: RecorderStep[]; map: number[] }> => {
+    const flat: RecorderStep[] = []
+    const map: number[] = []
+    for (let i = 0; i < display.length; i++) {
+      const s = display[i]
+      if (s.type === 'block') {
+        if (s.disabled || !s.blockRef) continue
+        const b = await window.api.blocks.load(s.blockRef)
+        const inner = b ? await expandForRun(b.steps as RecorderStep[]) : []
+        for (const st of inner) {
+          flat.push(st)
+          map.push(i)
+        }
+      } else {
+        flat.push(s)
+        map.push(i)
+      }
+    }
+    return { flat, map }
+  }
   // Save a 1-based range of the current steps as a named block (default: all).
+  // The range is FLATTENED first (any linked block inside it becomes its steps)
+  // so a saved block is always plain steps — no nested references to resolve.
+  // Clearing the cache makes every linked test re-read the block (live update).
   const handleSaveBlock = async (): Promise<void> => {
     const name = blockNameInput.trim()
     if (!name || steps.length === 0) return
     const from = Math.max(1, Math.min(blockFrom, steps.length))
     const to = Math.max(from, Math.min(blockTo, steps.length))
-    await window.api.blocks.save({ name, steps: steps.slice(from - 1, to) })
+    const flat = await expandForRun(steps.slice(from - 1, to))
+    await window.api.blocks.save({ name, steps: flat })
+    setBlockCache({}) // linked tests re-read the block on next render/run
     setBlockNameInput('')
+    setEditingBlockRef(null)
     await refreshBlocks()
   }
-  // Insert a saved block's steps into the current test (copy-in) at the
-  // panel's target position, then close.
+  // Insert a saved block as a LIVE reference (one `block` step). Editing the
+  // block later updates this test automatically. `⧉ Copy` (below) inlines a
+  // snapshot instead.
+  const handleInsertBlockLinked = async (block: BlockSummary): Promise<void> => {
+    const at = blockInsertAt ?? steps.length
+    const ref: RecorderStep = { type: 'block', blockRef: block.fileName, label: block.name }
+    editSteps([...steps.slice(0, at), ref, ...steps.slice(at)])
+    setBlocksPanelOpen(false)
+  }
+  // Insert a COPY of the block's steps (copy-in snapshot — no live link).
   const handleInsertBlock = async (fileName: string): Promise<void> => {
     const block = await window.api.blocks.load(fileName)
     if (!block || !block.steps.length) return
     const at = blockInsertAt ?? steps.length
-    editSteps([...steps.slice(0, at), ...block.steps, ...steps.slice(at)])
+    editSteps([
+      ...steps.slice(0, at),
+      ...(block.steps as RecorderStep[]),
+      ...steps.slice(at)
+    ])
     setBlocksPanelOpen(false)
+  }
+  // Edit a block: load its steps into the editor and open the panel primed to
+  // SAVE back to it (same name overwrites). Re-saving updates every test that
+  // links the block — "fix once, updates everywhere."
+  const handleEditBlock = async (block: BlockSummary): Promise<void> => {
+    if (
+      steps.length > 0 &&
+      !window.confirm(
+        `Load "${block.name}" into the editor to edit it? This replaces the current steps.`
+      )
+    )
+      return
+    const b = await window.api.blocks.load(block.fileName)
+    if (!b) return
+    editSteps(b.steps as RecorderStep[])
+    setEditingBlockRef(block.fileName)
+    setBlockNameInput(block.name)
+    setBlockFrom(1)
+    setBlockTo(b.steps.length)
+    setBlockInsertAt(null)
+    setBlocksPanelOpen(true)
+    refreshBlocks()
   }
   const handleDeleteBlock = async (fileName: string): Promise<void> => {
     await window.api.blocks.delete(fileName)
+    setBlockCache({})
     await refreshBlocks()
   }
+  // Load any linked block's steps into the cache (for display + data columns).
+  // Runs when the step list or cache changes; the "missing" guard stops it after
+  // one pass (and re-fills after a cache clear following a block edit).
+  useEffect(() => {
+    const refs = [
+      ...new Set(
+        steps.filter((s) => s.type === 'block' && s.blockRef).map((s) => s.blockRef as string)
+      )
+    ]
+    const missing = refs.filter((r) => !(r in blockCache))
+    if (missing.length === 0) return
+    Promise.all(
+      missing.map((r) =>
+        window.api.blocks.load(r).then((b) => [r, (b?.steps ?? []) as RecorderStep[]] as const)
+      )
+    ).then((pairs) => {
+      setBlockCache((prev) => {
+        const next = { ...prev }
+        for (const [r, s] of pairs) next[r] = s
+        return next
+      })
+    })
+  }, [steps, blockCache])
 
   // Switching check type re-prefills the expected value from the element's
   // live state (its text for text checks, its value for the value check).
@@ -1945,6 +2114,15 @@ function App(): React.JSX.Element {
                                           : 'Past fail'}
                                     </button>
                                   )}
+                                  <button
+                                    type="button"
+                                    className="library-clone"
+                                    onClick={() => handleCloneTest(test)}
+                                    title={`Clone "${test.name}" into an editable copy`}
+                                    aria-label={`Clone ${test.name}`}
+                                  >
+                                    ⧉
+                                  </button>
                                   <button
                                     type="button"
                                     className="library-delete"
@@ -2712,10 +2890,26 @@ function App(): React.JSX.Element {
                       <button
                         type="button"
                         className="block-insert"
-                        onClick={() => handleInsertBlock(b.fileName)}
-                        title={`Insert "${b.name}" (${b.stepCount} steps)`}
+                        onClick={() => handleInsertBlockLinked(b)}
+                        title={`Insert "${b.name}" as a LIVE link (${b.stepCount} steps) — editing the block later updates this test`}
                       >
-                        ＋ {b.name} <span className="block-count">{b.stepCount} steps</span>
+                        🔗 {b.name} <span className="block-count">{b.stepCount} steps</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="block-mini"
+                        onClick={() => handleInsertBlock(b.fileName)}
+                        title="Insert a one-time COPY (snapshot, not linked)"
+                      >
+                        ⧉
+                      </button>
+                      <button
+                        type="button"
+                        className="block-mini"
+                        onClick={() => handleEditBlock(b)}
+                        title={`Edit "${b.name}" — updates every test linked to it`}
+                      >
+                        ✎
                       </button>
                       <button
                         type="button"
@@ -2731,7 +2925,9 @@ function App(): React.JSX.Element {
                 </ul>
               )}
 
-              <div className="block-section-label">Save steps as a new block</div>
+              <div className="block-section-label">
+                {editingBlockRef ? `Update block "${blockNameInput}"` : 'Save steps as a new block'}
+              </div>
               <input
                 className="assert-value"
                 value={blockNameInput}
@@ -2771,7 +2967,7 @@ function App(): React.JSX.Element {
                   onClick={handleSaveBlock}
                   disabled={!blockNameInput.trim() || steps.length === 0}
                 >
-                  Save block
+                  {editingBlockRef ? 'Update block' : 'Save block'}
                 </button>
               </div>
             </div>
@@ -3129,6 +3325,14 @@ function App(): React.JSX.Element {
                         />
                       ) : (
                         <span className="step-text">{stepText(step)}</span>
+                      )}
+                      {step.type === 'block' && (
+                        <span
+                          className="block-badge"
+                          title="A live-linked block — editing the block updates this test. Expand it from the 🧩 Blocks panel."
+                        >
+                          🔗 {step.blockRef ? (blockCache[step.blockRef]?.length ?? '…') : 0} steps
+                        </span>
                       )}
                       {/* Day 17/18: tab provenance. In a multi-tab recording EVERY
                           step shows which tab it RUNS ON — the original is "main

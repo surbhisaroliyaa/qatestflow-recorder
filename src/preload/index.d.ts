@@ -457,7 +457,14 @@ declare global {
       | 'upload'
       | 'download'
       | 'snapshot'
+      | 'block'
     label?: string
+    // Pillar 4 (live-link blocks, v2): a 'block' step is a LIVE REFERENCE to a
+    // saved block (its file name). It's one step in the array (moves/deletes as a
+    // unit); the renderer EXPANDS it to the block's CURRENT steps at replay /
+    // export / data-column time — so editing the block updates every test that
+    // links it. `label` holds the block's display name.
+    blockRef?: string
     // For type/select: the entered value. For assert text/value kinds: the
     // EXPECTED value. For wait: the seconds, as text (editable like any value).
     // For dialog: the response — prompt's answer text, or 'accept'/'dismiss'

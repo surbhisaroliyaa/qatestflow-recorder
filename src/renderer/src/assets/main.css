@@ -1008,6 +1008,24 @@ body {
   background: #2a1715;
 }
 
+.library-clone {
+  flex: none;
+  width: 30px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #666;
+  font-size: 14px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.library-clone:hover {
+  color: #b4a3d8;
+  border-color: #3a3350;
+  background: #23202e;
+}
+
 /* Day 11.5 sections — restyled as CARDS (Day 12.5 UI polish): each section
    is a contained box; the header row is the accordion toggle, the test list
    lives inside the card under a divider. */
@@ -2198,7 +2216,8 @@ body {
   color: #8b93a7;
   font-size: 11px;
 }
-.block-del {
+.block-del,
+.block-mini {
   padding: 0 8px;
   background: #21262d;
   border: 1px solid #30363d;
@@ -2209,6 +2228,20 @@ body {
 .block-del:hover {
   color: #f85149;
   border-color: #5c2a2a;
+}
+.block-mini:hover {
+  color: #e6edf3;
+  border-color: #4a5568;
+}
+/* A live-linked block step in the step list. */
+.block-badge {
+  font-size: 11px;
+  color: #7ea6ff;
+  border: 1px solid #2b3a55;
+  background: #182238;
+  border-radius: 10px;
+  padding: 1px 7px;
+  white-space: nowrap;
 }
 .block-range {
   display: flex;

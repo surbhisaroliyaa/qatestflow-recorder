@@ -128,6 +128,10 @@ export function stepText(step: RecorderStep): string {
       return `Go to ${step.url}`
     case 'back':
       return 'Go back'
+    case 'block':
+      // A live reference to a saved block — shown in the UI; expanded to the
+      // block's real steps before any code is generated (never reaches actionFor).
+      return `🧩 ${step.label ?? 'Block'} — linked block`
     case 'closeTab':
       return `Close tab ${step.windowId ?? ''}`.trim()
     case 'snapshot':
