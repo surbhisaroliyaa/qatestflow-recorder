@@ -241,31 +241,6 @@ export function observerProgram(): void {
     highlightBox = null
   }
 
-  // Day 21 (trust UX): briefly flash a GREEN outline over an element the instant
-  // it's recorded, so the user SEES what got captured in real time. Purely
-  // cosmetic — a fixed, pointer-events:none overlay tagged data-qaflow-ui so our
-  // own listeners ignore it; it fades and removes itself. Best-effort.
-  function flashRecorded(el: Element): void {
-    try {
-      const r = el.getBoundingClientRect()
-      if (!r.width && !r.height) return
-      const box = document.createElement('div')
-      box.setAttribute('data-qaflow-ui', '')
-      box.style.cssText =
-        'position:fixed;z-index:2147483646;pointer-events:none;box-sizing:border-box;' +
-        'border:2px solid #3fb950;background:rgba(63,185,80,0.18);border-radius:2px;' +
-        'transition:opacity 400ms ease;opacity:1;' +
-        `left:${r.left - 2}px;top:${r.top - 2}px;width:${r.width + 4}px;height:${r.height + 4}px;`
-      document.documentElement.appendChild(box)
-      requestAnimationFrame(() => {
-        box.style.opacity = '0'
-      })
-      setTimeout(() => box.remove(), 500)
-    } catch {
-      // flash is best-effort — never let it affect capture
-    }
-  }
-
   // Arming hooks main calls via executeJavaScript when the user toggles
   // record / pick AFTER this frame was already injected.
   g.__qaflow = {
@@ -800,7 +775,6 @@ export function observerProgram(): void {
         // hover detection is best-effort
       }
       postToHost('recorder:event', { type: 'click', facts: collectFacts(el), frame: FRAME })
-      flashRecorded(el)
     },
     true
   )
@@ -821,7 +795,6 @@ export function observerProgram(): void {
         value: (chosen && chosen.text.trim()) || select.value,
         frame: FRAME
       })
-      flashRecorded(select)
       return
     }
 
@@ -845,7 +818,6 @@ export function observerProgram(): void {
       secret: field.type === 'password',
       frame: FRAME
     })
-    flashRecorded(field)
   }
   document.addEventListener('change', onChange, true)
 
