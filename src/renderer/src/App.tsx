@@ -171,6 +171,10 @@ function App(): React.JSX.Element {
   // (null = append). `blockFrom`/`blockTo` are the 1-based range to save.
   const [blocks, setBlocks] = useState<BlockSummary[]>([])
   const [blocksPanelOpen, setBlocksPanelOpen] = useState(false)
+  // Which block's ✕ delete is "armed" — deleting a block is destructive and had
+  // no confirm, so the first click arms it ("Sure?") and a second click within a
+  // few seconds actually deletes. Auto-disarms so a stray arm never lingers.
+  const [pendingDeleteBlock, setPendingDeleteBlock] = useState<string | null>(null)
   const [blockNameInput, setBlockNameInput] = useState('')
   const [blockInsertAt, setBlockInsertAt] = useState<number | null>(null)
   const [blockFrom, setBlockFrom] = useState(1)
@@ -181,6 +185,10 @@ function App(): React.JSX.Element {
   // a block's steps are loaded into the editor to update the block itself.
   const [blockCache, setBlockCache] = useState<Record<string, RecorderStep[]>>({})
   const [editingBlockRef, setEditingBlockRef] = useState<string | null>(null)
+  // The user's OWN test steps, stashed while they detour into editing a block.
+  // Editing a block loads its steps into the editor; this holds their recording
+  // so it's restored (never discarded) when the block edit finishes or cancels.
+  const [stashedSteps, setStashedSteps] = useState<RecorderStep[] | null>(null)
   // Replace each linked `block` step with the block's CACHED steps (a disabled
   // block expands to nothing). Identity for a test with no block steps, so normal
   // tests are unaffected. Used for display/data-columns (run uses expandForRun).
@@ -1557,6 +1565,8 @@ function App(): React.JSX.Element {
     setBlockTo(steps.length)
     setBlockNameInput('')
     setInsertMenuIndex(null)
+    setEditingBlockRef(null) // opening to insert is not an edit detour
+    setStashedSteps(null)
     setBlocksPanelOpen(true)
     refreshBlocks()
   }
@@ -1616,8 +1626,27 @@ function App(): React.JSX.Element {
     await window.api.blocks.save({ name, steps: flat })
     setBlockCache({}) // linked tests re-read the block on next render/run
     setBlockNameInput('')
+    const wasEditing = editingBlockRef !== null
     setEditingBlockRef(null)
     await refreshBlocks()
+    // If this was an EDIT detour, bring the user's own test back and close the
+    // panel — updating a block must never leave their recording behind.
+    if (wasEditing && stashedSteps !== null) {
+      editSteps(stashedSteps)
+      setStashedSteps(null)
+      setBlocksPanelOpen(false)
+    }
+  }
+  // Close the blocks panel, restoring the user's stashed test if they were mid
+  // block-edit — so cancelling a block edit is as safe as finishing one.
+  const closeBlocksPanel = (): void => {
+    if (stashedSteps !== null) {
+      editSteps(stashedSteps)
+      setStashedSteps(null)
+    }
+    setEditingBlockRef(null)
+    setBlockNameInput('')
+    setBlocksPanelOpen(false)
   }
   // Insert a saved block as a LIVE reference (one `block` step). Editing the
   // block later updates this test automatically. `⧉ Copy` (below) inlines a
@@ -1626,6 +1655,7 @@ function App(): React.JSX.Element {
     const at = blockInsertAt ?? steps.length
     const ref: RecorderStep = { type: 'block', blockRef: block.fileName, label: block.name }
     editSteps([...steps.slice(0, at), ref, ...steps.slice(at)])
+    setStashedSteps(null) // inserting is a deliberate edit — drop any edit-detour stash
     setBlocksPanelOpen(false)
   }
   // Insert a COPY of the block's steps (copy-in snapshot — no live link).
@@ -1638,21 +1668,19 @@ function App(): React.JSX.Element {
       ...(block.steps as RecorderStep[]),
       ...steps.slice(at)
     ])
+    setStashedSteps(null) // inserting is a deliberate edit — drop any edit-detour stash
     setBlocksPanelOpen(false)
   }
   // Edit a block: load its steps into the editor and open the panel primed to
   // SAVE back to it (same name overwrites). Re-saving updates every test that
   // links the block — "fix once, updates everywhere."
   const handleEditBlock = async (block: BlockSummary): Promise<void> => {
-    if (
-      steps.length > 0 &&
-      !window.confirm(
-        `Load "${block.name}" into the editor to edit it? This replaces the current steps.`
-      )
-    )
-      return
     const b = await window.api.blocks.load(block.fileName)
     if (!b) return
+    // Stash the user's current test so this edit is a NON-destructive detour —
+    // it's restored when they finish or cancel. Don't overwrite an existing
+    // stash if they're already mid-edit of another block.
+    if (editingBlockRef === null) setStashedSteps(steps)
     editSteps(b.steps as RecorderStep[])
     setEditingBlockRef(block.fileName)
     setBlockNameInput(block.name)
@@ -1663,9 +1691,22 @@ function App(): React.JSX.Element {
     refreshBlocks()
   }
   const handleDeleteBlock = async (fileName: string): Promise<void> => {
+    setPendingDeleteBlock(null)
     await window.api.blocks.delete(fileName)
     setBlockCache({})
     await refreshBlocks()
+  }
+  // First ✕ click arms the delete; a second click within 3s confirms it. The
+  // timeout auto-disarms so a forgotten arm can't delete a block much later.
+  const armOrDeleteBlock = (fileName: string): void => {
+    if (pendingDeleteBlock === fileName) {
+      handleDeleteBlock(fileName)
+      return
+    }
+    setPendingDeleteBlock(fileName)
+    setTimeout(() => {
+      setPendingDeleteBlock((cur) => (cur === fileName ? null : cur))
+    }, 3000)
   }
   // Load any linked block's steps into the cache (for display + data columns).
   // Runs when the step list or cache changes; the "missing" guard stops it after
@@ -2879,6 +2920,12 @@ function App(): React.JSX.Element {
               <div className="block-section-label">
                 Insert a block {blockInsertAt !== null ? `at step ${blockInsertAt + 1}` : 'at the end'}
               </div>
+              {blocks.length > 0 && (
+                <div className="block-hint">
+                  🔗 linked — stays in sync when you edit the block · ⧉ copy — an
+                  independent snapshot you can edit here
+                </div>
+              )}
               {blocks.length === 0 ? (
                 <div className="block-empty">
                   No saved blocks yet — save some steps below to reuse them across tests.
@@ -2913,12 +2960,18 @@ function App(): React.JSX.Element {
                       </button>
                       <button
                         type="button"
-                        className="block-del"
-                        onClick={() => handleDeleteBlock(b.fileName)}
-                        title={`Delete block "${b.name}"`}
+                        className={`block-del${
+                          pendingDeleteBlock === b.fileName ? ' confirming' : ''
+                        }`}
+                        onClick={() => armOrDeleteBlock(b.fileName)}
+                        title={
+                          pendingDeleteBlock === b.fileName
+                            ? `Click again to permanently delete "${b.name}"`
+                            : `Delete block "${b.name}"`
+                        }
                         aria-label={`Delete block ${b.name}`}
                       >
-                        ✕
+                        {pendingDeleteBlock === b.fileName ? 'Sure?' : '✕'}
                       </button>
                     </li>
                   ))}
@@ -2934,7 +2987,7 @@ function App(): React.JSX.Element {
                 onChange={(e) => setBlockNameInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleSaveBlock()
-                  else if (e.key === 'Escape') setBlocksPanelOpen(false)
+                  else if (e.key === 'Escape') closeBlocksPanel()
                 }}
                 placeholder="block name (e.g. Login)…"
                 spellCheck={false}
@@ -2959,7 +3012,7 @@ function App(): React.JSX.Element {
                 <span className="block-hint">of {steps.length}</span>
               </div>
               <div className="assert-actions">
-                <button className="modal-btn" onClick={() => setBlocksPanelOpen(false)}>
+                <button className="modal-btn" onClick={closeBlocksPanel}>
                   Close
                 </button>
                 <button

@@ -2184,6 +2184,13 @@ body {
   color: #8b93a7;
   font-style: italic;
 }
+/* One-line reminder of the 🔗 linked vs ⧉ copy trade-off, at the point of choosing. */
+.block-hint {
+  margin: 0 0 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #7d8595;
+}
 .block-list {
   list-style: none;
   margin: 0;
@@ -2228,6 +2235,14 @@ body {
 .block-del:hover {
   color: #f85149;
   border-color: #5c2a2a;
+}
+/* Armed delete: first ✕ click shows "Sure?" — a second click confirms.
+   Soft muted red so it reads as a gentle warning, not an alarm. */
+.block-del.confirming {
+  color: #e6a5a0;
+  background: #3a2526;
+  border-color: #5c2a2a;
+  font-weight: 500;
 }
 .block-mini:hover {
   color: #e6edf3;
