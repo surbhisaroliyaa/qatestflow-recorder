@@ -628,6 +628,11 @@ export function observerProgram(): void {
     ) as Element[]
     let best: Element | null = null
     let bestScore = 0
+    // How many DISTINCT visible elements tie at the current top score. When this
+    // is >1 the label is ambiguous (e.g. six "Add to cart" buttons) — healing to
+    // "the best match" would just grab the first in DOM order, which may be the
+    // wrong element. The host uses this to decline a confident one-click fix.
+    let topCount = 0
     for (const el of nodes) {
       const r = el.getBoundingClientRect()
       if (!r.width && !r.height) continue
@@ -648,12 +653,18 @@ export function observerProgram(): void {
       if (score > bestScore) {
         bestScore = score
         best = el
+        topCount = 1
+      } else if (score === bestScore) {
+        topCount++
       }
     }
     if (!best || bestScore < 60) return null
     const input = best instanceof HTMLInputElement ? best : null
     return {
       facts: collectFacts(best),
+      // >1 means several equally-good matches — the caller should warn, not
+      // silently heal to this one.
+      matchCount: topCount,
       text: (best.textContent || '').trim().slice(0, 100) || undefined,
       inputValue: input ? input.value : undefined,
       disabled: 'disabled' in best ? !!(best as { disabled?: boolean }).disabled : undefined,

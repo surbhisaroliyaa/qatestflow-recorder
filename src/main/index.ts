@@ -1555,6 +1555,7 @@ function createWindow(): void {
             true
           )) as {
             facts: ElementFacts
+            matchCount?: number
             text?: string
             inputValue?: string
             disabled?: boolean
@@ -1573,6 +1574,9 @@ function createWindow(): void {
             inputValue: found.inputValue,
             disabled: found.disabled,
             checked: found.checked,
+            // >1 equally-good match → the label is ambiguous; the panel declines
+            // a one-click heal and asks for a manual pick instead.
+            ambiguousCount: found.matchCount ?? 1,
             unreliable: false
           }
         } catch {

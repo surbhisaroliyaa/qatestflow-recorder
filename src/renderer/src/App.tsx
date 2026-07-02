@@ -2783,22 +2783,37 @@ function App(): React.JSX.Element {
               ) : (
                 <>
                   {/* Day 18 (self-heal): the app auto-found a likely match for
-                      the broken step by its label — one click to accept it. */}
-                  {recovery.suggestion && (
-                    <div className="self-heal">
-                      <span className="self-heal-text">
-                        🔧 Self-heal found <strong>“{recovery.suggestion.label}”</strong> — use it
-                        to fix this step?
-                      </span>
-                      <button
-                        type="button"
-                        className="modal-btn primary self-heal-accept"
-                        onClick={() => applyHeal(recovery.suggestion!, recovery.index)}
-                      >
-                        ✓ Accept fix
-                      </button>
-                    </div>
-                  )}
+                      the broken step by its label — one click to accept it.
+                      Day 21 (ambiguity guard): if that label matched SEVERAL
+                      equally-good elements (e.g. many "Add to cart" buttons),
+                      "the best match" is just the first in DOM order and may be
+                      the wrong one — so we DECLINE the one-click fix and ask for
+                      a manual pick instead of silently healing to a guess. */}
+                  {recovery.suggestion &&
+                    ((recovery.suggestion.ambiguousCount ?? 1) > 1 ? (
+                      <div className="self-heal self-heal-ambiguous">
+                        <span className="self-heal-text">
+                          🔧 Self-heal found <strong>{recovery.suggestion.ambiguousCount}</strong>{' '}
+                          elements labelled <strong>“{recovery.suggestion.label}”</strong> — too
+                          ambiguous to fix automatically. Use <strong>🎯 Pick manually</strong> below
+                          to choose the right one.
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="self-heal">
+                        <span className="self-heal-text">
+                          🔧 Self-heal found <strong>“{recovery.suggestion.label}”</strong> — use it
+                          to fix this step?
+                        </span>
+                        <button
+                          type="button"
+                          className="modal-btn primary self-heal-accept"
+                          onClick={() => applyHeal(recovery.suggestion!, recovery.index)}
+                        >
+                          ✓ Accept fix
+                        </button>
+                      </div>
+                    ))}
                   <div className="assert-actions recovery-actions">
                     {recovery.screenshotPath && (
                       <button

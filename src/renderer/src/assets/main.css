@@ -850,6 +850,15 @@ body {
 .self-heal-accept {
   flex: none;
 }
+/* Ambiguous heal: the label matched several elements, so we warn instead of
+   offering a fix. Amber caution rather than the green "fixable" look. */
+.self-heal-ambiguous {
+  background: #2b2413;
+  border-color: #6a5a2f;
+}
+.self-heal-ambiguous .self-heal-text {
+  color: #e3d5a5;
+}
 
 .library-item {
   display: flex;

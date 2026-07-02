@@ -414,6 +414,11 @@ declare global {
     // Day 15: set when the picked element is inside an <iframe>, so the
     // assertion step built from it replays in (and exports for) that frame.
     frame?: FrameRef
+    // Day 21 (self-heal ambiguity guard): how many equally-good elements the
+    // broken step's label matched during a heal search. >1 means the label is
+    // ambiguous (e.g. many "Add to cart" buttons) — the panel warns and asks
+    // for a manual pick instead of offering a one-click "Accept fix".
+    ambiguousCount?: number
   }
 
   // === iframes (Day 15) ===
