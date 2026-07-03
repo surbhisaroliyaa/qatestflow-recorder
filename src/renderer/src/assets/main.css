@@ -1655,6 +1655,37 @@ body {
   border-color: #3a3a42;
 }
 
+/* === F6: dead/weak assertion warnings === */
+.weak-check {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  cursor: help;
+  border: 1px solid transparent;
+}
+/* Dead = always passes = useless: the louder red. Weak = amber. */
+.weak-check.dead {
+  background: #4a1f1f;
+  color: #ff8a80;
+  border-color: #7a2f2f;
+}
+.weak-check.weak {
+  background: #3a3216;
+  color: #e6c65a;
+  border-color: #5f5420;
+}
+.weak-summary {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #e6c65a;
+  cursor: help;
+}
+
 /* === F5: trust-score grade badge === */
 .trust-badge {
   flex: none;

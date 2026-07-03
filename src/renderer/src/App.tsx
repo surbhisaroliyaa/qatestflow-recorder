@@ -4,6 +4,7 @@ import { generateBugReport, bugReportFileName } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
 import { classifyRuns } from './flaky'
 import { trustScore } from './trust'
+import { findWeakAssertions } from './deadAssertions'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
@@ -653,6 +654,10 @@ function App(): React.JSX.Element {
   // Day 20: the overview popup auto-appears when a data run finishes; the
   // detailed tabs live inline in the panel (no overlay needed for those).
   const dataPopupOpen = dataRun !== null && !dataRun.running && !dataPopupDismissed
+  // F6: statically flag dead/weak assertions in the current test, keyed by
+  // step index for a quick per-row lookup in the step list.
+  const weakByIndex = new Map(findWeakAssertions(steps).map((w) => [w.index, w]))
+
   // F13: the a11y panel is open while a scan runs (spinner) or a result is shown.
   const a11yPanelOpen = a11yScanning || a11yScan !== null
   // F14: same for the performance panel.
@@ -2658,6 +2663,15 @@ function App(): React.JSX.Element {
             <span className="steps-title">
               Steps
               {steps.length > 0 && <span className="steps-count">{steps.length}</span>}
+              {/* F6: how many assertions verify little/nothing — a nudge to strengthen them. */}
+              {weakByIndex.size > 0 && (
+                <span
+                  className="weak-summary"
+                  title="Some checks verify little or nothing (dead/weak assertions). Each is marked in the list below — hover it for why + how to fix."
+                >
+                  ⚠ {weakByIndex.size} weak check{weakByIndex.size === 1 ? '' : 's'}
+                </span>
+              )}
             </span>
             {/* Empty test: still offer Blocks, so you can START a test by
                 inserting a saved block (e.g. "Add to Cart") as the first steps. */}
@@ -3642,6 +3656,16 @@ function App(): React.JSX.Element {
                         />
                       ) : (
                         <span className="step-text">{stepText(step)}</span>
+                      )}
+                      {/* F6: dead/weak assertion warning — a check that verifies
+                          little or nothing, with a fix hint on hover. */}
+                      {weakByIndex.has(i) && (
+                        <span
+                          className={`weak-check ${weakByIndex.get(i)!.severity}`}
+                          title={`${weakByIndex.get(i)!.severity === 'dead' ? 'Dead check (always passes)' : 'Weak check'} — ${weakByIndex.get(i)!.reason}`}
+                        >
+                          ⚠ {weakByIndex.get(i)!.severity === 'dead' ? 'dead check' : 'weak check'}
+                        </span>
                       )}
                       {step.type === 'block' && (
                         <span
