@@ -1689,6 +1689,13 @@ function App(): React.JSX.Element {
     editSteps(steps.filter((_, idx) => idx !== i))
   }
 
+  // Duplicate a step: insert a copy right after it. Drops the transient
+  // recording `id` so the copy is a fresh, independent step.
+  const handleDuplicateStep = (i: number): void => {
+    const { id: _id, ...copy } = steps[i]
+    editSteps([...steps.slice(0, i + 1), copy, ...steps.slice(i + 1)])
+  }
+
   // Turn a step off/on. A disabled step stays in the list (so you don't lose it)
   // but is skipped by both replay and export.
   const handleToggleDisabled = (i: number): void => {
@@ -3898,6 +3905,15 @@ function App(): React.JSX.Element {
                           aria-label="Insert below"
                         >
                           ＋
+                        </button>
+                        {/* Duplicate: drop a copy of this step right below it. */}
+                        <button
+                          className="step-action"
+                          onClick={() => handleDuplicateStep(i)}
+                          title="Duplicate this step"
+                          aria-label="Duplicate step"
+                        >
+                          ⎘
                         </button>
                         <button
                           className="step-action danger"
