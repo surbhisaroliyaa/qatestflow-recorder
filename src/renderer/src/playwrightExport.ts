@@ -28,6 +28,15 @@ function a11yBlockingImpacts(value?: string): string[] {
 // WCAG tags the exported AxeBuilder runs — mirrors the in-app scan.
 const A11Y_WCAG_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']
 
+// F14 (perf gate): budget → the Core Web Vitals ceilings the exported test
+// asserts. 'good' is strict (good thresholds); anything else = the default,
+// fail only when a metric is 'poor' (assert against the poor floors).
+function perfBudget(value?: string): { label: string; lcp: number; cls: number } {
+  return value === 'good'
+    ? { label: 'good', lcp: 2500, cls: 0.1 }
+    : { label: 'needs-improvement', lcp: 4000, cls: 0.25 }
+}
+
 // A valid JS identifier? Decides `data.col` vs `data["col"]` (and the same for
 // process.env access).
 function isIdent(name: string): boolean {
@@ -153,6 +162,8 @@ export function stepText(step: RecorderStep): string {
       return `Visual snapshot${step.value ? ` (≤ ${step.value}% diff)` : ''}`
     case 'a11y':
       return `Check accessibility — no ${a11yThreshold(step.value)}+ violations`
+    case 'perf':
+      return `Check performance — Core Web Vitals within "${perfBudget(step.value).label}"`
     case 'click':
       return `Click ${step.label}`
     case 'type':
@@ -293,6 +304,23 @@ function actionFor(
       `    'accessibility (${a11yThreshold(step.value)}+) violations'\n` +
       `  ).toEqual([])`
     )
+  }
+
+  if (step.type === 'perf') {
+    // F14: measure Core Web Vitals in the page (built-in Performance API, no
+    // extra library) and assert LCP + CLS within budget. A bare block scopes
+    // `vitals`, so repeated perf steps never collide.
+    const b = perfBudget(step.value)
+    return `{
+    const vitals = await ${pageVar}.evaluate(() => new Promise((resolve) => {
+      let lcp = 0, cls = 0;
+      try { new PerformanceObserver((l) => { const e = l.getEntries(); lcp = e[e.length - 1].startTime; }).observe({ type: 'largest-contentful-paint', buffered: true }); } catch {}
+      try { new PerformanceObserver((l) => { for (const e of l.getEntries()) if (!e.hadRecentInput) cls += e.value; }).observe({ type: 'layout-shift', buffered: true }); } catch {}
+      setTimeout(() => resolve({ lcp, cls }), 600);
+    }));
+    expect(vitals.lcp, \`LCP \${Math.round(vitals.lcp)}ms\`).toBeLessThanOrEqual(${b.lcp});
+    expect(vitals.cls, \`CLS \${vitals.cls.toFixed(3)}\`).toBeLessThanOrEqual(${b.cls});
+  }`
   }
 
   if (step.type === 'wait') {
@@ -490,10 +518,12 @@ export function generatePlaywrightTest(
   // fs only when a download check needs a file-size assertion.
   const hasDownload = enabled.some((step) => step.type === 'download')
   const hasA11y = enabled.some((step) => step.type === 'a11y')
+  const hasPerf = enabled.some((step) => step.type === 'perf')
   const hasAssert =
     enabled.some((step) => step.type === 'assert' || step.type === 'snapshot') ||
     hasDownload ||
-    hasA11y
+    hasA11y ||
+    hasPerf
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const header =
     (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
@@ -680,9 +710,10 @@ export function generatePageObjectTest(
       if (line) specBody.push(`  ${line}`)
       continue
     }
-    // F13: a page-level accessibility check — like an assert, it lives in the
-    // spec (where `expect` + AxeBuilder are imported), not a page-object method.
-    if (step.type === 'a11y') {
+    // F13/F14: a page-level accessibility or performance check — like an
+    // assert, it lives in the spec (where `expect`/AxeBuilder are imported),
+    // not a page-object method.
+    if (step.type === 'a11y' || step.type === 'perf') {
       flush()
       const line = actionFor(step, baseURL, 'app.page', undefined, columns)
       if (line) specBody.push(`  ${line}`)
@@ -745,7 +776,8 @@ export function generatePageObjectTest(
 
   // === Build the spec file ===
   const hasA11y = enabled.some((s) => s.type === 'a11y')
-  const hasAssert = enabled.some((s) => s.type === 'assert') || hasA11y
+  const hasPerf = enabled.some((s) => s.type === 'perf')
+  const hasAssert = enabled.some((s) => s.type === 'assert') || hasA11y || hasPerf
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const useProps: string[] = []
   if (baseURL) useProps.push(`baseURL: ${quote(baseURL)}`)

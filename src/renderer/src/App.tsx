@@ -79,6 +79,18 @@ const A11Y_IMPACT_ORDER: Record<string, number> = {
 }
 const a11yImpactRank = (impact: string): number => A11Y_IMPACT_ORDER[impact] ?? 4
 
+// F14: a one-line "what does this measure" for each perf metric, shown under
+// its name in the panel so the numbers explain themselves. Lower is better for
+// all of them.
+const PERF_METRIC_HELP: Record<string, string> = {
+  lcp: 'How fast the main content appears',
+  cls: 'How much the layout jumps around while loading',
+  fcp: 'When the first pixels paint (context — no gate)',
+  ttfb: 'How fast the server sends the first byte (context — no gate)',
+  load: 'Everything finished loading (info only)',
+  dcl: 'HTML parsed and ready (info only)'
+}
+
 // These kinds compare against an expected value the user can edit.
 const assertNeedsValue = (kind: AssertKind): boolean =>
   kind === 'text-equals' ||
@@ -244,6 +256,11 @@ function App(): React.JSX.Element {
   // F13: the budget chosen when adding the scan as a reusable test step — the
   // least severe impact that still fails the check (default critical+serious).
   const [a11yAddLevel, setA11yAddLevel] = useState('serious')
+  // F14 (performance): the last Core Web Vitals measurement (null = panel
+  // closed), whether a measure is in flight, and the budget for the added step.
+  const [perfResult, setPerfResult] = useState<PerfResult | null>(null)
+  const [perfMeasuring, setPerfMeasuring] = useState(false)
+  const [perfAddLevel, setPerfAddLevel] = useState('needs-improvement')
   // Day 11.5 — suite runner: which section is running, per-test outcomes so
   // far, and whether the run has finished (summary shows then).
   interface SuiteRunEntry {
@@ -621,6 +638,8 @@ function App(): React.JSX.Element {
   const dataPopupOpen = dataRun !== null && !dataRun.running && !dataPopupDismissed
   // F13: the a11y panel is open while a scan runs (spinner) or a result is shown.
   const a11yPanelOpen = a11yScanning || a11yScan !== null
+  // F14: same for the performance panel.
+  const perfPanelOpen = perfMeasuring || perfResult !== null
   useEffect(() => {
     window.api.browser.setOverlay(
       exportCode !== null ||
@@ -628,9 +647,18 @@ function App(): React.JSX.Element {
         dataPopupOpen ||
         analysisOpen ||
         traceView !== null ||
-        a11yPanelOpen
+        a11yPanelOpen ||
+        perfPanelOpen
     )
-  }, [exportCode, suiteSummaryOpen, dataPopupOpen, analysisOpen, traceView, a11yPanelOpen])
+  }, [
+    exportCode,
+    suiteSummaryOpen,
+    dataPopupOpen,
+    analysisOpen,
+    traceView,
+    a11yPanelOpen,
+    perfPanelOpen
+  ])
 
   // Day 18: remember the trace policy across sessions.
   useEffect(() => {
@@ -987,6 +1015,34 @@ function App(): React.JSX.Element {
   const handleAddA11yStep = (): void => {
     editSteps([...steps, { type: 'a11y', label: 'Accessibility check', value: a11yAddLevel }])
     setA11yScan(null)
+  }
+
+  // F14: measure Core Web Vitals on the current page. Opens the panel right
+  // away (spinner), then fills it. Never throws — a page it can't measure comes
+  // back as a result with `error` set.
+  const handleMeasurePerf = async (): Promise<void> => {
+    setPerfResult(null)
+    setPerfMeasuring(true)
+    try {
+      setPerfResult(await window.api.perf.measure())
+    } catch {
+      setPerfResult({
+        url: '',
+        title: '',
+        at: new Date().toISOString(),
+        metrics: [],
+        error: 'The measurement failed to run. Please try again.'
+      })
+    } finally {
+      setPerfMeasuring(false)
+    }
+  }
+
+  // F14: add the measurement as a permanent test step — replay FAILS if a Core
+  // Web Vital regresses past the chosen budget. Appended to the end; editable.
+  const handleAddPerfStep = (): void => {
+    editSteps([...steps, { type: 'perf', label: 'Performance check', value: perfAddLevel }])
+    setPerfResult(null)
   }
   const saveTraceRecording = async (): Promise<void> => {
     if (!traceView) return
@@ -1572,6 +1628,8 @@ function App(): React.JSX.Element {
     if (step.type === 'snapshot') return step.value ?? '1'
     // F13: an a11y check's budget (critical|serious|moderate|minor) is editable.
     if (step.type === 'a11y') return step.value ?? 'serious'
+    // F14: a perf check's budget (good|needs-improvement) is editable.
+    if (step.type === 'perf') return step.value ?? 'needs-improvement'
     if (step.type === 'assert' && step.assertKind && assertNeedsValue(step.assertKind)) {
       return step.value ?? ''
     }
@@ -2376,6 +2434,15 @@ function App(): React.JSX.Element {
           title="Accessibility scan: check this page for WCAG A/AA violations (missing labels, contrast, ARIA, keyboard traps)"
         >
           ♿ {a11yScanning ? 'Scanning…' : 'A11y'}
+        </button>
+        {/* F14: measure the current page's Core Web Vitals (LCP, CLS, …). */}
+        <button
+          className="perf-btn"
+          onClick={handleMeasurePerf}
+          disabled={isReplaying || isPicking || perfMeasuring}
+          title="Performance: measure this page's Core Web Vitals (load speed, layout stability)"
+        >
+          ⚡ {perfMeasuring ? 'Measuring…' : 'Perf'}
         </button>
         <button
           className={`record-btn${isRecording ? ' recording' : ''}`}
@@ -3947,6 +4014,29 @@ function App(): React.JSX.Element {
                         </details>
                       ))
                   )}
+                  {/* F13: sticky note — what the severities mean + what to edit. */}
+                  <div className="help-note">
+                    <span className="help-note-title">
+                      📌 What the severities mean &amp; what to edit
+                    </span>
+                    <ul>
+                      <li>
+                        <strong>critical</strong> blocks a disabled user entirely ·{' '}
+                        <strong>serious</strong> major barrier · <strong>moderate</strong>{' '}
+                        noticeable · <strong>minor</strong> cosmetic.
+                      </li>
+                      <li>
+                        Each is <strong>axe-core&apos;s</strong> own rating of how much the issue
+                        blocks someone using a screen reader / keyboard.
+                      </li>
+                      <li>
+                        <strong>To edit the gate</strong> (dropdown below, or the ✎ on the step):
+                        it&apos;s the <em>least severe</em> issue that still fails — e.g.{' '}
+                        <em>&ldquo;serious + critical&rdquo;</em> ignores moderate/minor,{' '}
+                        <em>&ldquo;any violation&rdquo;</em> fails on everything.
+                      </li>
+                    </ul>
+                  </div>
                 </div>
               </>
             ) : null}
@@ -3991,6 +4081,143 @@ function App(): React.JSX.Element {
                 disabled={a11yScanning}
               >
                 ↻ Re-scan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === F14: performance panel — Core Web Vitals for the current page,
+           each graded good / needs-improvement / poor, with an option to bank
+           it as a "Performance check" gate step. === */}
+      {perfPanelOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!perfMeasuring) setPerfResult(null)
+          }}
+        >
+          <div className="a11y-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">⚡ Performance — Core Web Vitals</span>
+              <button
+                className="modal-close"
+                onClick={() => setPerfResult(null)}
+                disabled={perfMeasuring}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {perfMeasuring ? (
+              <div className="a11y-body a11y-loading">
+                <span className="a11y-spinner" />
+                <p>Measuring load speed and layout stability on this page…</p>
+              </div>
+            ) : perfResult?.error ? (
+              <div className="a11y-body">
+                <p className="a11y-error">{perfResult.error}</p>
+              </div>
+            ) : perfResult ? (
+              <>
+                <div className="a11y-summary">
+                  <span className="a11y-summary-url" title={perfResult.url}>
+                    {perfResult.title || perfResult.url || 'this page'}
+                  </span>
+                  <span className="a11y-summary-stats">measured from this page load</span>
+                </div>
+                <div className="a11y-body">
+                  <div className="perf-grid">
+                    {perfResult.metrics.map((m) => (
+                      <div className={`perf-metric${m.core ? ' core' : ''}`} key={m.key}>
+                        <span className="perf-metric-main">
+                          <span className="perf-metric-label">
+                            {m.label}
+                            {m.core && <span className="perf-core-tag">core</span>}
+                          </span>
+                          {PERF_METRIC_HELP[m.key] && (
+                            <span className="perf-metric-desc">{PERF_METRIC_HELP[m.key]}</span>
+                          )}
+                        </span>
+                        <span className="perf-metric-value">
+                          {m.value == null ? '—' : `${m.value.toLocaleString()}${m.unit}`}
+                        </span>
+                        {m.rating ? (
+                          <span className={`perf-rating ${m.rating}`}>
+                            {m.rating === 'needs-improvement' ? 'needs work' : m.rating}
+                          </span>
+                        ) : (
+                          <span className="perf-rating info">info</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {/* F14: sticky note — what the grades mean + what to edit. */}
+                  <div className="help-note">
+                    <span className="help-note-title">📌 How to read this &amp; what to edit</span>
+                    <ul>
+                      <li>
+                        <strong>CORE</strong> (LCP, CLS) = Google&apos;s Core Web Vitals — these are
+                        the <strong>only</strong> two that pass/fail the test. The rest are context.
+                      </li>
+                      <li>
+                        <strong>Grades</strong> use Google&apos;s official limits — LCP: good ≤2.5s,
+                        poor &gt;4s · CLS: good ≤0.1, poor &gt;0.25.
+                      </li>
+                      <li>
+                        <strong>To edit the gate</strong> (dropdown below, or the ✎ on the step):{' '}
+                        <em>&ldquo;a vital is poor&rdquo;</em> = lenient ·{' '}
+                        <em>&ldquo;a vital is not good&rdquo;</em> = strict.
+                      </li>
+                      <li>
+                        <strong>INFO</strong> = shown for context, no official pass/fail line, so
+                        not graded.
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </>
+            ) : null}
+
+            <div className="modal-footer">
+              {perfResult && !perfResult.error && (
+                <span className="a11y-add">
+                  <label htmlFor="perf-level" className="a11y-add-label">
+                    Fail replay when
+                  </label>
+                  <select
+                    id="perf-level"
+                    className="a11y-level-select"
+                    value={perfAddLevel}
+                    onChange={(e) => setPerfAddLevel(e.target.value)}
+                    title="How strict the performance gate should be when added as a test step"
+                  >
+                    <option value="needs-improvement">a vital is poor</option>
+                    <option value="good">a vital is not good</option>
+                  </select>
+                  <button
+                    className="modal-btn"
+                    onClick={handleAddPerfStep}
+                    title="Add this as a test step — replay fails if a Core Web Vital regresses"
+                  >
+                    ➕ Add as test step
+                  </button>
+                </span>
+              )}
+              <button
+                className="modal-btn"
+                onClick={() => setPerfResult(null)}
+                disabled={perfMeasuring}
+              >
+                Close
+              </button>
+              <button
+                className="modal-btn primary"
+                onClick={handleMeasurePerf}
+                disabled={perfMeasuring}
+              >
+                ↻ Re-measure
               </button>
             </div>
           </div>

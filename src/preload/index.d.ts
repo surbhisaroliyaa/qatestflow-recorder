@@ -98,6 +98,13 @@ interface A11yAPI {
   openHelp: (url: string) => Promise<void>
 }
 
+// === Performance / Core Web Vitals (F14) ===
+interface PerfAPI {
+  // Measure the active tab's Core Web Vitals. Never rejects — a page it can't
+  // measure comes back as a result with `error` set.
+  measure: () => Promise<PerfResult>
+}
+
 // === Visual regression (Day 19) ===
 interface VisualAPI {
   // Adopt a current capture as the new baseline (a page legitimately changed).
@@ -192,6 +199,7 @@ interface API {
   blocks: BlocksAPI
   visual: VisualAPI
   a11y: A11yAPI
+  perf: PerfAPI
 }
 
 declare global {
@@ -243,6 +251,25 @@ declare global {
     incompleteCount: number
     nodeCount: number // total elements flagged (may exceed the nodes we keep)
     error?: string // set when the page couldn't be scanned
+  }
+
+  // === Performance / Core Web Vitals (F14) ===
+  // MIRROR: same shapes as PerfMetric / PerfResult in src/main/perf.ts.
+  type PerfRating = 'good' | 'needs-improvement' | 'poor'
+  interface PerfMetric {
+    key: string
+    label: string
+    value: number | null
+    unit: string
+    rating: PerfRating | null // null = informational (no CWV threshold)
+    core: boolean // true = a Core Web Vital (LCP/CLS) — drives the gate
+  }
+  interface PerfResult {
+    url: string
+    title: string
+    at: string
+    metrics: PerfMetric[]
+    error?: string
   }
 
   // === Run trace (Day 18) ===
@@ -501,6 +528,7 @@ declare global {
       | 'download'
       | 'snapshot'
       | 'a11y'
+      | 'perf'
       | 'block'
     label?: string
     // Pillar 4 (live-link blocks, v2): a 'block' step is a LIVE REFERENCE to a
@@ -514,7 +542,9 @@ declare global {
     // For dialog: the response — prompt's answer text, or 'accept'/'dismiss'
     // for a confirm (alert has none). For an `a11y` step (F13): the budget —
     // the least severe impact that still FAILS the check
-    // ('critical'|'serious'|'moderate'|'minor'; default 'serious').
+    // ('critical'|'serious'|'moderate'|'minor'; default 'serious'). For a
+    // `perf` step (F14): the budget — the worst acceptable Core Web Vitals
+    // rating ('good' = strict | 'needs-improvement' = default, fail on poor).
     value?: string
     key?: string // for `press` steps — the key pressed (e.g. 'Enter')
     // Day 16: which native dialog this step answers (alert/confirm/prompt). The

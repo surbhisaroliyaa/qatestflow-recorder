@@ -35,6 +35,13 @@ import { observerProgram } from './observerSource'
 import { saveBaseline, loadBaseline, isSafeBaselineId, diffImages } from './visual'
 import { scanAccessibility, a11yImpactRank, a11yThresholdLevel, type A11yScanResult } from './a11y'
 import {
+  measurePerformance,
+  PERF_RATING_RANK,
+  perfBudgetRank,
+  perfBudgetLabel,
+  type PerfResult
+} from './perf'
+import {
   saveTrace,
   loadTrace,
   readTraceAsset,
@@ -1543,7 +1550,8 @@ function createWindow(): void {
           step.type === 'dialog' ||
           step.type === 'download' ||
           step.type === 'upload' ||
-          step.type === 'a11y'
+          step.type === 'a11y' ||
+          step.type === 'perf'
         ) {
           return undefined
         }
@@ -2005,6 +2013,26 @@ function createWindow(): void {
                   (blocking.length > 4 ? '; …' : '')
               )
             }
+          } else if (step.type === 'perf') {
+            // F14: measure Core Web Vitals on the settled page and FAIL the
+            // step if a core metric (LCP/CLS) is worse than the budget. Like
+            // a11y, a page-level check — no element, no selector.
+            await waitForVisualStable(currentWC)
+            const perf = await measurePerformance(currentWC)
+            if (perf.error) {
+              throw new Error(`Performance check couldn't run — ${perf.error}`)
+            }
+            const budgetRank = perfBudgetRank(step.value)
+            const core = perf.metrics.filter((m) => m.core && m.rating)
+            const failing = core.filter((m) => PERF_RATING_RANK[m.rating!] > budgetRank)
+            if (failing.length) {
+              const detail = failing
+                .map((m) => `${m.key.toUpperCase()} ${m.value}${m.unit} (${m.rating})`)
+                .join('; ')
+              throw new Error(
+                `Performance: ${detail} — worse than budget "${perfBudgetLabel(step.value)}"`
+              )
+            }
           } else if (step.type === 'wait') {
             // An explicit pause — no element involved, just time (Day 9).
             const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
@@ -2448,6 +2476,25 @@ function createWindow(): void {
   // https deque/w3 help links — this is a doc opener, not a general launcher.
   ipcMain.handle('a11y:openHelp', (_event, url: string) => {
     if (typeof url === 'string' && /^https:\/\//.test(url)) shell.openExternal(url)
+  })
+
+  // === Performance / Core Web Vitals (F14) ============================
+  // Measure the ACTIVE tab's Core Web Vitals. Like a11y, a page we can't
+  // measure comes back as an `error` result, never a throw.
+  ipcMain.handle('perf:measure', async (): Promise<PerfResult> => {
+    try {
+      return await measurePerformance(activeWC())
+    } catch (err) {
+      return {
+        url: '',
+        title: '',
+        at: new Date().toISOString(),
+        metrics: [],
+        error:
+          'Could not measure this page. Open a real web page first, then try again.' +
+          (err instanceof Error && err.message ? ` (${err.message})` : '')
+      }
+    }
   })
 
   // Open a failure screenshot in the OS image viewer. Only paths inside the

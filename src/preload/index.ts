@@ -185,6 +185,12 @@ const api = {
     openHelp: (url: string): Promise<void> => ipcRenderer.invoke('a11y:openHelp', url)
   },
 
+  // === Performance / Core Web Vitals (F14) ===
+  // Measure the current page's Core Web Vitals. (Result shape in index.d.ts.)
+  perf: {
+    measure: (): Promise<unknown> => ipcRenderer.invoke('perf:measure')
+  },
+
   // === Visual regression (Day 19) ===
   visual: {
     updateBaseline: (baselineId: string, currentPath: string): Promise<boolean> =>
