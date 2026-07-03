@@ -1793,6 +1793,11 @@ function createWindow(): void {
       // carries — so we remember requestId → url as requests start.
       const requestUrls = new Map<string, string>()
       const trimUrl = (u: string): string => (u.length > 120 ? u.slice(0, 120) + '…' : u)
+      // F3 (smart waits): live count of in-flight network requests + the last
+      // time anything happened, so a `wait for network idle` step can wait until
+      // the page truly goes quiet instead of guessing a fixed sleep.
+      let inFlight = 0
+      let lastNetworkActivity = Date.now()
 
       // Day 13 noise tagging: pages talk to OTHER companies' servers too
       // (analytics, crash reporters) and those fail constantly on real sites.
@@ -1821,22 +1826,59 @@ function createWindow(): void {
       }
       const onCdpMessage = (_e: unknown, method: string, params: Record<string, unknown>): void => {
         if (method === 'Network.requestWillBeSent') {
+          inFlight++
+          lastNetworkActivity = Date.now()
           const req = params.request as { url?: string } | undefined
           if (typeof params.requestId === 'string' && req?.url)
             requestUrls.set(params.requestId, req.url)
         } else if (method === 'Network.responseReceived') {
+          lastNetworkActivity = Date.now()
           const res = params.response as { status?: number; url?: string } | undefined
           if (res?.status && res.status >= 400) {
             const url = res.url ?? ''
             addEvidence(networkErrors, `${relationTag(url)}HTTP ${res.status} on ${trimUrl(url)}`)
           }
+        } else if (method === 'Network.loadingFinished') {
+          if (inFlight > 0) inFlight--
+          lastNetworkActivity = Date.now()
         } else if (method === 'Network.loadingFailed') {
+          if (inFlight > 0) inFlight--
+          lastNetworkActivity = Date.now()
           // canceled / ERR_ABORTED = a request superseded by navigation —
           // normal browsing noise, not evidence (same call as loadUrlTolerantly).
           const errorText = String(params.errorText ?? '')
           if (params.canceled || !errorText || errorText.includes('ERR_ABORTED')) return
           const url = requestUrls.get(String(params.requestId)) ?? ''
           addEvidence(networkErrors, `${relationTag(url)}${errorText} on ${trimUrl(url)}`)
+        }
+      }
+      // F3: wait until the page has made no network requests for `idleMs`, or
+      // give up after `timeoutMs` (long-poll / websockets never idle — that's
+      // fine, we proceed). Best-effort: never throws.
+      const waitForNetworkIdle = async (idleMs = 500, timeoutMs = 15000): Promise<void> => {
+        const start = Date.now()
+        for (;;) {
+          if (inFlight <= 0 && Date.now() - lastNetworkActivity >= idleMs) return
+          if (Date.now() - start > timeoutMs) return
+          await wait(60)
+        }
+      }
+      // F3: wait until `text` appears anywhere on the current page. Throws if it
+      // never shows within the timeout — a text that never arrives is a real
+      // problem worth surfacing (an implicit "the content loaded" check).
+      const waitForText = async (text: string, timeoutMs = 15000): Promise<void> => {
+        if (!text) return
+        const needle = JSON.stringify(text)
+        const start = Date.now()
+        for (;;) {
+          const found = await currentWC
+            .executeJavaScript(`!!(document.body && document.body.innerText.includes(${needle}))`)
+            .catch(() => false)
+          if (found) return
+          if (Date.now() - start > timeoutMs) {
+            throw new Error(`Wait: text ${needle} never appeared (waited ${timeoutMs / 1000}s)`)
+          }
+          await wait(150)
         }
       }
       // Each tab a replay touches needs its OWN CDP debugger (hover / upload /
@@ -2282,9 +2324,17 @@ function createWindow(): void {
               )
             }
           } else if (step.type === 'wait') {
-            // An explicit pause — no element involved, just time (Day 9).
-            const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
-            await wait(seconds * 1000)
+            // F3 (smart waits): a fixed pause, OR a CONDITION — network idle /
+            // text appears — which replaces a guessy sleep with a precise wait.
+            const kind = (step as { waitKind?: string }).waitKind ?? 'time'
+            if (kind === 'network-idle') {
+              await waitForNetworkIdle()
+            } else if (kind === 'text') {
+              await waitForText(step.value ?? '')
+            } else {
+              const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
+              await wait(seconds * 1000)
+            }
           } else if (step.type === 'dialog') {
             // Day 16: a native dialog is answered by PRE-ARMING the page before
             // the step that triggers it (see armNextDialog below) — by the time

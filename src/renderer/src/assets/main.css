@@ -1655,6 +1655,44 @@ body {
   border-color: #3a3a42;
 }
 
+/* === F5: trust-score grade badge === */
+.trust-badge {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.trust-badge.grade-A {
+  background: #16351f;
+  color: #7ee0a0;
+  border-color: #2f5a3a;
+}
+.trust-badge.grade-B {
+  background: #1e3a2e;
+  color: #8fdcb0;
+  border-color: #315a48;
+}
+.trust-badge.grade-C {
+  background: #3a3616;
+  color: #e6d05a;
+  border-color: #5f5a20;
+}
+.trust-badge.grade-D {
+  background: #3a2916;
+  color: #f0b366;
+  border-color: #5f4520;
+}
+.trust-badge.grade-F {
+  background: #3a1414;
+  color: #ff8a80;
+  border-color: #642020;
+}
+
 /* Day 11.5: section tag in the test bar */
 .test-suite-tag {
   flex: none;

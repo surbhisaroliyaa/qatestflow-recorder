@@ -368,6 +368,8 @@ declare global {
     stepCount: number
     storageState?: string // Day 17: attached session, if any
     har?: string // F1: a captured network archive, if any (drives a 🌐 badge)
+    assertCount?: number // F5: how many checks the test makes
+    selectorHealth?: number // F5: avg selector stability (0–100)
     lastRun?: RunInfo
     runs?: RunInfo[] // history, newest first, capped at 10
   }
@@ -570,6 +572,11 @@ declare global {
     // rating ('good' = strict | 'needs-improvement' = default, fail on poor).
     value?: string
     key?: string // for `press` steps — the key pressed (e.g. 'Enter')
+    // F3 (smart waits): what a `wait` step waits FOR. 'time' (default) = a fixed
+    // pause of `value` seconds; 'network-idle' = until the page stops making
+    // network requests; 'text' = until `value` text appears on the page. The
+    // condition kinds replace guessy fixed sleeps with a precise wait.
+    waitKind?: 'time' | 'network-idle' | 'text'
     // Day 16: which native dialog this step answers (alert/confirm/prompt). The
     // dialog's message is carried in `label`.
     dialogKind?: 'alert' | 'confirm' | 'prompt'

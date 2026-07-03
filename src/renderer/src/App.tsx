@@ -3,6 +3,7 @@ import { generatePlaywrightTest, generatePageObjectTest, stepText } from './play
 import { generateBugReport, bugReportFileName } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
 import { classifyRuns } from './flaky'
+import { trustScore } from './trust'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
@@ -1671,8 +1672,13 @@ function App(): React.JSX.Element {
   const editableValue = (step: RecorderStep): string | null => {
     if (step.type === 'navigate') return step.url ?? ''
     if (step.secret) return null
-    if (step.type === 'type' || step.type === 'select' || step.type === 'wait') {
+    if (step.type === 'type' || step.type === 'select') {
       return step.value ?? ''
+    }
+    // F3: a fixed wait edits its seconds, a "wait for text" edits the text; a
+    // "wait for network idle" has nothing to type.
+    if (step.type === 'wait') {
+      return step.waitKind === 'network-idle' ? null : (step.value ?? '')
     }
     // Day 19: a snapshot's allowed diff threshold (percent) is editable.
     if (step.type === 'snapshot') return step.value ?? '1'
@@ -1958,9 +1964,16 @@ function App(): React.JSX.Element {
     setInsertAt(null)
   }
 
-  const handleAddWait = (at: number | null): void => {
+  // F3 (smart waits): insert a fixed pause, or a CONDITION wait (network idle /
+  // text appears) that replaces a guessy sleep with a precise wait.
+  const handleAddWait = (
+    at: number | null,
+    kind: 'time' | 'network-idle' | 'text' = 'time'
+  ): void => {
     setInsertMenuIndex(null)
-    insertStep({ type: 'wait', value: '2' }, at)
+    if (kind === 'network-idle') insertStep({ type: 'wait', waitKind: 'network-idle' }, at)
+    else if (kind === 'text') insertStep({ type: 'wait', waitKind: 'text', value: '' }, at)
+    else insertStep({ type: 'wait', waitKind: 'time', value: '2' }, at)
   }
 
   const handleStartEdit = async (i: number): Promise<void> => {
@@ -2251,6 +2264,8 @@ function App(): React.JSX.Element {
                             const currentlyFailing = test.lastRun?.status === 'failed'
                             // F2: one-word trust verdict from the run history.
                             const flaky = classifyRuns(allRuns)
+                            // F5: composite 0–100 trust score (grade A–F).
+                            const trust = trustScore(test, Date.now())
                             return (
                               <li key={test.fileName} className="library-item">
                                 <div className="library-item-head">
@@ -2295,6 +2310,18 @@ function App(): React.JSX.Element {
                                         {flaky.label}
                                       </span>
                                     )}
+                                    {/* F5: composite trust grade + score, breakdown on hover. */}
+                                    <span
+                                      className={`trust-badge grade-${trust.grade}`}
+                                      title={
+                                        `Trust score ${trust.score}/100 (grade ${trust.grade}) — how much to trust this test:\n` +
+                                        trust.factors
+                                          .map((f) => `• ${f.label} ${f.score}/100 — ${f.note}`)
+                                          .join('\n')
+                                      }
+                                    >
+                                      {trust.grade} · {trust.score}
+                                    </span>
                                     <span className="library-meta">
                                       {test.stepCount} steps ·{' '}
                                       {new Date(test.updatedAt).toLocaleDateString()}
@@ -3695,8 +3722,22 @@ function App(): React.JSX.Element {
                           <button type="button" onClick={() => handleStartPick(i + 1)}>
                             ✓ Add check here
                           </button>
-                          <button type="button" onClick={() => handleAddWait(i + 1)}>
-                            ⏱ Add 2s wait here
+                          <button type="button" onClick={() => handleAddWait(i + 1, 'time')}>
+                            ⏱ Wait 2s (fixed pause)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddWait(i + 1, 'network-idle')}
+                            title="Wait until the page stops making network requests — better than a guessed sleep after a load"
+                          >
+                            🌐 Wait for network idle
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddWait(i + 1, 'text')}
+                            title="Wait until specific text appears on the page — then edit the text on the new step"
+                          >
+                            🔤 Wait for text…
                           </button>
                           <button type="button" onClick={() => openBlocksPanel(i + 1)}>
                             🧩 Insert block here

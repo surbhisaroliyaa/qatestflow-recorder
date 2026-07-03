@@ -211,8 +211,12 @@ export function stepText(step: RecorderStep): string {
         default:
           return `Check ${step.label} is visible`
       }
-    case 'wait':
+    case 'wait': {
+      const kind = step.waitKind ?? 'time'
+      if (kind === 'network-idle') return 'Wait for network to go idle'
+      if (kind === 'text') return `Wait for text "${step.value ?? ''}" to appear`
       return `Wait ${step.value ?? '1'}s`
+    }
     case 'dialog':
       switch (step.dialogKind) {
         case 'alert':
@@ -324,6 +328,11 @@ function actionFor(
   }
 
   if (step.type === 'wait') {
+    const kind = step.waitKind ?? 'time'
+    if (kind === 'network-idle') return `await ${pageVar}.waitForLoadState('networkidle')`
+    if (kind === 'text') {
+      return `await ${pageVar}.getByText(${quote(step.value ?? '')}).first().waitFor()`
+    }
     const ms = Math.max(0, (parseFloat(step.value ?? '0') || 0) * 1000)
     return `await ${pageVar}.waitForTimeout(${ms})`
   }

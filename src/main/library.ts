@@ -67,6 +67,11 @@ export interface SavedTestSummary {
   stepCount: number
   storageState?: string // Day 17: attached session, if any
   har?: string // F1: a captured network archive, if any (drives a 🌐 badge)
+  // F5 (trust score): light aggregates computed from the steps so the renderer
+  // can score a test WITHOUT loading every step array. assertCount = how many
+  // checks it makes; selectorHealth = avg stability (0–100) of its selectors.
+  assertCount?: number
+  selectorHealth?: number
   lastRun?: RunInfo
   runs?: RunInfo[]
 }
@@ -110,7 +115,31 @@ async function ensureDir(): Promise<void> {
   }
 }
 
+// F5: cheap per-test stats for the trust score — how many CHECKS the test makes
+// (assert / snapshot / a11y / perf), and the average stability of its selectors
+// (the primary candidate's 0–100 score). Disabled steps don't count.
+function stepStats(steps: unknown[]): { assertCount: number; selectorHealth?: number } {
+  const arr = Array.isArray(steps) ? (steps as Record<string, unknown>[]) : []
+  const CHECKS = new Set(['assert', 'snapshot', 'a11y', 'perf'])
+  let assertCount = 0
+  const scores: number[] = []
+  for (const s of arr) {
+    if (!s || s.disabled) continue
+    if (CHECKS.has(s.type as string)) assertCount++
+    const cands = s.candidates as { locator?: string; score?: number }[] | undefined
+    if (Array.isArray(cands) && cands.length) {
+      const primary = cands.find((c) => c.locator === s.selector) ?? cands[0]
+      if (primary && typeof primary.score === 'number') scores.push(primary.score)
+    }
+  }
+  const selectorHealth = scores.length
+    ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+    : undefined
+  return { assertCount, selectorHealth }
+}
+
 function toSummary(fileName: string, test: SavedTestFile): SavedTestSummary {
+  const stats = stepStats(test.steps)
   return {
     fileName,
     // The folder IS the suite — derived, never stored, so the two can't drift.
@@ -121,6 +150,8 @@ function toSummary(fileName: string, test: SavedTestFile): SavedTestSummary {
     stepCount: Array.isArray(test.steps) ? test.steps.length : 0,
     storageState: test.storageState,
     har: test.har,
+    assertCount: stats.assertCount,
+    selectorHealth: stats.selectorHealth,
     lastRun: test.lastRun,
     runs: test.runs?.slice(0, RUN_HISTORY_LIMIT)
   }
