@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { generatePlaywrightTest, generatePageObjectTest, stepText } from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
+import { classifyRuns } from './flaky'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
@@ -2248,6 +2249,8 @@ function App(): React.JSX.Element {
                             // time — keep them all so the user sees why AND when.
                             const failedRuns = allRuns.filter((r) => r.status === 'failed')
                             const currentlyFailing = test.lastRun?.status === 'failed'
+                            // F2: one-word trust verdict from the run history.
+                            const flaky = classifyRuns(allRuns)
                             return (
                               <li key={test.fileName} className="library-item">
                                 <div className="library-item-head">
@@ -2266,19 +2269,30 @@ function App(): React.JSX.Element {
                                       }
                                     />
                                     <span className="library-name">{test.name}</span>
-                                    {/* Day 11.5: last runs, oldest → newest — flakiness at a glance */}
+                                    {/* F2: last runs, NEWEST-FIRST (leftmost = most
+                                        recent, next to the status dot) so the trend
+                                        can't be read backwards. */}
                                     {test.runs && test.runs.length > 1 && (
-                                      <span className="history-dots">
-                                        {test.runs
-                                          .slice()
-                                          .reverse()
-                                          .map((run, i) => (
-                                            <span
-                                              key={i}
-                                              className={`history-dot ${run.status}`}
-                                              title={`${run.status} — ${new Date(run.at).toLocaleString()}`}
-                                            />
-                                          ))}
+                                      <span
+                                        className="history-dots"
+                                        title="Recent runs — leftmost is the most recent, going back in time to the right"
+                                      >
+                                        {test.runs.map((run, i) => (
+                                          <span
+                                            key={i}
+                                            className={`history-dot ${run.status}${i === 0 ? ' newest' : ''}`}
+                                            title={`${i === 0 ? 'most recent · ' : ''}${run.status} — ${new Date(run.at).toLocaleString()}`}
+                                          />
+                                        ))}
+                                      </span>
+                                    )}
+                                    {/* F2: the one-word trust verdict (flaky / newly-broken / …). */}
+                                    {flaky.tag !== 'untested' && (
+                                      <span
+                                        className={`flaky-tag ${flaky.tag}`}
+                                        title={flaky.title}
+                                      >
+                                        {flaky.label}
                                       </span>
                                     )}
                                     <span className="library-meta">

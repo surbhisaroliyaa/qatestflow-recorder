@@ -1592,6 +1592,21 @@ body {
   height: 5px;
   border-radius: 50%;
 }
+/* F2: ring the newest run so "current" is unmistakable. */
+.history-dot.newest {
+  width: 7px;
+  height: 7px;
+  box-shadow:
+    0 0 0 2px #1b1b1f,
+    0 0 0 3px currentColor;
+  margin-right: 2px;
+}
+.history-dot.newest.passed {
+  color: #5bd17e;
+}
+.history-dot.newest.failed {
+  color: #ff7b72;
+}
 
 .history-dot.passed {
   background: #2f7d3d;
@@ -1599,6 +1614,45 @@ body {
 
 .history-dot.failed {
   background: #b2423e;
+}
+
+/* === F2: flaky-analytics trust tag === */
+.flaky-tag {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.flaky-tag.stable {
+  background: #1e3a24;
+  color: #7ee0a0;
+  border-color: #2f5a3a;
+}
+/* Flaky is the one that must jump out — amber, the "trust nothing" warning. */
+.flaky-tag.flaky {
+  background: #4a3a10;
+  color: #ffcf5b;
+  border-color: #7a5f1c;
+}
+.flaky-tag.newly-broken {
+  background: #4a1f1f;
+  color: #ff8a80;
+  border-color: #7a2f2f;
+}
+.flaky-tag.failing {
+  background: #3a1414;
+  color: #ff6b66;
+  border-color: #642020;
+}
+.flaky-tag.new {
+  background: #2a2a31;
+  color: #9aa0a6;
+  border-color: #3a3a42;
 }
 
 /* Day 11.5: section tag in the test bar */
