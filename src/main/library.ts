@@ -48,6 +48,9 @@ export interface SavedTestFile {
   // Day 20 (data-driven): the table of rows this test runs against. Each row is
   // a { column: value } map; columns are derived from the {{tokens}} in steps.
   dataRows?: Record<string, string>[]
+  // F1 (HAR): a captured network archive in _hars/ (bare filename, like
+  // storageState). When set, replay serves matched responses from it.
+  har?: string
   steps: unknown[]
 }
 
@@ -63,6 +66,7 @@ export interface SavedTestSummary {
   updatedAt: string
   stepCount: number
   storageState?: string // Day 17: attached session, if any
+  har?: string // F1: a captured network archive, if any (drives a 🌐 badge)
   lastRun?: RunInfo
   runs?: RunInfo[]
 }
@@ -116,6 +120,7 @@ function toSummary(fileName: string, test: SavedTestFile): SavedTestSummary {
     updatedAt: test.updatedAt,
     stepCount: Array.isArray(test.steps) ? test.steps.length : 0,
     storageState: test.storageState,
+    har: test.har,
     lastRun: test.lastRun,
     runs: test.runs?.slice(0, RUN_HISTORY_LIMIT)
   }
@@ -133,6 +138,27 @@ async function readTestFile(fileName: string): Promise<SavedTestFile | null> {
   }
 }
 
+// === F1 (HAR) — captured network archives, stored like sessions ===========
+// One `.har` per test in a hidden _hars/ folder, named from the test's
+// relative path (so E2E/login.json ↔ E2E__login.har, unique across suites).
+function harsDir(): string {
+  return join(libraryDir(), '_hars')
+}
+const SAFE_HAR = /^[a-zA-Z0-9_-]+\.har$/
+function harNameForFile(fileName: string): string {
+  return fileName.replace(/\.json$/, '').replace(/\//g, '__') + '.har'
+}
+// Read a saved HAR (the standard { log: { entries: [...] } } shape). Guards the
+// filename so it can only ever read inside _hars/.
+export async function loadHar(harName: string): Promise<unknown | null> {
+  if (!SAFE_HAR.test(harName)) return null
+  try {
+    return JSON.parse(await readFile(join(harsDir(), harName), 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
 // Save (create or update) into a section subfolder. createdAt and run history
 // survive an overwrite — re-saving edits content, it doesn't erase history.
 export async function saveTest(input: {
@@ -143,6 +169,9 @@ export async function saveTest(input: {
   storageState?: string
   viewport?: { width: number; height: number }
   dataRows?: Record<string, string>[]
+  // F1: the captured HAR log to write alongside this test (main passes it in;
+  // the renderer only signals intent). Absent = keep whatever HAR existed.
+  harLog?: unknown
 }): Promise<SavedTestSummary> {
   await ensureDir()
   const suite = safeSegment(input.suite)
@@ -150,6 +179,14 @@ export async function saveTest(input: {
   if (suite) await mkdir(join(libraryDir(), suite), { recursive: true })
   const now = new Date().toISOString()
   const previous = await readTestFile(fileName)
+  // F1: write the new HAR (if capturing) and point the test at it; otherwise
+  // keep whatever HAR the test already had.
+  let har = previous?.har
+  if (input.harLog) {
+    har = harNameForFile(fileName)
+    await mkdir(harsDir(), { recursive: true })
+    await writeFile(join(harsDir(), har), JSON.stringify(input.harLog), 'utf-8')
+  }
   const test: SavedTestFile = {
     version: 1,
     name: input.name,
@@ -161,6 +198,7 @@ export async function saveTest(input: {
     storageState: input.storageState,
     viewport: input.viewport,
     dataRows: input.dataRows,
+    har,
     steps: input.steps
   }
   await writeFile(join(libraryDir(), fileName), JSON.stringify(test, null, 2), 'utf-8')
@@ -411,7 +449,8 @@ export async function listBlocks(): Promise<BlockSummary[]> {
   for (const f of files) {
     if (!f.endsWith('.json')) continue
     const b = await readBlockFile(f)
-    if (b) out.push({ fileName: f, name: b.name, stepCount: b.steps.length, updatedAt: b.updatedAt })
+    if (b)
+      out.push({ fileName: f, name: b.name, stepCount: b.steps.length, updatedAt: b.updatedAt })
   }
   return out.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)) // newest first
 }

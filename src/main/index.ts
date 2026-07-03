@@ -27,6 +27,7 @@ import {
   deleteBlock,
   libraryDir,
   slugify,
+  loadHar,
   type RunInfo,
   type DraftFile
 } from './library'
@@ -41,6 +42,15 @@ import {
   perfBudgetLabel,
   type PerfResult
 } from './perf'
+import {
+  newHarLog,
+  buildEntry,
+  shouldCaptureType,
+  matchEntry,
+  serveHeaders,
+  entryBodyBase64,
+  type HarLog
+} from './har'
 import {
   saveTrace,
   loadTrace,
@@ -312,6 +322,136 @@ function createWindow(): void {
   // Recording on/off lives here in main, because main is the hub that merges
   // page events (from the observer) with navigation events (which main owns).
   let isRecording = false
+
+  // === F1 (HAR) network capture ======================================
+  // When ON, recording also captures the page's network (requests + response
+  // bodies) into a HAR via a CDP debugger attached to the active tab. On stop
+  // the finished log is kept in `lastCapturedHar` for the Save panel to bank.
+  let harCaptureEnabled = false
+  let lastCapturedHar: HarLog | null = null
+  // The shape of a CDP debugger 'message' listener (event, method, params).
+  type CdpListener = (event: unknown, method: string, params: Record<string, unknown>) => void
+  let harCapture: { wc: Electron.WebContents; onMessage: CdpListener } | null = null
+
+  const startHarCapture = (wc: Electron.WebContents): void => {
+    if (harCapture) return // already capturing
+    const log = newHarLog()
+    // Per-requestId scratch: the request facts, and the response meta, joined
+    // when the body arrives (loadingFinished).
+    const reqs = new Map<
+      string,
+      {
+        method: string
+        url: string
+        headers?: Record<string, string>
+        postData?: string
+        startedDateTime: string
+      }
+    >()
+    const resps = new Map<
+      string,
+      {
+        status: number
+        statusText?: string
+        mimeType?: string
+        headers?: Record<string, string>
+        type?: string
+      }
+    >()
+    const d = wc.debugger
+    try {
+      if (!d.isAttached()) d.attach('1.3')
+    } catch {
+      return // can't attach (DevTools open?) — capture silently unavailable
+    }
+    const onMessage = (_e: unknown, method: string, params: Record<string, unknown>): void => {
+      if (method === 'Network.requestWillBeSent') {
+        const r = params.request as
+          | { method?: string; url?: string; headers?: Record<string, string>; postData?: string }
+          | undefined
+        if (typeof params.requestId === 'string' && r?.url) {
+          reqs.set(params.requestId, {
+            method: r.method ?? 'GET',
+            url: r.url,
+            headers: r.headers,
+            postData: r.postData,
+            startedDateTime: new Date(0).toISOString()
+          })
+        }
+      } else if (method === 'Network.responseReceived') {
+        const res = params.response as
+          | {
+              status?: number
+              statusText?: string
+              mimeType?: string
+              headers?: Record<string, string>
+            }
+          | undefined
+        if (typeof params.requestId === 'string' && res) {
+          resps.set(params.requestId, {
+            status: res.status ?? 0,
+            statusText: res.statusText,
+            mimeType: res.mimeType,
+            headers: res.headers,
+            type: String(params.type ?? '')
+          })
+        }
+      } else if (method === 'Network.loadingFinished') {
+        const id = String(params.requestId)
+        const req = reqs.get(id)
+        const res = resps.get(id)
+        reqs.delete(id)
+        resps.delete(id)
+        if (!req || !res || !shouldCaptureType(res.type)) return
+        // Pull the (decoded) body, then assemble a standard HAR entry.
+        d.sendCommand('Network.getResponseBody', { requestId: id })
+          .then((b: { body?: string; base64Encoded?: boolean }) => {
+            log.log.entries.push(
+              buildEntry({
+                method: req.method,
+                url: req.url,
+                requestHeaders: req.headers,
+                postData: req.postData,
+                status: res.status,
+                statusText: res.statusText,
+                mimeType: res.mimeType,
+                responseHeaders: res.headers,
+                body: b.body ?? '',
+                base64: !!b.base64Encoded,
+                resourceType: res.type,
+                startedDateTime: req.startedDateTime
+              })
+            )
+          })
+          .catch(() => {
+            // body already evicted (navigation) — skip this one entry
+          })
+      } else if (method === 'Network.loadingFailed') {
+        const id = String(params.requestId)
+        reqs.delete(id)
+        resps.delete(id)
+      }
+    }
+    d.on('message', onMessage)
+    d.sendCommand('Network.enable').catch(() => {})
+    harCapture = { wc, onMessage }
+    lastCapturedHar = log // grows live; finalized (kept or discarded) on stop
+  }
+
+  const stopHarCapture = (): number => {
+    if (!harCapture) return 0
+    const { wc, onMessage } = harCapture
+    harCapture = null
+    try {
+      wc.debugger.removeListener('message', onMessage)
+      if (wc.debugger.isAttached()) wc.debugger.detach()
+    } catch {
+      // already detached — fine
+    }
+    const count = lastCapturedHar?.log.entries.length ?? 0
+    if (!count) lastCapturedHar = null // nothing captured → nothing to offer
+    return count
+  }
 
   // Pick mode on/off, mirrored here too so a frame can be injected already in
   // the right state, and so toggling pick updates frames that are already live.
@@ -829,6 +969,17 @@ function createWindow(): void {
       const url = activeWC().getURL()
       if (url && !url.startsWith('data:')) sendStep({ type: 'navigate', url })
     }
+    // F1: capture network while recording (opt-in). Start on a fresh record;
+    // stop + report the count when recording ends.
+    if (isRecording) {
+      if (harCaptureEnabled && !resume) {
+        lastCapturedHar = null
+        startHarCapture(activeWC())
+      }
+    } else if (harCapture) {
+      const count = stopHarCapture()
+      mainWindow.webContents.send('har:captured', { count })
+    }
     return isRecording
   })
 
@@ -1304,7 +1455,10 @@ function createWindow(): void {
       steps: ReplayStep[],
       interactive?: boolean,
       storageState?: string,
-      traceOpts?: { mode: 'always' | 'failure' | 'off'; stepTexts?: string[]; testName?: string }
+      traceOpts?: { mode: 'always' | 'failure' | 'off'; stepTexts?: string[]; testName?: string },
+      // F1: serve responses from this HAR. A test's saved `har` filename, or the
+      // sentinel '__last' to use the just-captured (unsaved) HAR. Absent = live.
+      harFile?: string
     ): Promise<{
       ok: boolean
       failedAt?: number
@@ -1317,6 +1471,9 @@ function createWindow(): void {
       // Day 20: EVERY failed step in this run (not just the first) — so the
       // banner can surface each one's screenshot when Continue bypassed several.
       failures?: { index: number; error: string; screenshotPath?: string }[]
+      // F1: how many requests were served from the HAR vs passed through live.
+      harServed?: number
+      harPassthrough?: number
     }> => {
       // A dangling pause from a previous replay can never be answered — clear it.
       resolveRecovery({ action: 'abort' })
@@ -1392,6 +1549,27 @@ function createWindow(): void {
       const addEvidence = (arr: string[], line: string): void => {
         if (arr.length < 30) arr.push(`[step ${evidenceStep + 1}] ${line}`)
       }
+
+      // F1 (HAR replay): load the archive to serve from (if any) and tally what
+      // gets served vs passed through to the live network.
+      //
+      // SAFETY GATE: serving responses via the CDP Fetch domain on the embedded
+      // WebContentsView proved unstable (it hung/crashed the browser process on
+      // Replay) and could not be reliably reproduced or verified outside the
+      // real app. Until it's stabilised on real hardware, in-app serving is OFF
+      // — capture + save (a valid .har) still work; deterministic replay is
+      // deferred (see the exported Playwright routeFromHAR path instead). Normal
+      // no-HAR replay is unaffected (everything below is gated on replayHar).
+      const HAR_SERVE_IN_APP: boolean = false
+      const replayHar: HarLog | null = !HAR_SERVE_IN_APP
+        ? null
+        : harFile === '__last'
+          ? lastCapturedHar
+          : harFile
+            ? ((await loadHar(harFile)) as HarLog | null)
+            : null
+      let harServed = 0
+      let harPassthrough = 0
 
       // === Run trace capture (Day 18) ==================================
       // When tracing is on, snapshot each step (screenshot + thumbnail + DOM +
@@ -1666,7 +1844,13 @@ function createWindow(): void {
       // in finish(). `cdp`/`cdpReady` always point at the CURRENT tab's debugger.
       const attached = new Map<
         number,
-        { wc: Electron.WebContents; cdp: Electron.Debugger; ready: boolean }
+        {
+          wc: Electron.WebContents
+          cdp: Electron.Debugger
+          ready: boolean
+          // F1: the per-debugger Fetch interceptor, kept so finish() can detach it.
+          fetchListener?: CdpListener
+        }
       >()
       let cdp: Electron.Debugger = currentWC.debugger
       let cdpReady = false
@@ -1685,13 +1869,67 @@ function createWindow(): void {
             // attach can fail (e.g. DevTools already attached) — fall back to
             // sendInputEvent for hover; no CDP means no network evidence here.
           }
+          let fetchListener: CdpListener | undefined
           if (ready) {
             d.on('message', onCdpMessage)
             d.sendCommand('Network.enable').catch(() => {
               // network domain unavailable — console evidence still works
             })
+            // F1: with a HAR loaded, intercept the API calls (XHR/fetch) and
+            // serve the saved response when we have one; otherwise let it hit the
+            // live network (augment mode). We deliberately DON'T intercept the
+            // page navigation or static assets — fulfilling a top-level
+            // navigation through the debugger on a WebContentsView crashes the
+            // native browser process, and the API responses are what kill flake
+            // anyway. Every paused request MUST be fulfilled or continued or the
+            // page hangs — so any error falls back to continueRequest.
+            if (replayHar && replayHar.log?.entries?.length) {
+              const onFetch = (
+                _e: unknown,
+                method: string,
+                params: Record<string, unknown>
+              ): void => {
+                if (method !== 'Fetch.requestPaused') return
+                const requestId = String(params.requestId)
+                const req = params.request as { url?: string; method?: string } | undefined
+                const passThrough = (): void => {
+                  d.sendCommand('Fetch.continueRequest', { requestId })
+                    .then(() => {
+                      harPassthrough++
+                    })
+                    .catch(() => {})
+                }
+                const entry = req?.url
+                  ? matchEntry(replayHar.log.entries, req.method ?? 'GET', req.url)
+                  : null
+                if (!entry) return passThrough()
+                d.sendCommand('Fetch.fulfillRequest', {
+                  requestId,
+                  responseCode: entry.response.status,
+                  responseHeaders: serveHeaders(entry).map((h) => ({
+                    name: h.name,
+                    value: h.value
+                  })),
+                  body: entryBodyBase64(entry)
+                })
+                  .then(() => {
+                    harServed++
+                  })
+                  .catch(passThrough)
+              }
+              d.on('message', onFetch)
+              fetchListener = onFetch
+              // Only XHR + fetch are paused; navigations and assets flow through
+              // untouched (see the crash note above).
+              d.sendCommand('Fetch.enable', {
+                patterns: [
+                  { urlPattern: '*', resourceType: 'XHR', requestStage: 'Request' },
+                  { urlPattern: '*', resourceType: 'Fetch', requestStage: 'Request' }
+                ]
+              }).catch(() => {})
+            }
           }
-          rec = { wc: wcToAttach, cdp: d, ready }
+          rec = { wc: wcToAttach, cdp: d, ready, fetchListener }
           attached.set(wcToAttach.id, rec)
         }
         return rec
@@ -1758,6 +1996,8 @@ function createWindow(): void {
         networkErrors?: string[]
         traceId?: string
         failures?: { index: number; error: string; screenshotPath?: string }[]
+        harServed?: number
+        harPassthrough?: number
       }): Promise<{
         ok: boolean
         failedAt?: number
@@ -1768,6 +2008,8 @@ function createWindow(): void {
         networkErrors?: string[]
         traceId?: string
         failures?: { index: number; error: string; screenshotPath?: string }[]
+        harServed?: number
+        harPassthrough?: number
       }> => {
         // Detach EVERY tab we touched (console + CDP), and clear the replay flag
         // in each so normal browsing gets its real native dialogs back.
@@ -1781,6 +2023,7 @@ function createWindow(): void {
           if (rec.ready) {
             try {
               rec.cdp.removeListener('message', onCdpMessage)
+              if (rec.fetchListener) rec.cdp.removeListener('message', rec.fetchListener)
               rec.cdp.detach()
             } catch {
               // already detached — fine
@@ -1808,6 +2051,11 @@ function createWindow(): void {
             // discard the trace we saved at the pause.
             await deleteTrace(traceRunId)
           }
+        }
+        // F1: report HAR usage when a HAR was in play (drives the run readout).
+        if (replayHar) {
+          outcome.harServed = harServed
+          outcome.harPassthrough = harPassthrough
         }
         return outcome
       }
@@ -2377,8 +2625,11 @@ function createWindow(): void {
         storageState?: string
         viewport?: { width: number; height: number }
         dataRows?: Record<string, string>[]
+        // F1: renderer signals "bank the captured network with this test"; main
+        // supplies the actual HAR log (it lives here, not in the renderer).
+        captureHar?: boolean
       }
-    ) => saveTest(input)
+    ) => saveTest({ ...input, harLog: input.captureHar ? lastCapturedHar : undefined })
   )
 
   // === Data-driven (Day 20) ==========================================
@@ -2497,6 +2748,16 @@ function createWindow(): void {
     }
   })
 
+  // === HAR record & replay (F1) ======================================
+  // Toggle capture on/off (set before recording). The count of what was
+  // captured is pushed via the 'har:captured' event when recording stops.
+  ipcMain.handle('har:setEnabled', (_event, enabled: boolean): void => {
+    harCaptureEnabled = !!enabled
+  })
+  // The renderer asks how many responses the last capture kept (e.g. after a
+  // reload, to re-show the badge).
+  ipcMain.handle('har:lastCount', (): number => lastCapturedHar?.log.entries.length ?? 0)
+
   // Open a failure screenshot in the OS image viewer. Only paths inside the
   // library folder are allowed — this is a viewer, not a general file opener.
   ipcMain.handle('library:openScreenshot', (_event, path: string) => {
@@ -2611,7 +2872,8 @@ function createWindow(): void {
       fixturePaths?: string[],
       sessionFile?: string,
       pageObjectCode?: string,
-      pageObjectFileName?: string
+      pageObjectFileName?: string,
+      harFile?: string
     ): Promise<string | null> => {
       const result = await dialog.showSaveDialog(mainWindow, {
         title: 'Save Playwright test',
@@ -2637,6 +2899,22 @@ function createWindow(): void {
         const sessDir = join(dirname(result.filePath), 'sessions')
         await mkdir(sessDir, { recursive: true }).catch(() => {})
         await copyFile(join(sessionsDir, sessionFile), join(sessDir, sessionFile)).catch(() => {})
+      }
+      // F1: the exported test's routeFromHAR points at `hars/<file>` — put the
+      // captured archive there so the deterministic replay is self-contained.
+      // Prefer the saved .har on disk; if there isn't one (a fresh recording
+      // exported before saving), write the in-memory capture instead.
+      if (harFile && /^[a-zA-Z0-9_-]+\.har$/.test(harFile)) {
+        const harDir = join(dirname(result.filePath), 'hars')
+        await mkdir(harDir, { recursive: true }).catch(() => {})
+        const dest = join(harDir, harFile)
+        try {
+          await copyFile(join(libraryDir(), '_hars', harFile), dest)
+        } catch {
+          if (lastCapturedHar) {
+            await writeFile(dest, JSON.stringify(lastCapturedHar)).catch(() => {})
+          }
+        }
       }
       // Day 17 (full POM): the spec imports the page class from `./pages/<Name>` —
       // write that class file into a pages/ folder beside the spec.

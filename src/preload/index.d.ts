@@ -40,6 +40,10 @@ interface ReplayResult {
   // Day 20: every failed step in this run (not just the first) — surfaced when
   // Continue bypassed several, so each one's screenshot is reachable.
   failures?: { index: number; error: string; screenshotPath?: string }[]
+  // F1: with a HAR in play, how many requests were served from it vs passed
+  // through to the live network. Absent when no HAR was used.
+  harServed?: number
+  harPassthrough?: number
 }
 
 // Day 18: how aggressively to keep a run trace (mirrors Playwright's `trace`).
@@ -62,7 +66,8 @@ interface RecorderAPI {
     fixturePaths?: string[],
     sessionFile?: string,
     pageObjectCode?: string,
-    pageObjectFileName?: string
+    pageObjectFileName?: string,
+    harFile?: string // F1: copy this .har into hars/ beside the exported spec
   ) => Promise<string | null>
   pickUploadFile: () => Promise<string | null>
   revealDownload: (path: string) => Promise<void>
@@ -74,7 +79,10 @@ interface RecorderAPI {
     steps: RecorderStep[],
     interactive?: boolean,
     storageState?: string,
-    traceOpts?: TraceOptions
+    traceOpts?: TraceOptions,
+    // F1: serve responses from this HAR — a test's saved `har` filename, or
+    // '__last' for the just-captured (unsaved) one. Absent = hit live network.
+    harFile?: string
   ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
@@ -105,6 +113,16 @@ interface PerfAPI {
   measure: () => Promise<PerfResult>
 }
 
+// === HAR record & replay (F1) ===
+interface HarAPI {
+  // Turn network capture on/off (set before recording starts).
+  setEnabled: (enabled: boolean) => Promise<void>
+  // How many responses the last capture kept (0 = none).
+  lastCount: () => Promise<number>
+  // Recording stopped → the count captured. Returns an unsubscribe fn.
+  onCaptured: (callback: (info: { count: number }) => void) => () => void
+}
+
 // === Visual regression (Day 19) ===
 interface VisualAPI {
   // Adopt a current capture as the new baseline (a page legitimately changed).
@@ -122,6 +140,7 @@ interface LibraryAPI {
     storageState?: string
     viewport?: { width: number; height: number }
     dataRows?: Record<string, string>[] // Day 20: data-driven table rows
+    captureHar?: boolean // F1: bank the captured network with this test
   }) => Promise<SavedTestSummary>
   list: () => Promise<SavedTestSummary[]>
   listSuites: () => Promise<string[]>
@@ -200,6 +219,7 @@ interface API {
   visual: VisualAPI
   a11y: A11yAPI
   perf: PerfAPI
+  har: HarAPI
 }
 
 declare global {
@@ -346,6 +366,8 @@ declare global {
     baseURL: string
     updatedAt: string
     stepCount: number
+    storageState?: string // Day 17: attached session, if any
+    har?: string // F1: a captured network archive, if any (drives a 🌐 badge)
     lastRun?: RunInfo
     runs?: RunInfo[] // history, newest first, capped at 10
   }
@@ -360,6 +382,7 @@ declare global {
     storageState?: string // Day 17: attached session (start logged in)
     viewport?: { width: number; height: number } // Day 17: device emulation
     dataRows?: Record<string, string>[] // Day 20: data-driven table rows
+    har?: string // F1: a captured network archive to replay against, if any
     lastRun?: RunInfo
     steps: RecorderStep[]
   }

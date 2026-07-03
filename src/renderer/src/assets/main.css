@@ -797,6 +797,67 @@ body {
   cursor: default;
 }
 
+/* === F1: HAR network capture toggle + status === */
+.har-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 120ms ease;
+}
+.har-btn:hover:not(:disabled) {
+  background: #4a4a4a;
+}
+.har-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* On = armed to capture — blue, like the picking state. */
+.har-btn.on {
+  background: #173a5e;
+  border-color: #58a6ff;
+  color: #cce4ff;
+}
+.har-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 14px 0;
+}
+.har-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid #3a3a42;
+  background: #232329;
+  color: #9aa0a6;
+}
+.har-chip.linked {
+  background: #16302a;
+  border-color: #2f5a4a;
+  color: #7ee0b0;
+}
+.har-chip.captured {
+  background: #173a5e;
+  border-color: #2f5a8a;
+  color: #8fc7ff;
+}
+.har-chip.arm {
+  background: #2a2718;
+  border-color: #4a431f;
+  color: #d9b44a;
+}
+
 .perf-grid {
   display: flex;
   flex-direction: column;

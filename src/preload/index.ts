@@ -84,7 +84,8 @@ const api = {
       fixturePaths?: string[],
       sessionFile?: string,
       pageObjectCode?: string,
-      pageObjectFileName?: string
+      pageObjectFileName?: string,
+      harFile?: string
     ): Promise<string | null> =>
       ipcRenderer.invoke(
         'recorder:export',
@@ -92,7 +93,8 @@ const api = {
         fixturePaths,
         sessionFile,
         pageObjectCode,
-        pageObjectFileName
+        pageObjectFileName,
+        harFile
       ),
 
     // Day 16(+): pick a different file for an upload step. Shows an OS open
@@ -125,9 +127,10 @@ const api = {
       steps: unknown[],
       interactive?: boolean,
       storageState?: string,
-      traceOpts?: unknown
+      traceOpts?: unknown,
+      harFile?: string
     ): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
-      ipcRenderer.invoke('recorder:replay', steps, interactive, storageState, traceOpts),
+      ipcRenderer.invoke('recorder:replay', steps, interactive, storageState, traceOpts, harFile),
 
     // === Recovery (Day 12) ===
     // An interactive replay paused at a failed step — main's loop is holding,
@@ -191,6 +194,19 @@ const api = {
     measure: (): Promise<unknown> => ipcRenderer.invoke('perf:measure')
   },
 
+  // === HAR record & replay (F1) ===
+  har: {
+    // Turn capture on/off (set before recording). Count arrives via onCaptured.
+    setEnabled: (enabled: boolean): Promise<void> => ipcRenderer.invoke('har:setEnabled', enabled),
+    lastCount: (): Promise<number> => ipcRenderer.invoke('har:lastCount'),
+    // Recording stopped → how many network responses were captured.
+    onCaptured: (callback: (info: { count: number }) => void): (() => void) => {
+      const listener = (_e: unknown, info: { count: number }): void => callback(info)
+      ipcRenderer.on('har:captured', listener)
+      return () => ipcRenderer.removeListener('har:captured', listener)
+    }
+  },
+
   // === Visual regression (Day 19) ===
   visual: {
     updateBaseline: (baselineId: string, currentPath: string): Promise<boolean> =>
@@ -222,6 +238,7 @@ const api = {
       storageState?: string
       viewport?: { width: number; height: number }
       dataRows?: Record<string, string>[]
+      captureHar?: boolean // F1: bank the captured network with this test
     }): Promise<unknown> => ipcRenderer.invoke('library:save', input),
     list: (): Promise<unknown[]> => ipcRenderer.invoke('library:list'),
     listSuites: (): Promise<string[]> => ipcRenderer.invoke('library:listSuites'),

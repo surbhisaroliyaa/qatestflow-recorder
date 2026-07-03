@@ -443,6 +443,10 @@ export function generatePlaywrightTest(
     // test body is wrapped in `for (const data of dataset)` and tokenized
     // values become data.* / process.env.* references.
     data?: { columns: string[]; rows: Record<string, string>[] }
+    // F1 (HAR): a captured archive filename. When set, the test serves matched
+    // network responses from it via Playwright's routeFromHAR (deterministic
+    // replay), falling back to the live network for anything not in the HAR.
+    har?: string
   }
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
@@ -512,7 +516,13 @@ export function generatePlaywrightTest(
   // Day 17: in multi-window mode, alias the fixture as page0 and grab its
   // context (used to await newly-opened pages). Prepended to the test body.
   const prelude = multiWindow ? '  const page0 = page\n  const context = page.context()\n\n' : ''
-  const body = prelude + lines.join('\n\n')
+  // F1 (HAR): before anything else, serve saved responses from the archive for
+  // deterministic replay; anything not in it falls through to the live network.
+  const harSetup = options?.har
+    ? `  // F1: deterministic replay — serve recorded network from the HAR\n` +
+      `  await ${pv(0)}.routeFromHAR('hars/${options.har}', { notFound: 'fallback' })\n\n`
+    : ''
+  const body = prelude + harSetup + lines.join('\n\n')
 
   // Only import expect when an assertion (or a download check) uses it; pull in
   // fs only when a download check needs a file-size assertion.
@@ -608,6 +618,8 @@ export function generatePageObjectTest(
     // Day 20: present (with rows) for a data-driven test — the spec wraps the
     // page-object calls in a `for (const data of dataset)` loop.
     data?: { columns: string[]; rows: Record<string, string>[] }
+    // F1 (HAR): serve saved network responses from this archive (routeFromHAR).
+    har?: string
   }
 ): { spec: string; page: string; pageFileName: string; className: string } | null {
   const enabled = steps.filter((s) => !s.disabled)
@@ -736,6 +748,11 @@ export function generatePageObjectTest(
     if (step.type === 'click' || step.type === 'press') lastActionLabel = step.label || ''
   }
   flush()
+
+  // F1 (HAR): serve saved responses before anything runs (deterministic replay).
+  if (options?.har) {
+    specBody.unshift(`  await page.routeFromHAR('hars/${options.har}', { notFound: 'fallback' })`)
+  }
 
   // The goto() destination = the first navigate (as a path under baseURL).
   let gotoUrl = '/'

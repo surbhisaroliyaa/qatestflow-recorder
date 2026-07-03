@@ -175,6 +175,21 @@ function App(): React.JSX.Element {
   // logged in), and the list of saved sessions to pick from.
   const [storageState, setStorageState] = useState<string | undefined>(undefined)
   const [sessions, setSessions] = useState<string[]>([])
+  // F1 (HAR): the capture toggle, how many responses the last capture kept, the
+  // loaded test's saved HAR (replayed against when present), and the last run's
+  // HAR usage (served vs live) for the readout.
+  const [captureNetwork, setCaptureNetwork] = useState(false)
+  const [harCount, setHarCount] = useState(0)
+  const [harField, setHarField] = useState<string | undefined>(undefined)
+  const [lastHarUsage, setLastHarUsage] = useState<{ served: number; passthrough: number } | null>(
+    null
+  )
+  // Keep main's capture flag in sync with the toggle, and learn the count when
+  // a recording that captured network stops.
+  useEffect(() => {
+    window.api.har.setEnabled(captureNetwork)
+  }, [captureNetwork])
+  useEffect(() => window.api.har.onCaptured(({ count }) => setHarCount(count)), [])
   // Day 17(+): seed a saved session into the LIVE browser so a NEW recording
   // starts already logged in. `useSessionSel` = the chosen session on the welcome
   // screen; `applyingSession` gates the button while it seeds.
@@ -771,6 +786,9 @@ function App(): React.JSX.Element {
     setTestFileName(null)
     setBaseURL('')
     setStorageState(undefined)
+    setHarField(undefined) // F1: drop the previous test's HAR link
+    setHarCount(0)
+    setLastHarUsage(null)
     applyViewport(undefined)
     setTestSuite('')
     setSavePanelOpen(false)
@@ -801,6 +819,12 @@ function App(): React.JSX.Element {
   // Generate the export and show it. Inline = one file; Page Object = two files
   // (a spec + a page class), unless the test is multi-tab/iframe/dialog/download
   // (POM falls back to inline, since those don't fit a clean auto-POM).
+  // F1: which HAR filename the export should reference. A saved test uses its
+  // own archive; a fresh recording that captured network (but isn't saved yet)
+  // uses a generic name — main writes the in-memory HAR to it on save.
+  const exportHarName = (): string | undefined =>
+    harField ?? (harCount > 0 ? 'network.har' : undefined)
+
   const showExport = async (pageObject: boolean): Promise<void> => {
     // Live-link: expand linked blocks to their current steps so the generated
     // code contains the real actions (a block is just steps in the export).
@@ -813,7 +837,10 @@ function App(): React.JSX.Element {
       // Day 20: pass the data table so a data-driven test exports as a
       // `for (const data of dataset)` loop. The generators ignore it when
       // there are no columns/rows, so a plain test stays byte-identical.
-      data: isDataDriven ? { columns: dataCols, rows: dataRows } : undefined
+      data: isDataDriven ? { columns: dataCols, rows: dataRows } : undefined,
+      // F1: include a HAR in the export — the saved test's archive, or (if this
+      // recording was captured but not yet saved) the fresh in-memory one.
+      har: exportHarName()
     }
     if (pageObject) {
       const pom = generatePageObjectTest(flat, opts)
@@ -859,7 +886,8 @@ function App(): React.JSX.Element {
       fixturePaths,
       storageState,
       exportPage ?? undefined,
-      exportPage ? exportPageFileName : undefined
+      exportPage ? exportPageFileName : undefined,
+      exportHarName() // F1: copy the .har (saved or fresh) into hars/ beside the spec
     )
     if (path) setSavedPath(path)
   }
@@ -877,7 +905,11 @@ function App(): React.JSX.Element {
     list: RecorderStep[],
     fileName: string | null,
     interactive = false,
-    sessionFile: string | undefined = storageState
+    sessionFile: string | undefined = storageState,
+    // F1: replay against a HAR — the loaded test's saved one, or the fresh
+    // just-captured one ('__last') when capture is on and not yet saved.
+    harFile: string | undefined = harField ??
+      (captureNetwork && harCount > 0 ? '__last' : undefined)
   ): Promise<{
     ok: boolean
     failedAt?: number
@@ -912,11 +944,17 @@ function App(): React.JSX.Element {
     // ordinary failed run so the matrix keeps going and the banner explains it.
     let result: Awaited<ReturnType<typeof window.api.recorder.replay>>
     try {
-      result = await window.api.recorder.replay(list, interactive, sessionFile, {
-        mode: traceMode,
-        stepTexts: list.map((s) => stepText(s)),
-        testName: testName || undefined
-      })
+      result = await window.api.recorder.replay(
+        list,
+        interactive,
+        sessionFile,
+        {
+          mode: traceMode,
+          stepTexts: list.map((s) => stepText(s)),
+          testName: testName || undefined
+        },
+        harFile
+      )
     } catch (err) {
       result = { ok: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
@@ -928,6 +966,12 @@ function App(): React.JSX.Element {
     // banner, no run recorded.
     if (result.aborted) return result
     setLastTraceId(result.traceId ?? null)
+    // F1: surface how the HAR was used this run (absent when no HAR was in play).
+    setLastHarUsage(
+      result.harServed !== undefined
+        ? { served: result.harServed, passthrough: result.harPassthrough ?? 0 }
+        : null
+    )
     if (!result.ok) {
       // Map expanded run indices back onto display rows (linked blocks) so the
       // red marks + failure banner point at the right rows. Identity otherwise.
@@ -1361,8 +1405,10 @@ function App(): React.JSX.Element {
       steps,
       storageState,
       viewport,
-      dataRows // Day 20: data-driven table travels with the test
+      dataRows, // Day 20: data-driven table travels with the test
+      captureHar: harCount > 0 // F1: bank the just-captured network, if any
     })
+    if (harCount > 0) setHarField(summary.har)
     // Renaming or re-sectioning = a MOVE: the save created the new file, so
     // drop the old one (otherwise stale copies pile up under the old name).
     if (testFileName && testFileName !== summary.fileName) {
@@ -1392,6 +1438,8 @@ function App(): React.JSX.Element {
     setTestSuite(fileName.includes('/') ? fileName.split('/')[0] : '')
     setBaseURL(test.baseURL)
     setStorageState(test.storageState)
+    setHarField(test.har) // F1: replay this test against its saved HAR, if any
+    setLastHarUsage(null)
     applyViewport(test.viewport)
     setDataRows(test.dataRows ?? []) // Day 20: data-driven table
     setDataPanelOpen(false)
@@ -1486,7 +1534,8 @@ function App(): React.JSX.Element {
         // never reach the replay engine — it only understands real steps).
         const { flat: flatSuite, map: suiteMap } = await buildRunPlan(data.steps as RecorderStep[])
         runPlanRef.current = suiteMap
-        const result = await runOnce(flatSuite, t.fileName, false, data.storageState)
+        // F1: each test in the suite replays against its own saved HAR, if any.
+        const result = await runOnce(flatSuite, t.fileName, false, data.storageState, data.har)
         entry = {
           fileName: t.fileName,
           name: data.name,
@@ -2444,6 +2493,19 @@ function App(): React.JSX.Element {
         >
           ⚡ {perfMeasuring ? 'Measuring…' : 'Perf'}
         </button>
+        {/* F1: capture network into a HAR while recording (opt-in flake-killer). */}
+        <button
+          className={`har-btn${captureNetwork ? ' on' : ''}`}
+          onClick={() => setCaptureNetwork((v) => !v)}
+          disabled={isReplaying}
+          title={
+            captureNetwork
+              ? 'Network capture is ON — while recording, API responses are saved to a standard .har file with the test (openable in Chrome DevTools; usable with Playwright routeFromHAR). Click to turn off.'
+              : 'Capture network (HAR): while recording, save API responses to a .har file with the test — a standard archive for deterministic replay. Click to turn on.'
+          }
+        >
+          🌐 {harCount > 0 ? `Net · ${harCount}` : captureNetwork ? 'Net ON' : 'Net'}
+        </button>
         <button
           className={`record-btn${isRecording ? ' recording' : ''}`}
           onClick={handleRecordToggle}
@@ -2459,6 +2521,26 @@ function App(): React.JSX.Element {
           {isRecording ? 'Stop' : steps.length > 0 ? 'Resume' : 'Record'}
         </button>
       </div>
+
+      {/* F1: HAR status — a captured/linked archive, and the last run's usage. */}
+      {(captureNetwork || harField || harCount > 0 || lastHarUsage) && (
+        <div className="har-status">
+          {harField ? (
+            <span className="har-chip linked">🌐 network archive saved with this test</span>
+          ) : harCount > 0 ? (
+            <span className="har-chip captured">
+              🌐 {harCount} responses captured (save to keep)
+            </span>
+          ) : captureNetwork ? (
+            <span className="har-chip arm">🌐 network capture on — record to capture</span>
+          ) : null}
+          {lastHarUsage && (
+            <span className="har-chip usage">
+              last run: {lastHarUsage.served} served from HAR · {lastHarUsage.passthrough} live
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Day 17: the tab strip — shown only with 2+ tabs (a popup opened one).
           Its height must match TAB_STRIP_HEIGHT in main so the native browser
