@@ -33,6 +33,7 @@ import {
 import { explainFailure, type FailureEvidence } from './translator'
 import { observerProgram } from './observerSource'
 import { saveBaseline, loadBaseline, isSafeBaselineId, diffImages } from './visual'
+import { scanAccessibility, a11yImpactRank, a11yThresholdLevel, type A11yScanResult } from './a11y'
 import {
   saveTrace,
   loadTrace,
@@ -1541,7 +1542,8 @@ function createWindow(): void {
           step.type === 'back' ||
           step.type === 'dialog' ||
           step.type === 'download' ||
-          step.type === 'upload'
+          step.type === 'upload' ||
+          step.type === 'a11y'
         ) {
           return undefined
         }
@@ -1979,6 +1981,30 @@ function createWindow(): void {
                 )
               }
             }
+          } else if (step.type === 'a11y') {
+            // F13: run axe-core on the settled page and FAIL the step if any
+            // violation is at or above the step's budget (default serious+).
+            // A page-level check, like a snapshot — no element, no selector.
+            await waitForVisualStable(currentWC)
+            const scan = await scanAccessibility(currentWC)
+            if (scan.error) {
+              throw new Error(`Accessibility check couldn't run — ${scan.error}`)
+            }
+            const level = a11yThresholdLevel(step.value)
+            const budget = a11yImpactRank(level)
+            const blocking = scan.violations.filter((v) => a11yImpactRank(v.impact) <= budget)
+            if (blocking.length) {
+              const elements = blocking.reduce((n, v) => n + v.nodes.length, 0)
+              const top = blocking
+                .slice(0, 4)
+                .map((v) => `${v.impact}: ${v.help} (${v.nodes.length})`)
+                .join('; ')
+              throw new Error(
+                `Accessibility: ${blocking.length} rule${blocking.length === 1 ? '' : 's'}` +
+                  ` / ${elements} element${elements === 1 ? '' : 's'} at "${level}" or worse — ${top}` +
+                  (blocking.length > 4 ? '; …' : '')
+              )
+            }
           } else if (step.type === 'wait') {
             // An explicit pause — no element involved, just time (Day 9).
             const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
@@ -2396,6 +2422,34 @@ function createWindow(): void {
     const buf = await loadBaseline(id)
     return buf ? `data:image/png;base64,${buf.toString('base64')}` : null
   })
+  // === Accessibility scan (F13) ======================================
+  // Inject axe-core into the ACTIVE tab, run WCAG A/AA, hand back the
+  // trimmed violations. A failure (no real page, or it navigated mid-scan)
+  // comes back as an `error` result the panel explains — never a throw.
+  ipcMain.handle('a11y:scan', async (): Promise<A11yScanResult> => {
+    try {
+      return await scanAccessibility(activeWC())
+    } catch (err) {
+      return {
+        url: '',
+        title: '',
+        at: new Date().toISOString(),
+        violations: [],
+        passCount: 0,
+        incompleteCount: 0,
+        nodeCount: 0,
+        error:
+          'Could not scan this page. Open a real web page first, then try again.' +
+          (err instanceof Error && err.message ? ` (${err.message})` : '')
+      }
+    }
+  })
+  // Open a rule's "how to fix" docs in the user's real browser. Restricted to
+  // https deque/w3 help links — this is a doc opener, not a general launcher.
+  ipcMain.handle('a11y:openHelp', (_event, url: string) => {
+    if (typeof url === 'string' && /^https:\/\//.test(url)) shell.openExternal(url)
+  })
+
   // Open a failure screenshot in the OS image viewer. Only paths inside the
   // library folder are allowed — this is a viewer, not a general file opener.
   ipcMain.handle('library:openScreenshot', (_event, path: string) => {

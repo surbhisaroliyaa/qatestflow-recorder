@@ -69,6 +69,16 @@ const VERDICT_LABELS: Record<FailureVerdict, string> = {
   unknown: 'Unclassified'
 }
 
+// F13: how severe axe considers each violation — drives the sort order (worst
+// first) and the chip colour. Anything unrated sorts last.
+const A11Y_IMPACT_ORDER: Record<string, number> = {
+  critical: 0,
+  serious: 1,
+  moderate: 2,
+  minor: 3
+}
+const a11yImpactRank = (impact: string): number => A11Y_IMPACT_ORDER[impact] ?? 4
+
 // These kinds compare against an expected value the user can edit.
 const assertNeedsValue = (kind: AssertKind): boolean =>
   kind === 'text-equals' ||
@@ -227,6 +237,13 @@ function App(): React.JSX.Element {
   const [traceStepIdx, setTraceStepIdx] = useState(0)
   const [traceImg, setTraceImg] = useState<string | null>(null)
   const [traceSavedAt, setTraceSavedAt] = useState<string | null>(null)
+  // F13 (accessibility scan): the last scan's result (null = panel closed) and
+  // whether a scan is in flight (the panel opens immediately, showing a spinner).
+  const [a11yScan, setA11yScan] = useState<A11yScanResult | null>(null)
+  const [a11yScanning, setA11yScanning] = useState(false)
+  // F13: the budget chosen when adding the scan as a reusable test step — the
+  // least severe impact that still fails the check (default critical+serious).
+  const [a11yAddLevel, setA11yAddLevel] = useState('serious')
   // Day 11.5 — suite runner: which section is running, per-test outcomes so
   // far, and whether the run has finished (summary shows then).
   interface SuiteRunEntry {
@@ -602,15 +619,18 @@ function App(): React.JSX.Element {
   // Day 20: the overview popup auto-appears when a data run finishes; the
   // detailed tabs live inline in the panel (no overlay needed for those).
   const dataPopupOpen = dataRun !== null && !dataRun.running && !dataPopupDismissed
+  // F13: the a11y panel is open while a scan runs (spinner) or a result is shown.
+  const a11yPanelOpen = a11yScanning || a11yScan !== null
   useEffect(() => {
     window.api.browser.setOverlay(
       exportCode !== null ||
         suiteSummaryOpen ||
         dataPopupOpen ||
         analysisOpen ||
-        traceView !== null
+        traceView !== null ||
+        a11yPanelOpen
     )
-  }, [exportCode, suiteSummaryOpen, dataPopupOpen, analysisOpen, traceView])
+  }, [exportCode, suiteSummaryOpen, dataPopupOpen, analysisOpen, traceView, a11yPanelOpen])
 
   // Day 18: remember the trace policy across sessions.
   useEffect(() => {
@@ -934,6 +954,39 @@ function App(): React.JSX.Element {
     setTraceView(null)
     setTraceImg(null)
     setTraceSavedAt(null)
+  }
+
+  // F13: scan the current page for accessibility violations. Opens the panel
+  // right away (spinner), then fills it with the result. Never throws — a
+  // page that can't be scanned comes back as a result with `error` set.
+  const handleA11yScan = async (): Promise<void> => {
+    setA11yScan(null)
+    setA11yScanning(true)
+    try {
+      const result = await window.api.a11y.scan()
+      setA11yScan(result)
+    } catch {
+      setA11yScan({
+        url: '',
+        title: '',
+        at: new Date().toISOString(),
+        violations: [],
+        passCount: 0,
+        incompleteCount: 0,
+        nodeCount: 0,
+        error: 'The scan failed to run. Please try again.'
+      })
+    } finally {
+      setA11yScanning(false)
+    }
+  }
+
+  // F13: add the scan as a permanent test step — replay then FAILS if the page
+  // regresses on accessibility (at or above the chosen budget). Appended to the
+  // end (the check runs after the recorded flow); editable like any step after.
+  const handleAddA11yStep = (): void => {
+    editSteps([...steps, { type: 'a11y', label: 'Accessibility check', value: a11yAddLevel }])
+    setA11yScan(null)
   }
   const saveTraceRecording = async (): Promise<void> => {
     if (!traceView) return
@@ -1375,9 +1428,7 @@ function App(): React.JSX.Element {
         setBaseURL(data.baseURL)
         // Live-link: expand any linked blocks before running (a block ref must
         // never reach the replay engine — it only understands real steps).
-        const { flat: flatSuite, map: suiteMap } = await buildRunPlan(
-          data.steps as RecorderStep[]
-        )
+        const { flat: flatSuite, map: suiteMap } = await buildRunPlan(data.steps as RecorderStep[])
         runPlanRef.current = suiteMap
         const result = await runOnce(flatSuite, t.fileName, false, data.storageState)
         entry = {
@@ -1519,6 +1570,8 @@ function App(): React.JSX.Element {
     }
     // Day 19: a snapshot's allowed diff threshold (percent) is editable.
     if (step.type === 'snapshot') return step.value ?? '1'
+    // F13: an a11y check's budget (critical|serious|moderate|minor) is editable.
+    if (step.type === 'a11y') return step.value ?? 'serious'
     if (step.type === 'assert' && step.assertKind && assertNeedsValue(step.assertKind)) {
       return step.value ?? ''
     }
@@ -1663,11 +1716,7 @@ function App(): React.JSX.Element {
     const block = await window.api.blocks.load(fileName)
     if (!block || !block.steps.length) return
     const at = blockInsertAt ?? steps.length
-    editSteps([
-      ...steps.slice(0, at),
-      ...(block.steps as RecorderStep[]),
-      ...steps.slice(at)
-    ])
+    editSteps([...steps.slice(0, at), ...(block.steps as RecorderStep[]), ...steps.slice(at)])
     setStashedSteps(null) // inserting is a deliberate edit — drop any edit-detour stash
     setBlocksPanelOpen(false)
   }
@@ -2319,6 +2368,15 @@ function App(): React.JSX.Element {
         >
           📸 Snapshot
         </button>
+        {/* F13: scan the current page for WCAG A/AA accessibility violations. */}
+        <button
+          className="a11y-btn"
+          onClick={handleA11yScan}
+          disabled={isReplaying || isPicking || a11yScanning}
+          title="Accessibility scan: check this page for WCAG A/AA violations (missing labels, contrast, ARIA, keyboard traps)"
+        >
+          ♿ {a11yScanning ? 'Scanning…' : 'A11y'}
+        </button>
         <button
           className={`record-btn${isRecording ? ' recording' : ''}`}
           onClick={handleRecordToggle}
@@ -2795,8 +2853,8 @@ function App(): React.JSX.Element {
                         <span className="self-heal-text">
                           🔧 Self-heal found <strong>{recovery.suggestion.ambiguousCount}</strong>{' '}
                           elements labelled <strong>“{recovery.suggestion.label}”</strong> — too
-                          ambiguous to fix automatically. Use <strong>🎯 Pick manually</strong> below
-                          to choose the right one.
+                          ambiguous to fix automatically. Use <strong>🎯 Pick manually</strong>{' '}
+                          below to choose the right one.
                         </span>
                       </div>
                     ) : (
@@ -2933,12 +2991,13 @@ function App(): React.JSX.Element {
               </div>
 
               <div className="block-section-label">
-                Insert a block {blockInsertAt !== null ? `at step ${blockInsertAt + 1}` : 'at the end'}
+                Insert a block{' '}
+                {blockInsertAt !== null ? `at step ${blockInsertAt + 1}` : 'at the end'}
               </div>
               {blocks.length > 0 && (
                 <div className="block-hint">
-                  🔗 linked — stays in sync when you edit the block · ⧉ copy — an
-                  independent snapshot you can edit here
+                  🔗 linked — stays in sync when you edit the block · ⧉ copy — an independent
+                  snapshot you can edit here
                 </div>
               )}
               {blocks.length === 0 ? (
@@ -3795,6 +3854,144 @@ function App(): React.JSX.Element {
                   </button>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === F13: accessibility scan panel — WCAG A/AA violations for the
+           current page, grouped by rule, each expandable to the offending
+           elements + how to fix. Safe over the native pane: setOverlay hides
+           it while this is open. === */}
+      {a11yPanelOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!a11yScanning) setA11yScan(null)
+          }}
+        >
+          <div className="a11y-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">
+                ♿ Accessibility
+                {a11yScan && !a11yScan.error && a11yScan.violations.length > 0 && (
+                  <span className="a11y-title-count">
+                    {a11yScan.violations.length} rule
+                    {a11yScan.violations.length === 1 ? '' : 's'} · {a11yScan.nodeCount} element
+                    {a11yScan.nodeCount === 1 ? '' : 's'}
+                  </span>
+                )}
+              </span>
+              <button
+                className="modal-close"
+                onClick={() => setA11yScan(null)}
+                disabled={a11yScanning}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {a11yScanning ? (
+              <div className="a11y-body a11y-loading">
+                <span className="a11y-spinner" />
+                <p>Injecting axe-core and checking this page for WCAG A/AA violations…</p>
+              </div>
+            ) : a11yScan?.error ? (
+              <div className="a11y-body">
+                <p className="a11y-error">{a11yScan.error}</p>
+              </div>
+            ) : a11yScan ? (
+              <>
+                <div className="a11y-summary">
+                  <span className="a11y-summary-url" title={a11yScan.url}>
+                    {a11yScan.title || a11yScan.url || 'this page'}
+                  </span>
+                  <span className="a11y-summary-stats">
+                    {a11yScan.passCount} checks passed
+                    {a11yScan.incompleteCount > 0 && ` · ${a11yScan.incompleteCount} need review`}
+                  </span>
+                </div>
+                <div className="a11y-body">
+                  {a11yScan.violations.length === 0 ? (
+                    <p className="a11y-clean">🎉 No WCAG A/AA violations found on this page.</p>
+                  ) : (
+                    [...a11yScan.violations]
+                      .sort((a, b) => a11yImpactRank(a.impact) - a11yImpactRank(b.impact))
+                      .map((v) => (
+                        <details className="a11y-rule" key={v.id}>
+                          <summary>
+                            <span className={`a11y-impact ${v.impact}`}>{v.impact}</span>
+                            <span className="a11y-help">{v.help}</span>
+                            <span className="a11y-node-count">
+                              {v.nodes.length}
+                              {v.nodes.length === 1 ? ' element' : ' elements'}
+                            </span>
+                          </summary>
+                          <div className="a11y-rule-body">
+                            <p className="a11y-desc">{v.description}</p>
+                            {v.nodes.map((n, i) => (
+                              <div className="a11y-node" key={i}>
+                                <code className="a11y-target">{n.target}</code>
+                                <pre className="a11y-html">{n.html}</pre>
+                                {n.summary && <p className="a11y-fix">{n.summary}</p>}
+                              </div>
+                            ))}
+                            <button
+                              className="a11y-learn"
+                              onClick={() => window.api.a11y.openHelp(v.helpUrl)}
+                            >
+                              Learn how to fix ↗
+                            </button>
+                          </div>
+                        </details>
+                      ))
+                  )}
+                </div>
+              </>
+            ) : null}
+
+            <div className="modal-footer">
+              {a11yScan && !a11yScan.error && (
+                <span className="a11y-add">
+                  <label htmlFor="a11y-level" className="a11y-add-label">
+                    Fail replay on
+                  </label>
+                  <select
+                    id="a11y-level"
+                    className="a11y-level-select"
+                    value={a11yAddLevel}
+                    onChange={(e) => setA11yAddLevel(e.target.value)}
+                    title="Which severities should fail a replay when added as a test step"
+                  >
+                    <option value="critical">critical only</option>
+                    <option value="serious">serious + critical</option>
+                    <option value="moderate">moderate and up</option>
+                    <option value="minor">any violation</option>
+                  </select>
+                  <button
+                    className="modal-btn"
+                    onClick={handleAddA11yStep}
+                    title="Add this as a test step — replay fails if the page regresses on accessibility"
+                  >
+                    ➕ Add as test step
+                  </button>
+                </span>
+              )}
+              <button
+                className="modal-btn"
+                onClick={() => setA11yScan(null)}
+                disabled={a11yScanning}
+              >
+                Close
+              </button>
+              <button
+                className="modal-btn primary"
+                onClick={handleA11yScan}
+                disabled={a11yScanning}
+              >
+                ↻ Re-scan
+              </button>
             </div>
           </div>
         </div>

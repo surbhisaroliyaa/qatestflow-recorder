@@ -13,6 +13,21 @@ function quote(value: string): string {
   return JSON.stringify(value)
 }
 
+// F13 (a11y assertion step): severities worst→least. The step's `value` is the
+// budget — the least severe impact that still fails; unknown/absent → 'serious'.
+const A11Y_LEVELS = ['critical', 'serious', 'moderate', 'minor']
+function a11yThreshold(value?: string): string {
+  return value && A11Y_LEVELS.includes(value) ? value : 'serious'
+}
+// The impacts that COUNT as a failure at a given budget (the level + everything
+// worse than it). 'serious' → ['critical','serious'].
+function a11yBlockingImpacts(value?: string): string[] {
+  return A11Y_LEVELS.slice(0, A11Y_LEVELS.indexOf(a11yThreshold(value)) + 1)
+}
+
+// WCAG tags the exported AxeBuilder runs — mirrors the in-app scan.
+const A11Y_WCAG_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']
+
 // A valid JS identifier? Decides `data.col` vs `data["col"]` (and the same for
 // process.env access).
 function isIdent(name: string): boolean {
@@ -136,6 +151,8 @@ export function stepText(step: RecorderStep): string {
       return `Close tab ${step.windowId ?? ''}`.trim()
     case 'snapshot':
       return `Visual snapshot${step.value ? ` (≤ ${step.value}% diff)` : ''}`
+    case 'a11y':
+      return `Check accessibility — no ${a11yThreshold(step.value)}+ violations`
     case 'click':
       return `Click ${step.label}`
     case 'type':
@@ -261,6 +278,21 @@ function actionFor(
     // Day 19: Playwright manages its own baseline (created on first run, then
     // compared) — a clean 1:1 mapping for our visual snapshot.
     return `await expect(${pageVar}).toHaveScreenshot()`
+  }
+
+  if (step.type === 'a11y') {
+    // F13: the exported test uses @axe-core/playwright's AxeBuilder (the
+    // official integration) and asserts no violation at/above the budget.
+    // One self-contained expression, so repeated a11y steps never collide.
+    const impacts = JSON.stringify(a11yBlockingImpacts(step.value))
+    const tags = JSON.stringify(A11Y_WCAG_TAGS)
+    return (
+      `expect(\n` +
+      `    (await new AxeBuilder({ page: ${pageVar} }).withTags(${tags}).analyze())\n` +
+      `      .violations.filter((v) => ${impacts}.includes(v.impact)).map((v) => v.id),\n` +
+      `    'accessibility (${a11yThreshold(step.value)}+) violations'\n` +
+      `  ).toEqual([])`
+    )
   }
 
   if (step.type === 'wait') {
@@ -457,11 +489,17 @@ export function generatePlaywrightTest(
   // Only import expect when an assertion (or a download check) uses it; pull in
   // fs only when a download check needs a file-size assertion.
   const hasDownload = enabled.some((step) => step.type === 'download')
+  const hasA11y = enabled.some((step) => step.type === 'a11y')
   const hasAssert =
-    enabled.some((step) => step.type === 'assert' || step.type === 'snapshot') || hasDownload
+    enabled.some((step) => step.type === 'assert' || step.type === 'snapshot') ||
+    hasDownload ||
+    hasA11y
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const header =
-    `import ${imports} from '@playwright/test'\n` + (hasDownload ? "import fs from 'fs'\n" : '')
+    (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
+    `import ${imports} from '@playwright/test'\n` +
+    (hasA11y ? "import AxeBuilder from '@axe-core/playwright'\n" : '') +
+    (hasDownload ? "import fs from 'fs'\n" : '')
   // Day 17: test.use carries baseURL and (when a session is attached) the
   // storageState path, so the exported test starts logged in.
   const useProps: string[] = []
@@ -642,6 +680,14 @@ export function generatePageObjectTest(
       if (line) specBody.push(`  ${line}`)
       continue
     }
+    // F13: a page-level accessibility check — like an assert, it lives in the
+    // spec (where `expect` + AxeBuilder are imported), not a page-object method.
+    if (step.type === 'a11y') {
+      flush()
+      const line = actionFor(step, baseURL, 'app.page', undefined, columns)
+      if (line) specBody.push(`  ${line}`)
+      continue
+    }
     // An action step → into the current method buffer. wait + back have no
     // element of their own (page-level actions), so handle them before the
     // no-selector skip below.
@@ -698,7 +744,8 @@ export function generatePageObjectTest(
   const page = `${pageLines.join('\n')}\n`
 
   // === Build the spec file ===
-  const hasAssert = enabled.some((s) => s.type === 'assert')
+  const hasA11y = enabled.some((s) => s.type === 'a11y')
+  const hasAssert = enabled.some((s) => s.type === 'assert') || hasA11y
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const useProps: string[] = []
   if (baseURL) useProps.push(`baseURL: ${quote(baseURL)}`)
@@ -712,7 +759,9 @@ export function generatePageObjectTest(
   }
   const use = useProps.length ? `\ntest.use({ ${useProps.join(', ')} })\n` : ''
   const importLines =
+    (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
     `import ${imports} from '@playwright/test'\n` +
+    (hasA11y ? "import AxeBuilder from '@axe-core/playwright'\n" : '') +
     `import { ${className} } from './pages/${className}'\n`
 
   // Day 20: a data-driven spec — a `dataset` array and one test per row (named

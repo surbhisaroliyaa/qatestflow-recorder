@@ -512,6 +512,266 @@ body {
   cursor: default;
 }
 
+/* === F13: accessibility scan === */
+.a11y-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 120ms ease;
+}
+.a11y-btn:hover:not(:disabled) {
+  background: #4a4a4a;
+}
+.a11y-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.a11y-modal {
+  width: 760px;
+  max-width: 100%;
+  height: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e1e;
+  border: 1px solid #444;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.a11y-title-count {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #9aa0a6;
+}
+.a11y-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #333;
+  background: #232329;
+}
+.a11y-summary-url {
+  color: #cdd3d8;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.a11y-summary-stats {
+  color: #7d8590;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.a11y-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+.a11y-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #9aa0a6;
+  text-align: center;
+}
+.a11y-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #3a3a3a;
+  border-top-color: #58a6ff;
+  border-radius: 50%;
+  animation: a11y-spin 0.8s linear infinite;
+}
+@keyframes a11y-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.a11y-error {
+  color: #ffb0a8;
+  background: #3a2320;
+  border: 1px solid #6b3a33;
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-size: 13px;
+}
+.a11y-clean {
+  color: #7ee0a0;
+  font-size: 15px;
+  text-align: center;
+  padding: 40px 0;
+}
+
+/* One failed rule — a native <details> row. */
+.a11y-rule {
+  border: 1px solid #333;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  background: #232329;
+  overflow: hidden;
+}
+.a11y-rule > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.a11y-rule > summary::-webkit-details-marker {
+  display: none;
+}
+.a11y-rule > summary::before {
+  content: '▸';
+  color: #7d8590;
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+.a11y-rule[open] > summary::before {
+  transform: rotate(90deg);
+}
+.a11y-rule > summary:hover {
+  background: #2a2a31;
+}
+/* Severity chip — colour maps to axe's impact rating. */
+.a11y-impact {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+.a11y-impact.critical {
+  background: #4a1f1f;
+  color: #ff8a80;
+  border-color: #7a2f2f;
+}
+.a11y-impact.serious {
+  background: #4a3016;
+  color: #ffb366;
+  border-color: #7a4d24;
+}
+.a11y-impact.moderate {
+  background: #4a4416;
+  color: #ffdf6b;
+  border-color: #6e6524;
+}
+.a11y-impact.minor {
+  background: #2a3a4a;
+  color: #8fc7ff;
+  border-color: #3d566e;
+}
+.a11y-help {
+  flex: 1;
+  color: #e6e6e6;
+  font-size: 13px;
+  font-weight: 600;
+}
+.a11y-node-count {
+  flex-shrink: 0;
+  color: #9aa0a6;
+  font-size: 11px;
+}
+.a11y-rule-body {
+  padding: 4px 12px 12px 12px;
+  border-top: 1px solid #333;
+}
+.a11y-desc {
+  color: #b9c0c7;
+  font-size: 12px;
+  margin: 8px 0 10px;
+}
+.a11y-node {
+  border-left: 2px solid #3d566e;
+  padding: 4px 0 4px 10px;
+  margin-bottom: 8px;
+}
+.a11y-target {
+  display: block;
+  color: #8fc7ff;
+  font-size: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  word-break: break-all;
+}
+.a11y-html {
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: #16161a;
+  border: 1px solid #2c2c33;
+  border-radius: 5px;
+  color: #cdd3d8;
+  font-size: 11px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 96px;
+  overflow-y: auto;
+}
+.a11y-fix {
+  color: #9aa0a6;
+  font-size: 11px;
+  white-space: pre-wrap;
+  margin: 4px 0 0;
+}
+.a11y-learn {
+  margin-top: 6px;
+  background: none;
+  border: none;
+  color: #58a6ff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 0;
+  font-family: inherit;
+}
+.a11y-learn:hover {
+  text-decoration: underline;
+}
+/* "Add as test step" control in the panel footer — sits left of Close/Re-scan. */
+.a11y-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+}
+.a11y-add-label {
+  color: #9aa0a6;
+  font-size: 12px;
+}
+.a11y-level-select {
+  height: 30px;
+  padding: 0 8px;
+  background: #1b1b1f;
+  border: 1px solid #555;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
 /* While picking: blue, like the highlight box in the page. */
 .check-btn.picking {
   background: #173a5e;

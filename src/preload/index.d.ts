@@ -89,6 +89,15 @@ interface RecorderAPI {
   resolveEnv: (names: string[]) => Promise<Record<string, string>>
 }
 
+// === Accessibility scan (F13) ===
+interface A11yAPI {
+  // Inject axe-core + run WCAG A/AA on the active tab. Never rejects — a page
+  // it can't scan comes back as a result with `error` set.
+  scan: () => Promise<A11yScanResult>
+  // Open a rule's "how to fix" docs (helpUrl) in the user's real browser.
+  openHelp: (url: string) => Promise<void>
+}
+
 // === Visual regression (Day 19) ===
 interface VisualAPI {
   // Adopt a current capture as the new baseline (a page legitimately changed).
@@ -182,6 +191,7 @@ interface API {
   drafts: DraftAPI
   blocks: BlocksAPI
   visual: VisualAPI
+  a11y: A11yAPI
 }
 
 declare global {
@@ -205,6 +215,34 @@ declare global {
     error?: string
     screenshotPath?: string // page capture at the failing step (Day 11.5)
     traceId?: string // Day 18: the kept run trace, openable in the viewer
+  }
+
+  // === Accessibility scan (F13) ===
+  // MIRROR: same shapes as A11yNode / A11yViolation / A11yScanResult in
+  // src/main/a11y.ts.
+  interface A11yNode {
+    target: string // CSS selector path to the offending element
+    html: string // truncated outerHTML snippet
+    summary: string // axe's plain "how to fix" failureSummary
+  }
+  interface A11yViolation {
+    id: string
+    impact: 'critical' | 'serious' | 'moderate' | 'minor' | string
+    help: string
+    description: string
+    helpUrl: string
+    tags: string[]
+    nodes: A11yNode[]
+  }
+  interface A11yScanResult {
+    url: string
+    title: string
+    at: string
+    violations: A11yViolation[]
+    passCount: number
+    incompleteCount: number
+    nodeCount: number // total elements flagged (may exceed the nodes we keep)
+    error?: string // set when the page couldn't be scanned
   }
 
   // === Run trace (Day 18) ===
@@ -462,6 +500,7 @@ declare global {
       | 'upload'
       | 'download'
       | 'snapshot'
+      | 'a11y'
       | 'block'
     label?: string
     // Pillar 4 (live-link blocks, v2): a 'block' step is a LIVE REFERENCE to a
@@ -473,7 +512,9 @@ declare global {
     // For type/select: the entered value. For assert text/value kinds: the
     // EXPECTED value. For wait: the seconds, as text (editable like any value).
     // For dialog: the response — prompt's answer text, or 'accept'/'dismiss'
-    // for a confirm (alert has none).
+    // for a confirm (alert has none). For an `a11y` step (F13): the budget —
+    // the least severe impact that still FAILS the check
+    // ('critical'|'serious'|'moderate'|'minor'; default 'serious').
     value?: string
     key?: string // for `press` steps — the key pressed (e.g. 'Enter')
     // Day 16: which native dialog this step answers (alert/confirm/prompt). The

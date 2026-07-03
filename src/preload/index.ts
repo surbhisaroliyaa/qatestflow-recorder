@@ -177,6 +177,14 @@ const api = {
       ipcRenderer.invoke('env:get', names)
   },
 
+  // === Accessibility scan (F13) ===
+  // Run axe-core on the current page → WCAG A/AA violations. openHelp opens a
+  // rule's docs in the real browser. (Result shape typed in index.d.ts.)
+  a11y: {
+    scan: (): Promise<unknown> => ipcRenderer.invoke('a11y:scan'),
+    openHelp: (url: string): Promise<void> => ipcRenderer.invoke('a11y:openHelp', url)
+  },
+
   // === Visual regression (Day 19) ===
   visual: {
     updateBaseline: (baselineId: string, currentPath: string): Promise<boolean> =>
