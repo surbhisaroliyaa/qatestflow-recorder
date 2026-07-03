@@ -1655,6 +1655,105 @@ body {
   border-color: #3a3a42;
 }
 
+/* === F12: version history modal + step diff === */
+.history-modal {
+  width: 820px;
+  max-width: 100%;
+  height: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1b1b1f;
+  border: 1px solid #444;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.history-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.history-versions {
+  width: 260px;
+  flex: none;
+  border-right: 1px solid #333;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.history-version {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+  padding: 8px 10px;
+  background: #232329;
+  border: 1px solid #333;
+  border-radius: 8px;
+  color: #cdd3d8;
+  cursor: pointer;
+  font-family: inherit;
+}
+.history-version:hover {
+  background: #2a2a31;
+}
+.history-version.active {
+  border-color: #58a6ff;
+  background: #173a5e;
+}
+.history-version-when {
+  font-size: 12px;
+  font-weight: 600;
+}
+.history-version-counts {
+  font-size: 11px;
+  color: #9aa0a6;
+}
+.history-diff {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+}
+.history-diff-head {
+  color: #9aa0a6;
+  font-family: var(--font, sans-serif);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.diff-line {
+  display: flex;
+  gap: 6px;
+  padding: 1px 4px;
+  white-space: pre-wrap;
+  border-radius: 3px;
+  color: #b9c0c7;
+}
+.diff-line.add {
+  background: #122a18;
+  color: #7ee0a0;
+}
+.diff-line.del {
+  background: #2e1616;
+  color: #ff8a80;
+}
+.diff-mark {
+  flex: none;
+  width: 10px;
+  color: inherit;
+  opacity: 0.8;
+}
+.diff-add {
+  color: #7ee0a0;
+}
+.diff-del {
+  color: #ff8a80;
+}
+
 /* === F6: dead/weak assertion warnings === */
 .weak-check {
   flex: none;

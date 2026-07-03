@@ -5,6 +5,7 @@ import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } f
 import { classifyRuns } from './flaky'
 import { trustScore } from './trust'
 import { findWeakAssertions } from './deadAssertions'
+import { diffSteps, diffCounts } from './stepDiff'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
@@ -184,6 +185,11 @@ function App(): React.JSX.Element {
   const [captureNetwork, setCaptureNetwork] = useState(false)
   const [harCount, setHarCount] = useState(0)
   const [harField, setHarField] = useState<string | undefined>(undefined)
+  // F12: past edits of the loaded test + the history modal state (which version
+  // is selected for the diff).
+  const [testVersions, setTestVersions] = useState<TestVersion[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyIdx, setHistoryIdx] = useState(0)
   const [lastHarUsage, setLastHarUsage] = useState<{ served: number; passthrough: number } | null>(
     null
   )
@@ -670,7 +676,8 @@ function App(): React.JSX.Element {
         analysisOpen ||
         traceView !== null ||
         a11yPanelOpen ||
-        perfPanelOpen
+        perfPanelOpen ||
+        historyOpen
     )
   }, [
     exportCode,
@@ -679,7 +686,8 @@ function App(): React.JSX.Element {
     analysisOpen,
     traceView,
     a11yPanelOpen,
-    perfPanelOpen
+    perfPanelOpen,
+    historyOpen
   ])
 
   // Day 18: remember the trace policy across sessions.
@@ -796,6 +804,8 @@ function App(): React.JSX.Element {
     setHarField(undefined) // F1: drop the previous test's HAR link
     setHarCount(0)
     setLastHarUsage(null)
+    setTestVersions([]) // F12: no history for a brand-new recording
+    setHistoryOpen(false)
     applyViewport(undefined)
     setTestSuite('')
     setSavePanelOpen(false)
@@ -1094,6 +1104,15 @@ function App(): React.JSX.Element {
   const handleAddPerfStep = (): void => {
     editSteps([...steps, { type: 'perf', label: 'Performance check', value: perfAddLevel }])
     setPerfResult(null)
+  }
+
+  // F12: roll the working steps back to a past version (then the user can save,
+  // which snapshots the current steps as a new version — nothing is lost).
+  const handleRestoreVersion = (): void => {
+    const v = testVersions[historyIdx]
+    if (!v) return
+    editSteps(v.steps as RecorderStep[])
+    setHistoryOpen(false)
   }
   const saveTraceRecording = async (): Promise<void> => {
     if (!traceView) return
@@ -1416,6 +1435,10 @@ function App(): React.JSX.Element {
       captureHar: harCount > 0 // F1: bank the just-captured network, if any
     })
     if (harCount > 0) setHarField(summary.har)
+    // F12: saving may have snapshotted the previous steps as a new version —
+    // refresh the in-memory history so it's up to date without a reload.
+    const savedFull = await window.api.library.load(summary.fileName)
+    setTestVersions(savedFull?.versions ?? [])
     // Renaming or re-sectioning = a MOVE: the save created the new file, so
     // drop the old one (otherwise stale copies pile up under the old name).
     if (testFileName && testFileName !== summary.fileName) {
@@ -1447,6 +1470,8 @@ function App(): React.JSX.Element {
     setStorageState(test.storageState)
     setHarField(test.har) // F1: replay this test against its saved HAR, if any
     setLastHarUsage(null)
+    setTestVersions(test.versions ?? []) // F12: this test's edit history
+    setHistoryOpen(false)
     applyViewport(test.viewport)
     setDataRows(test.dataRows ?? []) // Day 20: data-driven table
     setDataPanelOpen(false)
@@ -2727,6 +2752,20 @@ function App(): React.JSX.Element {
                 >
                   🧩 Blocks
                 </button>
+                {/* F12: past edits of this test — shown once it has history. */}
+                {testVersions.length > 0 && (
+                  <button
+                    className="data-btn"
+                    onClick={() => {
+                      setHistoryIdx(0)
+                      setHistoryOpen(true)
+                    }}
+                    disabled={isReplaying || isRecording}
+                    title="History: see what changed in this test across edits, and roll back"
+                  >
+                    🕘 History ({testVersions.length})
+                  </button>
+                )}
                 <button
                   className="export-btn"
                   onClick={handleExport}
@@ -4082,6 +4121,78 @@ function App(): React.JSX.Element {
                   </button>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === F12: version history — past edits on the left, a git-style diff
+           of the selected version vs the current steps on the right, with a
+           one-click restore. === */}
+      {historyOpen && (
+        <div className="modal-backdrop" onClick={() => setHistoryOpen(false)}>
+          <div className="history-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">🕘 Version history — {testName || 'this test'}</span>
+              <button
+                className="modal-close"
+                onClick={() => setHistoryOpen(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="history-body">
+              <div className="history-versions">
+                {testVersions.map((v, vi) => {
+                  const c = diffCounts(v.steps as RecorderStep[], steps)
+                  return (
+                    <button
+                      key={vi}
+                      className={`history-version${vi === historyIdx ? ' active' : ''}`}
+                      onClick={() => setHistoryIdx(vi)}
+                    >
+                      <span className="history-version-when">
+                        {vi === 0 ? 'Previous edit' : `Edit −${vi}`} ·{' '}
+                        {new Date(v.at).toLocaleString()}
+                      </span>
+                      <span className="history-version-counts">
+                        {(v.steps as RecorderStep[]).length} steps
+                        {c.added > 0 && <span className="diff-add"> +{c.added}</span>}
+                        {c.removed > 0 && <span className="diff-del"> −{c.removed}</span>}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="history-diff">
+                <div className="history-diff-head">
+                  This version → <strong>current</strong> (green = added since, red = removed)
+                </div>
+                {testVersions[historyIdx] &&
+                  diffSteps(testVersions[historyIdx].steps as RecorderStep[], steps).map(
+                    (line, li) => (
+                      <div key={li} className={`diff-line ${line.kind}`}>
+                        <span className="diff-mark">
+                          {line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ' '}
+                        </span>
+                        {line.text}
+                      </div>
+                    )
+                  )}
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="modal-btn" onClick={() => setHistoryOpen(false)}>
+                Close
+              </button>
+              <button
+                className="modal-btn primary"
+                onClick={handleRestoreVersion}
+                title="Replace the current steps with this version (your current steps are saved as a new version when you next save)"
+              >
+                ↩ Restore this version
+              </button>
             </div>
           </div>
         </div>

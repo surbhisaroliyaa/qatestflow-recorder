@@ -374,6 +374,13 @@ declare global {
     runs?: RunInfo[] // history, newest first, capped at 10
   }
 
+  // F12: one past edit of a test — its steps as they were, and when it was
+  // replaced. Lets the UI diff a past version against the current steps.
+  interface TestVersion {
+    at: string
+    steps: RecorderStep[]
+  }
+
   // A fully loaded test: the step model plus its metadata.
   interface SavedTestData {
     version: number
@@ -385,6 +392,7 @@ declare global {
     viewport?: { width: number; height: number } // Day 17: device emulation
     dataRows?: Record<string, string>[] // Day 20: data-driven table rows
     har?: string // F1: a captured network archive to replay against, if any
+    versions?: TestVersion[] // F12: previous edits, newest first
     lastRun?: RunInfo
     steps: RecorderStep[]
   }

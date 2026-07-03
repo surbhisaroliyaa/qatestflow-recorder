@@ -29,6 +29,17 @@ export interface RunInfo {
 // "newly broken" vs "flaky all week" without growing files forever.
 const RUN_HISTORY_LIMIT = 10
 
+// F12: how many PAST edits of a test to keep (newest first) — enough to see
+// "what changed and when" and roll back a bad edit, without bloating the file.
+const VERSION_LIMIT = 15
+
+// F12: one past edit of a test — the steps as they were, and when that version
+// was superseded. Lets the UI diff any past version against the current steps.
+export interface TestVersion {
+  at: string // ISO time this version was replaced (the old updatedAt)
+  steps: unknown[]
+}
+
 // The full on-disk shape. Steps are opaque to main (the renderer owns the
 // RecorderStep type) — main just stores and returns them.
 export interface SavedTestFile {
@@ -51,6 +62,9 @@ export interface SavedTestFile {
   // F1 (HAR): a captured network archive in _hars/ (bare filename, like
   // storageState). When set, replay serves matched responses from it.
   har?: string
+  // F12: previous edits of this test (newest first, capped) — snapshotted on
+  // save whenever the steps change, so you can see the history and roll back.
+  versions?: TestVersion[]
   steps: unknown[]
 }
 
@@ -218,6 +232,16 @@ export async function saveTest(input: {
     await mkdir(harsDir(), { recursive: true })
     await writeFile(join(harsDir(), har), JSON.stringify(input.harLog), 'utf-8')
   }
+  // F12: if the STEPS actually changed vs the last save, snapshot the previous
+  // steps as a version (so you can see what changed and roll back). Re-saving
+  // without touching the steps (e.g. a rename) doesn't add a version.
+  let versions = previous?.versions
+  if (previous && JSON.stringify(previous.steps) !== JSON.stringify(input.steps)) {
+    versions = [
+      { at: previous.updatedAt, steps: previous.steps },
+      ...(previous.versions ?? [])
+    ].slice(0, VERSION_LIMIT)
+  }
   const test: SavedTestFile = {
     version: 1,
     name: input.name,
@@ -230,6 +254,7 @@ export async function saveTest(input: {
     viewport: input.viewport,
     dataRows: input.dataRows,
     har,
+    versions,
     steps: input.steps
   }
   await writeFile(join(libraryDir(), fileName), JSON.stringify(test, null, 2), 'utf-8')
