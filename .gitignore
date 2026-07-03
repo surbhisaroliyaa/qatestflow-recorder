@@ -57,8 +57,11 @@ playwright/.cache/
 .idea/
 *.iml
 
-# --- Ad-hoc screenshots dropped in the repo root ---
+# --- Ad-hoc screenshots + screen recordings dropped in the repo root ---
+# (testing captures Surbhi drops in while reviewing — never part of the source)
 /Screenshot *.png
+/Recording *.mp4
+*.mp4
 
 # --- Local-only learning docs (kept on disk, not pushed to GitHub) ---
 /docs/
