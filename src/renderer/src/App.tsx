@@ -331,7 +331,7 @@ function App(): React.JSX.Element {
   // banner). The tabs + their content live IN the steps panel, not a modal:
   // 'evidence' = each failed row's screenshot + recording; 'explain' = each
   // failed row, opened one by one for a diagnosis.
-  const [dataTab, setDataTab] = useState<'evidence' | 'explain' | null>(null)
+  const [dataTab, setDataTab] = useState<'evidence' | 'explain' | 'reports' | null>(null)
   // The overview popup that auto-appears when a data run finishes (the quick
   // "X passed, Y failed" summary). Dismissing it leaves the inline panel tabs.
   const [dataPopupDismissed, setDataPopupDismissed] = useState(false)
@@ -2898,9 +2898,12 @@ function App(): React.JSX.Element {
               // mode) has just a recording. So label the tab by what's actually
               // there — "Recordings" when no row failed, not "Screenshots &…".
               const hasShots = evidenceRows.some((r) => r.screenshotPath)
+              // Rows with a kept recording — each can produce a whole-run HTML
+              // report (pass or fail). Drives the dedicated Reports tab.
+              const reportRows = dataRun.results.filter((r) => r.traceId)
               const tone = failedRows.length ? 'failed' : 'passed'
               const plural = dataRun.total === 1 ? '' : 's'
-              const toggle = (tab: 'evidence' | 'explain'): void =>
+              const toggle = (tab: 'evidence' | 'explain' | 'reports'): void =>
                 setDataTab(dataTab === tab ? null : tab)
               return (
                 <div className="data-result">
@@ -2917,11 +2920,21 @@ function App(): React.JSX.Element {
                         onClick={() => toggle('evidence')}
                         title={
                           hasShots
-                            ? "Each captured row's screenshot, recording and report"
-                            : "Each captured row's recording and report"
+                            ? "Each captured row's screenshot and run recording"
+                            : "Each captured row's run recording"
                         }
                       >
                         {hasShots ? '📷 Screenshots & recordings' : '⏺ Recordings'}
+                      </button>
+                    )}
+                    {reportRows.length > 0 && (
+                      <button
+                        type="button"
+                        className={`data-tab${dataTab === 'reports' ? ' active' : ''}`}
+                        onClick={() => toggle('reports')}
+                        title="Save each row's whole-run HTML report (pass or fail) — prints to PDF"
+                      >
+                        📄 Reports
                       </button>
                     )}
                     {failedRows.length > 0 && (
@@ -2963,16 +2976,26 @@ function App(): React.JSX.Element {
                               ⏺
                             </button>
                           )}
-                          {r.traceId && (
-                            <button
-                              type="button"
-                              className="shot-link trace-link"
-                              onClick={() => saveRunReport(r.traceId!)}
-                              title="Save this row's HTML report (pass or fail) — prints to PDF"
-                            >
-                              📄
-                            </button>
-                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Reports tab — one whole-run HTML report per captured row. */}
+                  {dataTab === 'reports' && reportRows.length > 0 && (
+                    <div className="data-tab-content">
+                      {reportRows.map((r, idx) => (
+                        <div key={idx} className="data-evi-row">
+                          <span className={`run-dot ${r.status}`} />
+                          <span className="data-evi-name">{r.label}</span>
+                          <button
+                            type="button"
+                            className="shot-link trace-link"
+                            onClick={() => saveRunReport(r.traceId!)}
+                            title="Save this row's HTML report (pass or fail) — prints to PDF"
+                          >
+                            📄 Save report
+                          </button>
                         </div>
                       ))}
                     </div>
