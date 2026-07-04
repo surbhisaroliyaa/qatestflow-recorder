@@ -59,6 +59,7 @@ import {
   deleteTrace,
   isSafeTraceId,
   generateTraceHtml,
+  generateReportHtml,
   traceDir,
   pruneTraces,
   type TraceManifest,
@@ -2871,6 +2872,38 @@ function createWindow(): void {
         }
       }
       await writeFile(picked.filePath, generateTraceHtml(manifest, assets), 'utf-8')
+      shell.openPath(picked.filePath)
+      return picked.filePath
+    } catch {
+      return null
+    }
+  })
+
+  // Whole-run REPORT — a summary-first, print-friendly HTML doc of the WHOLE run
+  // (verdict banner + every step + timings + evidence), for pass OR fail. This is
+  // the "📄 report" button that sits next to the recording; the failure-only bug
+  // report (report:saveHtml) is a separate, defect-focused artifact. Same trace
+  // data as the recording; only the full-size screenshots need embedding.
+  ipcMain.handle('trace:exportReport', async (_event, id: string): Promise<string | null> => {
+    if (typeof id !== 'string' || !isSafeTraceId(id)) return null
+    const manifest = await loadTrace(id)
+    if (!manifest) return null
+    const slug = (manifest.testName || id).replace(/[^a-zA-Z0-9-_]+/g, '-').slice(0, 60)
+    const picked = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save run report',
+      defaultPath: `report-${slug}.html`,
+      filters: [{ name: 'HTML report', extensions: ['html'] }]
+    })
+    if (picked.canceled || !picked.filePath) return null
+    try {
+      const assets: Record<string, string> = {}
+      for (const step of manifest.steps) {
+        const file = step.screenshotFile
+        if (!file || assets[file]) continue
+        const buf = await readTraceAsset(id, file)
+        if (buf) assets[file] = `data:image/png;base64,${buf.toString('base64')}`
+      }
+      await writeFile(picked.filePath, generateReportHtml(manifest, assets), 'utf-8')
       shell.openPath(picked.filePath)
       return picked.filePath
     } catch {

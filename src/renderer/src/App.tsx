@@ -1119,6 +1119,12 @@ function App(): React.JSX.Element {
     const dest = await window.api.trace.export(traceView.id)
     if (dest) setTraceSavedAt(dest)
   }
+  // Save a whole-run HTML report (pass or fail) for the just-finished run — the
+  // "📄 report" button beside the recording. Uses the kept trace, so it appears
+  // whenever a recording exists (Always mode, or a failure with tracing on).
+  const saveRunReport = async (id: string): Promise<void> => {
+    await window.api.trace.exportReport(id)
+  }
 
   // Replay: run all recorded steps in the embedded browser and watch them go.
   // Interactive — a failed step pauses for recovery instead of ending the run.
@@ -2944,6 +2950,16 @@ function App(): React.JSX.Element {
                     title="Open the full run recording (every step's screenshot, console & network)"
                   >
                     ⏺ recording
+                  </button>
+                )}
+                {!isReplaying && lastTraceId && (
+                  <button
+                    type="button"
+                    className="shot-link trace-link"
+                    onClick={() => saveRunReport(lastTraceId)}
+                    title="Save a shareable HTML report of this whole run (pass or fail) — prints to PDF"
+                  >
+                    📄 report
                   </button>
                 )}
                 {replayBanner.tone === 'failed' && lastFailures.length > 1 ? (
