@@ -223,15 +223,7 @@ const api = {
       ipcRenderer.invoke('translator:explain', evidence),
     // Save a generated bug report; resolves to the path or null on cancel.
     saveReport: (markdown: string, defaultName: string): Promise<string | null> =>
-      ipcRenderer.invoke('report:save', markdown, defaultName),
-    // Save the SAME bug report as a self-contained HTML page (screenshot embedded
-    // by main). Resolves to the path or null on cancel.
-    saveReportHtml: (
-      evidence: unknown,
-      analysis: unknown,
-      defaultName: string
-    ): Promise<string | null> =>
-      ipcRenderer.invoke('report:saveHtml', evidence, analysis, defaultName)
+      ipcRenderer.invoke('report:save', markdown, defaultName)
   },
 
   // === Test library (Day 11) — saved tests as JSON files on disk. ===

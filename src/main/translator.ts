@@ -21,11 +21,20 @@ import { spawn } from 'child_process'
 // Everything we know about a failure, gathered at the moment it happened.
 // Assembled by the renderer (it owns the step list + human step text);
 // console/network lines come from main's replay-time capture.
+// One failed step in a whole-test analysis (Continue mode can fail several).
+export interface FailureItem {
+  index: number // 0-based index into allSteps
+  stepText: string
+  error: string
+  selector?: string
+  screenshotPath?: string
+}
+
 export interface FailureEvidence {
   testName?: string
   pageUrl: string
   pageTitle: string
-  stepIndex: number // 0-based index of the failing step
+  stepIndex: number // 0-based index of the (primary) failing step
   stepText: string // the human sentence, e.g. 'Click "Add to cart"'
   stepType: string
   selector?: string
@@ -34,6 +43,10 @@ export interface FailureEvidence {
   networkErrors: string[] // "[step 3] HTTP 500 on https://…/api/items"
   screenshotPath?: string
   allSteps: string[] // every step as a numbered sentence (repro context)
+  // When a test failed at MORE THAN ONE step, all of them — so Explain and the
+  // bug report cover the WHOLE test at once instead of step-by-step. The primary
+  // fields above mirror failures[0] for the single-failure code paths.
+  failures?: FailureItem[]
 }
 
 export type FailureVerdict = 'app-bug' | 'test-bug' | 'timing' | 'environment' | 'unknown'
@@ -65,8 +78,9 @@ const isThirdParty = (l: string): boolean => l.includes('[third-party]')
 export const siteFirst = (lines: string[]): string[] =>
   [...lines].sort((a, b) => Number(isThirdParty(a)) - Number(isThirdParty(b)))
 
-export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
-  const err = ev.error || ''
+// Run-wide evidence sentences (console/network). Computed once and appended to
+// the explanation — shared by every failed step, so listed a single time.
+function buildNotes(ev: FailureEvidence): string[] {
   const siteNetErrors = ev.networkErrors.filter((l) => !isThirdParty(l))
   const thirdPartyCount = ev.networkErrors.length - siteNetErrors.length
   const serverErrors = siteNetErrors.filter((l) => /HTTP 5\d\d/.test(l))
@@ -74,7 +88,6 @@ export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
   const requestFailures = siteNetErrors.filter((l) => !/HTTP \d\d\d/.test(l))
   const hasJsErrors = ev.consoleErrors.length > 0
 
-  // Evidence sentences appended to whichever explanation wins below.
   const notes: string[] = []
   if (serverErrors.length) {
     notes.push(
@@ -99,15 +112,27 @@ export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
       `(${thirdPartyCount} third-party request error(s) — analytics/telemetry from other domains — were also captured; these are common on healthy pages and were not counted as evidence.)`
     )
   }
+  return notes
+}
 
-  const finish = (
-    verdict: FailureVerdict,
-    explanation: string,
-    suggestion: string
-  ): FailureAnalysis => ({
-    source: 'rules',
+interface OneVerdict {
+  verdict: FailureVerdict
+  explanation: string
+  suggestion: string
+}
+
+// Classify ONE failure by its error + the run's server/JS-error signals — WITHOUT
+// the run-wide notes (the caller adds those once). This is the core rule engine;
+// ruleBasedExplain wraps it for the single- and multi-failure cases.
+function classifyOne(ev: FailureEvidence): OneVerdict {
+  const err = ev.error || ''
+  const siteNetErrors = ev.networkErrors.filter((l) => !isThirdParty(l))
+  const serverErrors = siteNetErrors.filter((l) => /HTTP 5\d\d/.test(l))
+  const hasJsErrors = ev.consoleErrors.length > 0
+
+  const finish = (verdict: FailureVerdict, explanation: string, suggestion: string): OneVerdict => ({
     verdict,
-    explanation: [explanation, ...notes].join(' '),
+    explanation,
     suggestion
   })
 
@@ -192,6 +217,52 @@ export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
   )
 }
 
+// When a test fails at several steps, one headline verdict has to represent them
+// all. Prefer the most product-implicating / actionable read: a real app-bug
+// anywhere trumps a stale-test elsewhere, etc.
+const VERDICT_PRIORITY: FailureVerdict[] = ['app-bug', 'environment', 'timing', 'test-bug', 'unknown']
+function headlineVerdict(verdicts: FailureVerdict[]): FailureVerdict {
+  for (const v of VERDICT_PRIORITY) if (verdicts.includes(v)) return v
+  return 'unknown'
+}
+
+export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
+  const notes = buildNotes(ev)
+
+  // Whole-test analysis: classify EACH failed step, then combine into one verdict
+  // + one explanation that walks through every failure. Run-wide notes once.
+  if (ev.failures && ev.failures.length > 1) {
+    const parts = ev.failures.map((f) => ({
+      f,
+      ...classifyOne({
+        ...ev,
+        stepIndex: f.index,
+        stepText: f.stepText,
+        error: f.error,
+        selector: f.selector
+      })
+    }))
+    const verdict = headlineVerdict(parts.map((p) => p.verdict))
+    const explanation = [
+      `This test failed at ${ev.failures.length} steps.`,
+      ...parts.map(
+        (p, i) => `(${i + 1}) Step ${p.f.index + 1} "${p.f.stepText}" — ${p.explanation}`
+      ),
+      ...notes
+    ].join(' ')
+    const suggestion = parts.find((p) => p.verdict === verdict)?.suggestion ?? parts[0].suggestion
+    return { source: 'rules', verdict, explanation, suggestion }
+  }
+
+  const one = classifyOne(ev)
+  return {
+    source: 'rules',
+    verdict: one.verdict,
+    explanation: [one.explanation, ...notes].join(' '),
+    suggestion: one.suggestion
+  }
+}
+
 // === The Claude CLI backend =========================================
 // Runs `claude -p` (headless one-shot mode of the Claude Code CLI the
 // developer already has installed + logged into). The prompt goes in via
@@ -200,6 +271,8 @@ export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
 const CLAUDE_TIMEOUT_MS = 90_000
 
 function buildPrompt(ev: FailureEvidence): string {
+  const multi = !!(ev.failures && ev.failures.length > 1)
+  const failedIdx = new Set(multi ? ev.failures!.map((f) => f.index) : [ev.stepIndex])
   const lines: string[] = [
     'You are a senior QA engineer triaging an automated UI test failure. Be concrete and brief.',
     '',
@@ -207,13 +280,25 @@ function buildPrompt(ev: FailureEvidence): string {
     `Page at failure: ${ev.pageUrl} — "${ev.pageTitle}"`,
     '',
     'Recorded steps:',
-    ...ev.allSteps.map(
-      (s, i) => `  ${i + 1}. ${s}${i === ev.stepIndex ? '   <-- FAILED HERE' : ''}`
-    ),
-    '',
-    `Failing step: ${ev.stepText} (type: ${ev.stepType}${ev.selector ? `, selector: ${ev.selector}` : ''})`,
-    `Error: ${ev.error}`,
-    '',
+    ...ev.allSteps.map((s, i) => `  ${i + 1}. ${s}${failedIdx.has(i) ? '   <-- FAILED HERE' : ''}`),
+    ''
+  ]
+  if (multi) {
+    lines.push(
+      `This test failed at ${ev.failures!.length} steps. Analyze the WHOLE test and give ONE combined verdict + explanation that covers all of them:`,
+      ...ev.failures!.map(
+        (f, i) => `  (${i + 1}) Step ${f.index + 1}: ${f.stepText}${f.selector ? ` [selector: ${f.selector}]` : ''} — Error: ${f.error}`
+      ),
+      ''
+    )
+  } else {
+    lines.push(
+      `Failing step: ${ev.stepText} (type: ${ev.stepType}${ev.selector ? `, selector: ${ev.selector}` : ''})`,
+      `Error: ${ev.error}`,
+      ''
+    )
+  }
+  lines.push(
     ev.consoleErrors.length
       ? `Console errors during the run:\n${ev.consoleErrors
           .slice(0, 10)
@@ -231,7 +316,7 @@ function buildPrompt(ev: FailureEvidence): string {
           .join('\n')}`
       : 'Network problems during the run: none',
     ''
-  ]
+  )
   if (ev.screenshotPath) {
     lines.push(
       `An annotated screenshot of the page at the moment of failure is saved at: ${ev.screenshotPath}`,

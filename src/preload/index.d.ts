@@ -167,12 +167,6 @@ interface SessionAPI {
 interface TranslatorAPI {
   explain: (evidence: FailureEvidence) => Promise<FailureAnalysis>
   saveReport: (markdown: string, defaultName: string) => Promise<string | null>
-  // Save the same bug report as a self-contained HTML page (screenshot embedded).
-  saveReportHtml: (
-    evidence: FailureEvidence,
-    analysis: FailureAnalysis | null,
-    defaultName: string
-  ) => Promise<string | null>
 }
 
 // === Drafts (Day 18) — auto-saved in-progress recordings ===
@@ -462,6 +456,13 @@ declare global {
   // the renderer (which owns the steps and their human sentences), enriched
   // with main's replay-time console/network capture.
   // MIRROR: same shape as FailureEvidence in src/main/translator.ts.
+  interface FailureItem {
+    index: number
+    stepText: string
+    error: string
+    selector?: string
+    screenshotPath?: string
+  }
   interface FailureEvidence {
     testName?: string
     pageUrl: string
@@ -475,6 +476,8 @@ declare global {
     networkErrors: string[]
     screenshotPath?: string
     allSteps: string[]
+    // All failed steps when a test failed at more than one (whole-test analysis).
+    failures?: FailureItem[]
   }
 
   // The diagnosis: WHO is at fault (the verdict) + the story + next action.

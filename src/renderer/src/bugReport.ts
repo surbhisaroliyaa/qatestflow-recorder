@@ -27,12 +27,31 @@ function expectedVsActual(error: string): { expected: string; actual: string } {
 }
 
 export function generateBugReport(ev: FailureEvidence, analysis: FailureAnalysis | null): string {
-  const { expected, actual } = expectedVsActual(ev.error)
   const now = new Date()
   const lines: string[] = []
 
+  // Whole-test report when several steps failed (Continue mode) — every failure
+  // in one document, not one report per step. `fails` is the list we walk.
+  const multi = !!(ev.failures && ev.failures.length > 1)
+  const fails = multi
+    ? ev.failures!
+    : [
+        {
+          index: ev.stepIndex,
+          stepText: ev.stepText,
+          error: ev.error,
+          selector: ev.selector,
+          screenshotPath: ev.screenshotPath
+        }
+      ]
+  const failingIdx = new Set(fails.map((f) => f.index))
+
   lines.push(
-    `# ${ev.testName ? `[${ev.testName}] ` : ''}Step ${ev.stepIndex + 1} fails: ${ev.stepText}`,
+    multi
+      ? `# ${ev.testName ? `[${ev.testName}] ` : ''}${fails.length} steps fail (steps ${fails
+          .map((f) => f.index + 1)
+          .join(', ')})`
+      : `# ${ev.testName ? `[${ev.testName}] ` : ''}Step ${ev.stepIndex + 1} fails: ${ev.stepText}`,
     '',
     `**Found by:** QATestFlow Recorder (automated replay)`,
     `**Date:** ${now.toLocaleString()}`,
@@ -56,17 +75,25 @@ export function generateBugReport(ev: FailureEvidence, analysis: FailureAnalysis
 
   lines.push('## Steps to reproduce', '')
   ev.allSteps.forEach((s, i) => {
-    lines.push(`${i + 1}. ${s}${i === ev.stepIndex ? '   ← **fails here**' : ''}`)
+    lines.push(`${i + 1}. ${s}${failingIdx.has(i) ? '   ← **fails here**' : ''}`)
   })
   lines.push('')
 
-  lines.push('## Expected vs actual', '', `**Expected:** ${expected}`, `**Actual:** ${actual}`, '')
+  // Per-failure detail — one block each (a single failure renders one block, so
+  // the layout is uniform whether one step or several failed).
+  lines.push(multi ? `## Failures (${fails.length})` : '## Expected vs actual', '')
+  fails.forEach((f) => {
+    const { expected, actual } = expectedVsActual(f.error)
+    if (multi) lines.push(`### Step ${f.index + 1}: ${f.stepText}`, '')
+    lines.push(`**Expected:** ${expected}`, `**Actual:** ${actual}`, '')
+    lines.push(`**Error:** \`${f.error}\``)
+    if (f.selector) lines.push(`**Selector:** \`${f.selector}\``)
+    if (f.screenshotPath)
+      lines.push(`**Screenshot:** \`${f.screenshotPath}\` (annotated at the moment of failure)`)
+    lines.push('')
+  })
 
-  lines.push('## Evidence', '', `**Error:** \`${ev.error}\``)
-  if (ev.selector) lines.push(`**Selector:** \`${ev.selector}\``)
-  if (ev.screenshotPath)
-    lines.push(`**Screenshot:** \`${ev.screenshotPath}\` (annotated at the moment of failure)`)
-  lines.push('')
+  lines.push('## Evidence during the run', '')
 
   if (ev.consoleErrors.length) {
     lines.push('**Console errors during the run:**', '', '```')

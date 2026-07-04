@@ -246,13 +246,11 @@ export function generateReportHtml(
   const maxMs = Math.max(1, ...steps.map((s) => s.durationMs || 0))
   const fmtMs = (ms: number): string => (ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's' : ms + 'ms')
 
-  // The failing step (manifest.failedAt is the authoritative index; fall back to
-  // the first errored step) — this is what the failure callout is built around.
-  const failIdx =
-    manifest.failedAt != null
-      ? steps.findIndex((s) => s.index === manifest.failedAt)
-      : steps.findIndex((s) => s.status === 'error')
-  const failStep = failIdx >= 0 ? steps[failIdx] : undefined
+  // EVERY failing step (status 'error') — a multi-failure run (Continue mode
+  // keeps going past a failure) lists them ALL in one consolidated callout, so
+  // the report is a single whole-run document, not one report per broken step.
+  const failSteps = steps.filter((s) => s.status === 'error')
+  const multiFail = failSteps.length > 1
 
   // Environment = the origin of the first step that has a URL. Best-effort — the
   // trace stores per-step URLs, not a single baseURL.
@@ -348,7 +346,11 @@ export function generateReportHtml(
   .failbox { margin:20px 0 0; border:1px solid #f1c1c1; border-left:4px solid #c5303e; border-radius:10px; background:#fff; overflow:hidden; }
   .failbox .fb-head { padding:12px 16px; background:#fdecea; font-weight:700; color:#a01722; }
   .failbox .fb-body { padding:14px 16px; }
+  .failbox .fb-item { padding-bottom:16px; margin-bottom:16px; border-bottom:1px dashed #f0cdcd; }
+  .failbox .fb-item:last-child { padding-bottom:0; margin-bottom:0; border-bottom:none; }
+  .failbox .fb-step { font-weight:700; color:#a01722; margin-bottom:8px; }
   .failbox .fb-err { font-family:Consolas,ui-monospace,monospace; font-size:12.5px; background:#2b2b30; color:#ffb3ae; padding:10px 12px; border-radius:8px; white-space:pre-wrap; word-break:break-word; margin-bottom:12px; }
+  .failbox .fb-item .fb-err:last-child { margin-bottom:0; }
   .failbox img { width:100%; border:1px solid #e2e5e9; border-radius:8px; display:block; }
   /* Steps */
   h2.sec { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:#6b7280; margin:28px 0 10px; }
@@ -403,12 +405,23 @@ export function generateReportHtml(
   </div>
 
   ${
-    failStep
+    failSteps.length
       ? `<div class="failbox">
-    <div class="fb-head">Failed at step ${failStep.index + 1} — ${esc(failStep.text)}</div>
+    <div class="fb-head">${
+      multiFail
+        ? `${failSteps.length} steps failed`
+        : `Failed at step ${failSteps[0].index + 1} — ${esc(failSteps[0].text)}`
+    }</div>
     <div class="fb-body">
-      ${failStep.error ? `<div class="fb-err">${esc(failStep.error)}</div>` : ''}
-      ${failStep.screenshotFile && assets[failStep.screenshotFile] ? `<img src="${src(failStep.screenshotFile)}" alt="Failure screenshot">` : ''}
+      ${failSteps
+        .map(
+          (fs) => `<div class="fb-item">
+        ${multiFail ? `<div class="fb-step">Step ${fs.index + 1} — ${esc(fs.text)}</div>` : ''}
+        ${fs.error ? `<div class="fb-err">${esc(fs.error)}</div>` : ''}
+        ${fs.screenshotFile && assets[fs.screenshotFile] ? `<img src="${src(fs.screenshotFile)}" alt="Failure screenshot for step ${fs.index + 1}">` : ''}
+      </div>`
+        )
+        .join('')}
     </div>
   </div>`
       : ''

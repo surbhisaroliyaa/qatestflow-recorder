@@ -1338,6 +1338,67 @@ function App(): React.JSX.Element {
     setAnalyzing(false)
   }
 
+  // Whole-test analysis: when a test failed at several steps (Continue mode),
+  // explain ALL of them at once — one verdict + one write-up covering every
+  // failure — instead of step-by-step. Builds one evidence bundle carrying the
+  // full failures[] list; the primary fields mirror the first failure.
+  const handleExplainAll = async (): Promise<void> => {
+    if (!lastFailures.length) return
+    setBugReport(null)
+    setReportSavedPath(null)
+    setAnalysis(null)
+    setAnalysisOpen(true)
+    setAnalyzing(true)
+    let pageUrl = urlInput
+    let pageTitle = ''
+    try {
+      const info = await window.api.browser.getPageInfo()
+      pageUrl = info.url || urlInput
+      pageTitle = info.title
+    } catch {
+      // keep the URL-bar fallback
+    }
+    const failures = lastFailures.map((f) => {
+      const s = steps[f.index] as RecorderStep | undefined
+      return {
+        index: f.index,
+        stepText: s ? stepText(s) : `Step ${f.index + 1}`,
+        error: f.error,
+        selector: s?.selector,
+        screenshotPath: f.screenshotPath
+      }
+    })
+    const first = failures[0]
+    const primaryStep = steps[first.index] as RecorderStep | undefined
+    const evidence: FailureEvidence = {
+      testName: testName || undefined,
+      pageUrl,
+      pageTitle,
+      stepIndex: first.index,
+      stepText: first.stepText,
+      stepType: primaryStep?.type ?? 'unknown',
+      selector: first.selector,
+      error: first.error,
+      consoleErrors: lastConsoleErrors,
+      networkErrors: lastNetworkErrors,
+      screenshotPath: first.screenshotPath,
+      allSteps: steps.map((s) => stepText(s)),
+      failures
+    }
+    setLastEvidence(evidence)
+    try {
+      setAnalysis(await window.api.translator.explain(evidence))
+    } catch {
+      setAnalysis({
+        source: 'rules',
+        verdict: 'unknown',
+        explanation: 'The translator could not run — see the raw evidence below.',
+        suggestion: ''
+      })
+    }
+    setAnalyzing(false)
+  }
+
   const closeAnalysis = (): void => {
     setAnalysisOpen(false)
     setAnalyzing(false)
@@ -1364,15 +1425,6 @@ function App(): React.JSX.Element {
     if (path) setReportSavedPath(path)
   }
 
-  // Merge (2026-07-04): save the SAME bug report as a visual, print-to-PDF web
-  // page — the failure screenshot is embedded (the .md only names it). Main
-  // builds the page from the evidence + triage verdict.
-  const handleSaveReportHtml = async (): Promise<void> => {
-    if (!lastEvidence) return
-    const htmlName = bugReportFileName(lastEvidence).replace(/\.md$/, '.html')
-    const path = await window.api.translator.saveReportHtml(lastEvidence, analysis, htmlName)
-    if (path) setReportSavedPath(path)
-  }
 
   // === Day 11: test library =========================================
   const handleOpenSavePanel = async (): Promise<void> => {
@@ -2976,9 +3028,9 @@ function App(): React.JSX.Element {
                     </button>
                     <button
                       type="button"
-                      className={`data-tab${failDetail === 'explain' ? ' active' : ''}`}
-                      onClick={() => setFailDetail(failDetail === 'explain' ? null : 'explain')}
-                      title="Explain each failed step, one by one"
+                      className="data-tab"
+                      onClick={handleExplainAll}
+                      title="Explain the whole test — all failed steps analyzed together"
                     >
                       💡 Explain
                     </button>
@@ -3041,33 +3093,6 @@ function App(): React.JSX.Element {
                           <span className="data-evi-none">no shot</span>
                         )}
                       </div>
-                    ))}
-                  </div>
-                )}
-              {replayBanner.tone === 'failed' &&
-                lastFailures.length > 1 &&
-                failDetail === 'explain' && (
-                  <div className="data-tab-content fail-detail">
-                    {lastFailures.map((f, idx) => (
-                      <button
-                        key={idx}
-                        type="button"
-                        className="data-explain-row"
-                        onClick={() =>
-                          handleExplain(
-                            f.index,
-                            f.error,
-                            f.screenshotPath,
-                            lastConsoleErrors,
-                            lastNetworkErrors
-                          )
-                        }
-                        title={`Explain step ${f.index + 1}`}
-                      >
-                        <span className="run-dot failed" />
-                        <span className="data-evi-name">Step {f.index + 1}</span>
-                        <span className="data-explain-cta">💡</span>
-                      </button>
                     ))}
                   </div>
                 )}
@@ -4145,18 +4170,11 @@ function App(): React.JSX.Element {
                     Copy
                   </button>
                   <button
-                    className="modal-btn"
+                    className="modal-btn primary"
                     onClick={handleSaveReport}
-                    title="Save as Markdown — for pasting into GitHub / a ticket"
+                    title="Save as Markdown — paste into GitHub, Jira, Slack, a wiki, or Claude"
                   >
                     Save .md
-                  </button>
-                  <button
-                    className="modal-btn primary"
-                    onClick={handleSaveReportHtml}
-                    title="Save as a web page — screenshot embedded, prints to PDF"
-                  >
-                    📄 Save HTML
                   </button>
                 </>
               ) : (
