@@ -53,7 +53,8 @@ const ASSERT_LABELS: Record<AssertKind, string> = {
   attribute: 'Attribute',
   class: 'Has class',
   'url-contains': 'URL contains',
-  title: 'Page title'
+  title: 'Page title',
+  nl: 'AI check'
 }
 // Day 13: network evidence lines carry [site] / [third-party] tags (whose
 // server failed — stamped at capture in main). Third-party noise is shown
@@ -104,7 +105,8 @@ const assertNeedsValue = (kind: AssertKind): boolean =>
   kind === 'attribute' ||
   kind === 'class' ||
   kind === 'url-contains' ||
-  kind === 'title'
+  kind === 'title' ||
+  kind === 'nl'
 
 // The candidate the step's primary selector points at. After a hand-pick the
 // primary is no longer necessarily the top-scored candidates[0].
@@ -155,6 +157,7 @@ function App(): React.JSX.Element {
   const [isPicking, setIsPicking] = useState(false)
   const [pickedElement, setPickedElement] = useState<PickedElement | null>(null)
   const [assertKind, setAssertKind] = useState<AssertKind>('visible')
+  const [nlClaim, setNlClaim] = useState('') // F19: the plain-English AI-check claim being typed
   const [assertValue, setAssertValue] = useState('')
   // For the two-part 'attribute' check: WHICH attribute to read (e.g. href).
   const [assertAttr, setAssertAttr] = useState('')
@@ -2046,6 +2049,18 @@ function App(): React.JSX.Element {
     setInsertAt(null)
   }
 
+  // F19: AI (plain-English) check — verify an outcome described in words, judged
+  // by the LLM at replay time. The claim IS the assertion (no element, no fixed
+  // matcher); it's editable inline afterward like any other check value.
+  const handleAddNlCheck = async (): Promise<void> => {
+    const claim = nlClaim.trim()
+    if (!claim) return
+    await handleCancelPick()
+    insertStep({ type: 'assert', assertKind: 'nl', value: claim }, insertAt)
+    setNlClaim('')
+    setInsertAt(null)
+  }
+
   const handleAddAssert = (): void => {
     if (!pickedElement) return
     // An attribute check without an attribute name can never pass — hold the
@@ -3659,6 +3674,29 @@ function App(): React.JSX.Element {
                 </button>
                 <button type="button" className="page-check-chip" onClick={handleAddTitleCheck}>
                   Title
+                </button>
+              </div>
+              {/* F19: plain-English AI check — no element, judged by the LLM. */}
+              <div className="page-checks ai-check">
+                <span className="page-checks-label">🤖 or check it in plain English:</span>
+                <input
+                  className="assert-value ai-check-input"
+                  value={nlClaim}
+                  onChange={(e) => setNlClaim(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAddNlCheck()
+                  }}
+                  placeholder='e.g. "an order confirmation number is shown"'
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  className="page-check-chip"
+                  onClick={handleAddNlCheck}
+                  disabled={!nlClaim.trim()}
+                  title="Add an AI check — the LLM judges this claim against the page at replay"
+                >
+                  Add AI check
                 </button>
               </div>
             </div>

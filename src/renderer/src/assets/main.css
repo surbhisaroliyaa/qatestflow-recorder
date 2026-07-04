@@ -2017,6 +2017,24 @@ body {
   background: #173a5e;
 }
 
+.page-check-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.page-check-chip:disabled:hover {
+  border-color: #4a6ea8;
+  background: transparent;
+}
+
+/* F19: the plain-English AI-check row — the claim input takes the free space. */
+.page-checks.ai-check {
+  margin-top: 4px;
+}
+.ai-check-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .replay-status.failed {
   background: #4a2422;
   color: #ffb3ae;

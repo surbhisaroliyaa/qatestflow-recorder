@@ -31,7 +31,7 @@ import {
   type RunInfo,
   type DraftFile
 } from './library'
-import { explainFailure, type FailureEvidence } from './translator'
+import { explainFailure, evaluateNlAssertion, type FailureEvidence } from './translator'
 import { observerProgram } from './observerSource'
 import { saveBaseline, loadBaseline, isSafeBaselineId, diffImages } from './visual'
 import { scanAccessibility, a11yImpactRank, a11yThresholdLevel, type A11yScanResult } from './a11y'
@@ -2409,6 +2409,22 @@ function createWindow(): void {
             }
             if (!fileNodeId) throw new Error('Could not find the file input on the page')
             await cdp.sendCommand('DOM.setFileInputFiles', { files: paths, nodeId: fileNodeId })
+          } else if (step.type === 'assert' && step.assertKind === 'nl') {
+            // F19: an AI (natural-language) assertion — judged by the LLM, not
+            // an in-page script. Capture the page's url/title/visible-text and
+            // ask the translator's Claude backend to decide PASS/FAIL. A FAIL
+            // throws like any other assertion, so it flows into the normal
+            // failure path (screenshot + explain + report).
+            const ctx = (await currentWC.executeJavaScript(
+              `(() => ({
+                url: location.href,
+                title: document.title,
+                text: (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 8000)
+              }))()`,
+              true
+            )) as { url: string; title: string; text: string }
+            const nl = await evaluateNlAssertion(step.value ?? '', ctx, libraryDir())
+            if (!nl.pass) throw new Error(nl.error)
           } else {
             // Day 15: route the action into the frame it was recorded in (or
             // the top frame for a normal step). The injected script is entirely

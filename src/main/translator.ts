@@ -352,8 +352,10 @@ function parseAiAnswer(text: string): FailureAnalysis | null {
   }
 }
 
-// Resolves to null on ANY problem — the caller falls back to the rules.
-function aiExplain(ev: FailureEvidence, cwd: string): Promise<FailureAnalysis | null> {
+// Run one headless `claude -p` prompt; resolve to its stdout, or null on ANY
+// problem (CLI missing, non-zero exit, timeout, empty output). Shared by the
+// failure explainer and the F19 AI-assertion evaluator.
+function runClaude(prompt: string, cwd: string, timeoutMs = CLAUDE_TIMEOUT_MS): Promise<string | null> {
   return new Promise((resolve) => {
     // COST SAFETY: even if an Anthropic API key exists in the machine's
     // environment, never let the CLI see it — with no key, `claude` can
@@ -378,7 +380,7 @@ function aiExplain(ev: FailureEvidence, cwd: string): Promise<FailureAnalysis | 
 
     let out = ''
     let settled = false
-    const settle = (value: FailureAnalysis | null): void => {
+    const settle = (value: string | null): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
@@ -391,27 +393,29 @@ function aiExplain(ev: FailureEvidence, cwd: string): Promise<FailureAnalysis | 
         // already gone
       }
       settle(null)
-    }, CLAUDE_TIMEOUT_MS)
+    }, timeoutMs)
 
     child.on('error', () => settle(null)) // CLI not installed / not runnable
     child.stdout?.on('data', (chunk: Buffer) => {
       out += chunk.toString()
     })
     child.on('close', (code) => {
-      if (code !== 0 || !out.trim()) {
-        settle(null)
-        return
-      }
-      settle(parseAiAnswer(out))
+      settle(code === 0 && out.trim() ? out : null)
     })
 
     try {
-      child.stdin?.write(buildPrompt(ev))
+      child.stdin?.write(prompt)
       child.stdin?.end()
     } catch {
       settle(null)
     }
   })
+}
+
+// Resolves to null on ANY problem — the caller falls back to the rules.
+async function aiExplain(ev: FailureEvidence, cwd: string): Promise<FailureAnalysis | null> {
+  const out = await runClaude(buildPrompt(ev), cwd)
+  return out ? parseAiAnswer(out) : null
 }
 
 // === The front door ==================================================
@@ -420,4 +424,68 @@ function aiExplain(ev: FailureEvidence, cwd: string): Promise<FailureAnalysis | 
 export async function explainFailure(ev: FailureEvidence, cwd: string): Promise<FailureAnalysis> {
   const ai = await aiExplain(ev, cwd).catch(() => null)
   return ai ?? ruleBasedExplain(ev)
+}
+
+// === F19: AI (natural-language) assertion ============================
+// A check written in plain English ("an order number is shown", "the date is
+// today") that a fixed matcher can't express. At replay we hand the LLM the
+// page's text + the claim and it judges PASS/FAIL. There is NO rule-based
+// fallback — the check is inherently semantic — so if Claude can't run, the
+// assertion FAILS loudly (never a silent green) with a clear reason.
+export interface NlContext {
+  url: string
+  title: string
+  text: string
+}
+export interface NlVerdict {
+  pass: boolean
+  error: string // populated on FAIL (feeds the normal failure flow); '' on pass
+}
+
+function buildNlPrompt(claim: string, ctx: NlContext): string {
+  return [
+    'You are a QA assertion evaluator. Decide whether a CLAIM about a web page is',
+    'TRUE, judging ONLY from the page content provided (do not assume anything not',
+    'shown). Be strict: if the page does not clearly satisfy the claim, it FAILS.',
+    '',
+    `CLAIM: "${claim}"`,
+    '',
+    `Page URL: ${ctx.url}`,
+    `Page title: ${ctx.title}`,
+    'Visible page text (may be truncated):',
+    '"""',
+    ctx.text.slice(0, 8000),
+    '"""',
+    '',
+    'Answer in EXACTLY this format, no markdown, no preamble:',
+    'RESULT: <PASS|FAIL>',
+    'REASON: <one sentence citing what on the page makes it pass or fail>'
+  ].join('\n')
+}
+
+function parseNlAnswer(text: string): { pass: boolean; reason: string } | null {
+  const m = /RESULT:\s*(PASS|FAIL)/i.exec(text)
+  if (!m) return null
+  const reason = /REASON:\s*([\s\S]*)$/i.exec(text)?.[1]?.trim() ?? ''
+  return { pass: m[1].toUpperCase() === 'PASS', reason }
+}
+
+export async function evaluateNlAssertion(
+  claim: string,
+  ctx: NlContext,
+  cwd: string
+): Promise<NlVerdict> {
+  const c = (claim || '').trim()
+  if (!c) return { pass: false, error: 'AI check has no claim to verify — type what to check.' }
+  const out = await runClaude(buildNlPrompt(c, ctx), cwd).catch(() => null)
+  if (out == null) {
+    return {
+      pass: false,
+      error: `AI check "${c}" could not run — Claude was unavailable. (This is an AI assertion; it needs the Claude CLI at replay time.)`
+    }
+  }
+  const parsed = parseNlAnswer(out)
+  if (!parsed) return { pass: false, error: `AI check "${c}" got an unreadable response from Claude.` }
+  if (parsed.pass) return { pass: true, error: '' }
+  return { pass: false, error: `AI check failed: "${c}" — ${parsed.reason || 'the page did not satisfy it.'}` }
 }

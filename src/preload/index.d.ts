@@ -424,6 +424,7 @@ declare global {
     | 'class'
     | 'url-contains'
     | 'title'
+    | 'nl'
 
   // === Recovery (Day 12) ===
   // An interactive replay is paused at a failed step, waiting for a decision.

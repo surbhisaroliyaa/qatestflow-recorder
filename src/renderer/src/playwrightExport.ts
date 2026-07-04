@@ -208,6 +208,8 @@ export function stepText(step: RecorderStep): string {
           return `Check URL contains "${step.value}"`
         case 'title':
           return `Check page title is "${step.value}"`
+        case 'nl':
+          return `AI check: "${step.value}"`
         default:
           return `Check ${step.label} is visible`
       }
@@ -348,6 +350,13 @@ function actionFor(
   }
   if (step.type === 'assert' && step.assertKind === 'title') {
     return `await expect(${pageVar}).toHaveTitle(${valueExpr(step.value ?? '', columns)})`
+  }
+  // F19: an AI (natural-language) assertion is judged by an LLM at replay time —
+  // there is no deterministic Playwright matcher for it. Export it as an honest
+  // comment so the reader knows a semantic check lived here (and can wire their
+  // own LLM/manual check if they need it in CI).
+  if (step.type === 'assert' && step.assertKind === 'nl') {
+    return `// ↑ AI check — judged by an LLM at replay; no deterministic Playwright equivalent, so not exported`
   }
 
   if (!step.selector) return null
