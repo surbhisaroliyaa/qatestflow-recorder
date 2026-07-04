@@ -439,8 +439,13 @@ export interface NlContext {
   // Cheap DOM signal so text-only claims about images have evidence (innerText
   // has none — an <img> is not text).
   images?: { count: number; alts: string[] }
-  // A screenshot of the page the LLM can actually LOOK at (via the Read tool) —
-  // the only way to judge visual claims (images, layout, colours, icons).
+  // A bounded list of notable elements with their key attributes/roles — gives
+  // the model evidence for attribute/role claims that aren't in the text or the
+  // screenshot ("the submit button has aria-label X", "there's a link to /cart").
+  elements?: Array<Record<string, string>>
+  // A FULL-PAGE screenshot the LLM can actually LOOK at (via the Read tool) — the
+  // only way to judge visual claims (images, layout, colours, icons), including
+  // content below the fold.
   screenshotPath?: string
 }
 export interface NlVerdict {
@@ -473,12 +478,27 @@ function buildNlPrompt(claim: string, ctx: NlContext): string {
     '"""',
     ''
   )
+  if (ctx.elements && ctx.elements.length) {
+    lines.push(
+      'Notable elements with their attributes/roles (for attribute/role/link claims):'
+    )
+    for (const el of ctx.elements.slice(0, 80)) {
+      const attrs = Object.entries(el)
+        .filter(([k]) => k !== 'tag' && k !== 'text')
+        .map(([k, v]) => `${k}="${v}"`)
+        .join(' ')
+      const txt = el.text ? ` — "${el.text}"` : ''
+      lines.push(`  <${el.tag ?? 'el'}${attrs ? ' ' + attrs : ''}>${txt}`)
+    }
+    lines.push('')
+  }
   if (ctx.screenshotPath) {
     lines.push(
-      `A screenshot of the page is saved at: ${ctx.screenshotPath}`,
+      `A FULL-PAGE screenshot of the page is saved at: ${ctx.screenshotPath}`,
       'Use the Read tool to LOOK at it before deciding — it is the ONLY evidence for',
-      'any visual claim (images present, layout, colours, icons). Do not fail a',
-      'visual claim for "no evidence" without looking at the screenshot first.',
+      'any visual claim (images present, layout, colours, icons), including content',
+      'below the fold. Do not fail a visual claim for "no evidence" without looking',
+      'at the screenshot first.',
       ''
     )
   }

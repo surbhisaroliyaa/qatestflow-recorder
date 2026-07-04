@@ -2419,6 +2419,18 @@ function createWindow(): void {
             const ctx = (await currentWC.executeJavaScript(
               `(() => {
                 const imgs = Array.from(document.images || []);
+                // A bounded list of notable elements with their key attributes,
+                // so attribute/role/link claims have evidence (not in text/pixels).
+                const pick = ['role','aria-label','name','id','type','placeholder','alt','title','href','value','data-test','data-testid'];
+                const elements = Array.from(document.querySelectorAll('a,button,input,select,textarea,label,[role],[aria-label],[data-test],[data-testid],h1,h2,h3'))
+                  .slice(0, 80)
+                  .map((el) => {
+                    const o = { tag: el.tagName.toLowerCase() };
+                    for (const k of pick) { const v = el.getAttribute && el.getAttribute(k); if (v) o[k] = String(v).slice(0, 80); }
+                    const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (t) o.text = t.slice(0, 60);
+                    return o;
+                  });
                 return {
                   url: location.href,
                   title: document.title,
@@ -2426,7 +2438,8 @@ function createWindow(): void {
                   images: {
                     count: imgs.length,
                     alts: imgs.map((i) => i.alt || i.getAttribute('aria-label') || '').filter(Boolean).slice(0, 20)
-                  }
+                  },
+                  elements
                 };
               })()`,
               true
@@ -2435,18 +2448,32 @@ function createWindow(): void {
               title: string
               text: string
               images: { count: number; alts: string[] }
+              elements: Array<Record<string, string>>
             }
-            // Screenshot so the model can SEE the page (best-effort — a capture
-            // failure just means a text-only judgement). Deleted after the call.
+            // FULL-PAGE screenshot so the model can SEE everything, incl. below the
+            // fold. Prefer CDP (captureBeyondViewport); fall back to the viewport
+            // capture, then to text-only. Best-effort; deleted after the call.
             let shotPath: string | undefined
             try {
-              const img = await currentWC.capturePage()
+              let png: Buffer | undefined
+              if (cdpReady) {
+                try {
+                  const res = (await cdp.sendCommand('Page.captureScreenshot', {
+                    format: 'png',
+                    captureBeyondViewport: true
+                  })) as { data?: string }
+                  if (res?.data) png = Buffer.from(res.data, 'base64')
+                } catch {
+                  // CDP capture failed — fall back to the viewport capture below
+                }
+              }
+              if (!png) png = (await currentWC.capturePage()).toPNG()
               const dir = join(libraryDir(), '_nlchecks')
               await mkdir(dir, { recursive: true })
               shotPath = join(dir, `nl-${Date.now()}.png`)
-              await writeFile(shotPath, img.toPNG())
+              await writeFile(shotPath, png)
             } catch {
-              // couldn't capture — evaluate on text + image signal alone
+              // couldn't capture — evaluate on text + signals alone
             }
             const nl = await evaluateNlAssertion(
               step.value ?? '',
