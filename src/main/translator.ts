@@ -436,6 +436,12 @@ export interface NlContext {
   url: string
   title: string
   text: string
+  // Cheap DOM signal so text-only claims about images have evidence (innerText
+  // has none — an <img> is not text).
+  images?: { count: number; alts: string[] }
+  // A screenshot of the page the LLM can actually LOOK at (via the Read tool) —
+  // the only way to judge visual claims (images, layout, colours, icons).
+  screenshotPath?: string
 }
 export interface NlVerdict {
   pass: boolean
@@ -443,7 +449,7 @@ export interface NlVerdict {
 }
 
 function buildNlPrompt(claim: string, ctx: NlContext): string {
-  return [
+  const lines: string[] = [
     'You are a QA assertion evaluator. Decide whether a CLAIM about a web page is',
     'TRUE, judging ONLY from the page content provided (do not assume anything not',
     'shown). Be strict: if the page does not clearly satisfy the claim, it FAILS.',
@@ -451,16 +457,37 @@ function buildNlPrompt(claim: string, ctx: NlContext): string {
     `CLAIM: "${claim}"`,
     '',
     `Page URL: ${ctx.url}`,
-    `Page title: ${ctx.title}`,
-    'Visible page text (may be truncated):',
+    `Page title: ${ctx.title}`
+  ]
+  if (ctx.images) {
+    const alts = ctx.images.alts.length
+      ? ` (sample alt text: ${ctx.images.alts.map((a) => `"${a}"`).join(', ')})`
+      : ''
+    lines.push(`Image elements on the page: ${ctx.images.count}${alts}`)
+  }
+  lines.push(
+    'Visible page text (may be truncated; it contains NO information about images,',
+    'layout, or colours — use the screenshot for those):',
     '"""',
     ctx.text.slice(0, 8000),
     '"""',
-    '',
+    ''
+  )
+  if (ctx.screenshotPath) {
+    lines.push(
+      `A screenshot of the page is saved at: ${ctx.screenshotPath}`,
+      'Use the Read tool to LOOK at it before deciding — it is the ONLY evidence for',
+      'any visual claim (images present, layout, colours, icons). Do not fail a',
+      'visual claim for "no evidence" without looking at the screenshot first.',
+      ''
+    )
+  }
+  lines.push(
     'Answer in EXACTLY this format, no markdown, no preamble:',
     'RESULT: <PASS|FAIL>',
     'REASON: <one sentence citing what on the page makes it pass or fail>'
-  ].join('\n')
+  )
+  return lines.join('\n')
 }
 
 function parseNlAnswer(text: string): { pass: boolean; reason: string } | null {

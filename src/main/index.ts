@@ -1,6 +1,6 @@
 import { app, shell, BrowserWindow, ipcMain, WebContentsView, dialog, webFrameMain } from 'electron'
 import { join, basename, dirname } from 'path'
-import { writeFile, mkdir, copyFile, readFile, readdir } from 'fs/promises'
+import { writeFile, mkdir, copyFile, readFile, readdir, rm } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
@@ -2411,19 +2411,49 @@ function createWindow(): void {
             await cdp.sendCommand('DOM.setFileInputFiles', { files: paths, nodeId: fileNodeId })
           } else if (step.type === 'assert' && step.assertKind === 'nl') {
             // F19: an AI (natural-language) assertion — judged by the LLM, not
-            // an in-page script. Capture the page's url/title/visible-text and
-            // ask the translator's Claude backend to decide PASS/FAIL. A FAIL
-            // throws like any other assertion, so it flows into the normal
-            // failure path (screenshot + explain + report).
+            // an in-page script. Capture the page's url/title/visible-text PLUS
+            // an image signal (innerText has no evidence of images) AND a
+            // screenshot the LLM can actually look at, so visual claims (images,
+            // layout, colours) can be judged. A FAIL throws like any assertion,
+            // so it flows into the normal failure path (screenshot/explain/report).
             const ctx = (await currentWC.executeJavaScript(
-              `(() => ({
-                url: location.href,
-                title: document.title,
-                text: (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 8000)
-              }))()`,
+              `(() => {
+                const imgs = Array.from(document.images || []);
+                return {
+                  url: location.href,
+                  title: document.title,
+                  text: (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 8000),
+                  images: {
+                    count: imgs.length,
+                    alts: imgs.map((i) => i.alt || i.getAttribute('aria-label') || '').filter(Boolean).slice(0, 20)
+                  }
+                };
+              })()`,
               true
-            )) as { url: string; title: string; text: string }
-            const nl = await evaluateNlAssertion(step.value ?? '', ctx, libraryDir())
+            )) as {
+              url: string
+              title: string
+              text: string
+              images: { count: number; alts: string[] }
+            }
+            // Screenshot so the model can SEE the page (best-effort — a capture
+            // failure just means a text-only judgement). Deleted after the call.
+            let shotPath: string | undefined
+            try {
+              const img = await currentWC.capturePage()
+              const dir = join(libraryDir(), '_nlchecks')
+              await mkdir(dir, { recursive: true })
+              shotPath = join(dir, `nl-${Date.now()}.png`)
+              await writeFile(shotPath, img.toPNG())
+            } catch {
+              // couldn't capture — evaluate on text + image signal alone
+            }
+            const nl = await evaluateNlAssertion(
+              step.value ?? '',
+              { ...ctx, screenshotPath: shotPath },
+              libraryDir()
+            )
+            if (shotPath) await rm(shotPath, { force: true }).catch(() => {})
             if (!nl.pass) throw new Error(nl.error)
           } else {
             // Day 15: route the action into the frame it was recorded in (or
