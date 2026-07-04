@@ -44,6 +44,9 @@ interface ReplayResult {
   // through to the live network. Absent when no HAR was used.
   harServed?: number
   harPassthrough?: number
+  // F8: what changed on the page since the last green run (present on a failure
+  // when a green baseline exists and something differs).
+  whatChanged?: DomDiff
 }
 
 // Day 18: how aggressively to keep a run trace (mirrors Playwright's `trace`).
@@ -225,6 +228,22 @@ interface API {
 }
 
 declare global {
+  // F8: what changed on the page vs the last green run (MIRROR of src/main/domDiff.ts).
+  interface ElementChange {
+    desc: string
+    changes: string[]
+  }
+  interface DomDiff {
+    hasChanges: boolean
+    baselineAt?: string
+    urlChanged?: { from: string; to: string }
+    textRemoved: string[]
+    textAdded: string[]
+    elementsRemoved: string[]
+    elementsAdded: string[]
+    elementsChanged: ElementChange[]
+  }
+
   // Day 16(+): a finished download — surfaced as a toast and (during replay)
   // the material a `download` step checks. `completed` = the transfer finished
   // (vs interrupted/cancelled); `bytes` then tells empty (0) from has-content.

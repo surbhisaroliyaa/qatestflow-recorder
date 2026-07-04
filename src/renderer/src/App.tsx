@@ -143,6 +143,8 @@ function App(): React.JSX.Element {
   const [replayingIndex, setReplayingIndex] = useState<number | null>(null)
   const [doneIndices, setDoneIndices] = useState<Set<number>>(new Set())
   const [failedIndex, setFailedIndex] = useState<number | null>(null)
+  const [whatChanged, setWhatChanged] = useState<DomDiff | null>(null) // F8
+  const [whatChangedOpen, setWhatChangedOpen] = useState(false) // F8: panel toggle
   const [replayError, setReplayError] = useState<string | null>(null)
   // Step editor: which step's value is being edited inline (null = none) + its
   // working text. Editing is only allowed when not recording / not replaying.
@@ -951,6 +953,8 @@ function App(): React.JSX.Element {
     setLastTraceId(null)
     setSkippedIndices(new Set())
     setRecovery(null)
+    setWhatChanged(null)
+    setWhatChangedOpen(false)
     setLastConsoleErrors([])
     setLastNetworkErrors([])
     setIsReplaying(true)
@@ -1001,6 +1005,7 @@ function App(): React.JSX.Element {
       setLastConsoleErrors(result.consoleErrors ?? [])
       setLastNetworkErrors(result.networkErrors ?? [])
       setLastFailures((result.failures ?? []).map((f) => ({ ...f, index: toDisplayIdx(f.index) })))
+      setWhatChanged(result.whatChanged ?? null) // F8
     }
     // A SAVED test remembers its outcomes — the library shows the latest as
     // a green/red dot and the last 10 as a history row (mini CI dashboard).
@@ -3125,7 +3130,91 @@ function App(): React.JSX.Element {
                     )}
                   </>
                 )}
+                {/* F8: what changed on the page since the last green run */}
+                {replayBanner.tone === 'failed' && whatChanged?.hasChanges && (
+                  <button
+                    type="button"
+                    className={`shot-link explain-link${whatChangedOpen ? ' active' : ''}`}
+                    onClick={() => setWhatChangedOpen((o) => !o)}
+                    title="What changed on the page since this test last passed"
+                  >
+                    🔀 What changed
+                  </button>
+                )}
               </div>
+
+              {/* F8: the diff panel — added/removed text + changed elements vs the
+                  last green run, so you can tell an app change from a flaky one. */}
+              {replayBanner.tone === 'failed' && whatChangedOpen && whatChanged?.hasChanges && (
+                <div className="data-tab-content whatchanged-panel">
+                  <div className="wc-lead">
+                    Compared to the last time this test passed
+                    {whatChanged.baselineAt
+                      ? ` (${new Date(whatChanged.baselineAt).toLocaleString()})`
+                      : ''}
+                    :
+                  </div>
+                  {whatChanged.urlChanged && (
+                    <div className="wc-group">
+                      <div className="wc-title">Page URL changed</div>
+                      <div className="wc-line">
+                        <span className="wc-old">{whatChanged.urlChanged.from}</span> →{' '}
+                        <span className="wc-new">{whatChanged.urlChanged.to}</span>
+                      </div>
+                    </div>
+                  )}
+                  {whatChanged.elementsChanged.length > 0 && (
+                    <div className="wc-group">
+                      <div className="wc-title">Elements changed</div>
+                      {whatChanged.elementsChanged.map((c, ci) => (
+                        <div key={ci} className="wc-line">
+                          <code>{c.desc}</code>
+                          <ul className="wc-changes">
+                            {c.changes.map((ch, chi) => (
+                              <li key={chi}>{ch}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {whatChanged.elementsRemoved.length > 0 && (
+                    <div className="wc-group">
+                      <div className="wc-title">Gone since last pass</div>
+                      {whatChanged.elementsRemoved.map((e, ei) => (
+                        <div key={ei} className="wc-line wc-removed">
+                          <code>{e}</code>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {whatChanged.elementsAdded.length > 0 && (
+                    <div className="wc-group">
+                      <div className="wc-title">New since last pass</div>
+                      {whatChanged.elementsAdded.map((e, ei) => (
+                        <div key={ei} className="wc-line wc-added">
+                          <code>{e}</code>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {(whatChanged.textRemoved.length > 0 || whatChanged.textAdded.length > 0) && (
+                    <div className="wc-group">
+                      <div className="wc-title">Text changed</div>
+                      {whatChanged.textRemoved.map((t, ti) => (
+                        <div key={`r${ti}`} className="wc-line wc-removed">
+                          − {t}
+                        </div>
+                      ))}
+                      {whatChanged.textAdded.map((t, ti) => (
+                        <div key={`a${ti}`} className="wc-line wc-added">
+                          + {t}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Day 20: inline lists when MORE THAN ONE step failed. */}
               {replayBanner.tone === 'failed' &&

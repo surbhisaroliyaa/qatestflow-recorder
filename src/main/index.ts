@@ -32,6 +32,13 @@ import {
   type DraftFile
 } from './library'
 import { explainFailure, evaluateNlAssertion, type FailureEvidence } from './translator'
+import { diffSnapshots, type PageSnapshot, type DomDiff } from './domDiff'
+import {
+  baselineKeyFor,
+  saveBaseline as saveDomBaseline,
+  loadBaseline as loadDomBaseline,
+  type Baseline as DomBaseline
+} from './baselines'
 import { observerProgram } from './observerSource'
 import { saveBaseline, loadBaseline, isSafeBaselineId, diffImages } from './visual'
 import { scanAccessibility, a11yImpactRank, a11yThresholdLevel, type A11yScanResult } from './a11y'
@@ -2041,6 +2048,7 @@ function createWindow(): void {
         failures?: { index: number; error: string; screenshotPath?: string }[]
         harServed?: number
         harPassthrough?: number
+        whatChanged?: DomDiff
       }): Promise<{
         ok: boolean
         failedAt?: number
@@ -2053,6 +2061,7 @@ function createWindow(): void {
         failures?: { index: number; error: string; screenshotPath?: string }[]
         harServed?: number
         harPassthrough?: number
+        whatChanged?: DomDiff
       }> => {
         // Detach EVERY tab we touched (console + CDP), and clear the replay flag
         // in each so normal browsing gets its real native dialogs back.
@@ -2100,6 +2109,15 @@ function createWindow(): void {
           outcome.harServed = harServed
           outcome.harPassthrough = harPassthrough
         }
+        // F8: a fully-GREEN run becomes the new "last good" baseline for this test
+        // — the reference a future failure is diffed against. Only for named tests.
+        if (outcome.ok && !outcome.aborted && baselineKey && Object.keys(runSnaps).length) {
+          await saveDomBaseline(baselineKey, {
+            testName: traceOpts?.testName ?? '',
+            at: new Date().toISOString(),
+            steps: runSnaps
+          })
+        }
         return outcome
       }
 
@@ -2125,11 +2143,61 @@ function createWindow(): void {
       // first. The trace already keeps all; this surfaces them in the result.
       const failures: { index: number; error: string; screenshotPath?: string }[] = []
 
+      // === F8: "what changed since last green run" ===================
+      // Snapshot the page going INTO each step; persist the whole set as the
+      // baseline if the run passes, and diff the failing step against the stored
+      // green baseline on a failure. Only for named tests (stable key); best-effort.
+      const baselineKey = baselineKeyFor(traceOpts?.testName)
+      const runSnaps: Record<number, PageSnapshot> = {}
+      let greenBaseline: DomBaseline | null = null
+      const captureSnapshot = async (): Promise<PageSnapshot | null> => {
+        try {
+          return (await currentWC.executeJavaScript(
+            `(() => {
+              const pick = ['role','aria-label','name','id','type','placeholder','alt','title','href','value','data-test','data-testid'];
+              const elements = Array.from(document.querySelectorAll('a,button,input,select,textarea,label,[role],[aria-label],[data-test],[data-testid],h1,h2,h3'))
+                .slice(0, 120)
+                .map((el) => {
+                  const o = { tag: el.tagName.toLowerCase() };
+                  for (const k of pick) { const v = el.getAttribute && el.getAttribute(k); if (v) o[k] = String(v).slice(0, 80); }
+                  const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                  if (t) o.text = t.slice(0, 60);
+                  return o;
+                });
+              return {
+                url: location.href,
+                lines: (document.body ? document.body.innerText : '').split('\\n').map((s) => s.trim()).filter(Boolean).slice(0, 400),
+                elements
+              };
+            })()`,
+            true
+          )) as PageSnapshot
+        } catch {
+          return null
+        }
+      }
+      // F8: diff the failing step's page against the stored green baseline for the
+      // same step — "what changed since it last worked". undefined when there's no
+      // baseline yet or nothing changed.
+      const computeWhatChanged = async (idx: number): Promise<DomDiff | undefined> => {
+        if (!baselineKey || !runSnaps[idx]) return undefined
+        if (!greenBaseline) greenBaseline = await loadDomBaseline(baselineKey)
+        const greenSnap = greenBaseline?.steps?.[idx]
+        if (!greenSnap) return undefined
+        const d = diffSnapshots(greenSnap, runSnaps[idx], greenBaseline?.at)
+        return d.hasChanges ? d : undefined
+      }
+
       for (let i = 0; i < list.length; i++) {
         const step = list[i]
         // Steps turned off in the editor are skipped — leave their row neutral
         // (no running/done/error) so the UI shows them as inert, not run.
         if (step.disabled) continue
+        // F8: snapshot the page state this step is about to act on (before it runs).
+        if (baselineKey) {
+          const snap = await captureSnapshot()
+          if (snap) runSnaps[i] = snap
+        }
         evidenceStep = i // tag captured console/network lines with this step
         // Day 18 trace: remember where this step's console/network begins + when
         // it started, so captureTraceStep can attribute the right slice + timing.
@@ -2713,7 +2781,8 @@ function createWindow(): void {
             screenshotPath,
             failures,
             consoleErrors: consoleErrors.slice(),
-            networkErrors: networkErrors.slice()
+            networkErrors: networkErrors.slice(),
+            whatChanged: await computeWhatChanged(i)
           })
         }
       }
@@ -2727,7 +2796,8 @@ function createWindow(): void {
           screenshotPath: bypassedShot,
           failures,
           consoleErrors: consoleErrors.slice(),
-          networkErrors: networkErrors.slice()
+          networkErrors: networkErrors.slice(),
+          whatChanged: await computeWhatChanged(bypassedFailAt)
         })
       }
       return await finish({ ok: true })

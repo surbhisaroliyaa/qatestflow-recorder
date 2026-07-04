@@ -2026,6 +2026,23 @@ body {
   background: transparent;
 }
 
+/* F8: "what changed since last green run" diff panel */
+.whatchanged-panel { font-size: 12px; padding: 10px 12px; }
+.whatchanged-panel .wc-lead { color: #9db4e8; margin-bottom: 8px; }
+.whatchanged-panel .wc-group { margin-bottom: 10px; }
+.whatchanged-panel .wc-title {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: #8a929c; margin-bottom: 4px;
+}
+.whatchanged-panel .wc-line { margin: 2px 0; word-break: break-word; }
+.whatchanged-panel .wc-line code { font-size: 11px; background: #1e1e24; padding: 1px 5px; border-radius: 4px; color: #cdd8ff; }
+.whatchanged-panel .wc-changes { margin: 3px 0 3px 16px; padding: 0; list-style: none; }
+.whatchanged-panel .wc-changes li { color: #d6b56a; font-family: Consolas, monospace; font-size: 11px; }
+.whatchanged-panel .wc-removed { color: #ff9a92; }
+.whatchanged-panel .wc-added { color: #7ee0a1; }
+.whatchanged-panel .wc-old { color: #ff9a92; text-decoration: line-through; }
+.whatchanged-panel .wc-new { color: #7ee0a1; }
+
 /* F19: the plain-English AI-check row — the claim input takes the free space. */
 .page-checks.ai-check {
   margin-top: 4px;
