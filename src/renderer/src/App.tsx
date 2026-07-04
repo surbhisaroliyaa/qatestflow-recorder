@@ -273,7 +273,6 @@ function App(): React.JSX.Element {
   const [traceStepIdx, setTraceStepIdx] = useState(0)
   const [traceImg, setTraceImg] = useState<string | null>(null)
   const [traceSavedAt, setTraceSavedAt] = useState<string | null>(null)
-  const [reportSavedAt, setReportSavedAt] = useState<string | null>(null) // F11
   // F13 (accessibility scan): the last scan's result (null = panel closed) and
   // whether a scan is in flight (the panel opens immediately, showing a spinner).
   const [a11yScan, setA11yScan] = useState<A11yScanResult | null>(null)
@@ -1044,7 +1043,6 @@ function App(): React.JSX.Element {
     setTraceView(null)
     setTraceImg(null)
     setTraceSavedAt(null)
-    setReportSavedAt(null)
   }
 
   // F13: scan the current page for accessibility violations. Opens the panel
@@ -1120,12 +1118,6 @@ function App(): React.JSX.Element {
     if (!traceView) return
     const dest = await window.api.trace.export(traceView.id)
     if (dest) setTraceSavedAt(dest)
-  }
-  // F11: save a shareable, print-friendly summary report of this run.
-  const saveTraceReport = async (): Promise<void> => {
-    if (!traceView) return
-    const dest = await window.api.trace.exportReport(traceView.id)
-    if (dest) setReportSavedAt(dest)
   }
 
   // Replay: run all recorded steps in the embedded browser and watch them go.
@@ -1363,6 +1355,16 @@ function App(): React.JSX.Element {
   const handleSaveReport = async (): Promise<void> => {
     if (!bugReport || !lastEvidence) return
     const path = await window.api.translator.saveReport(bugReport, bugReportFileName(lastEvidence))
+    if (path) setReportSavedPath(path)
+  }
+
+  // Merge (2026-07-04): save the SAME bug report as a visual, print-to-PDF web
+  // page — the failure screenshot is embedded (the .md only names it). Main
+  // builds the page from the evidence + triage verdict.
+  const handleSaveReportHtml = async (): Promise<void> => {
+    if (!lastEvidence) return
+    const htmlName = bugReportFileName(lastEvidence).replace(/\.md$/, '.html')
+    const path = await window.api.translator.saveReportHtml(lastEvidence, analysis, htmlName)
     if (path) setReportSavedPath(path)
   }
 
@@ -4126,8 +4128,19 @@ function App(): React.JSX.Element {
                   <button className="modal-btn" onClick={handleCopyReport}>
                     Copy
                   </button>
-                  <button className="modal-btn primary" onClick={handleSaveReport}>
+                  <button
+                    className="modal-btn"
+                    onClick={handleSaveReport}
+                    title="Save as Markdown — for pasting into GitHub / a ticket"
+                  >
                     Save .md
+                  </button>
+                  <button
+                    className="modal-btn primary"
+                    onClick={handleSaveReportHtml}
+                    title="Save as a web page — screenshot embedded, prints to PDF"
+                  >
+                    📄 Save HTML
                   </button>
                 </>
               ) : (
@@ -4533,20 +4546,6 @@ function App(): React.JSX.Element {
                 {traceView.ok ? '✓ passed' : '✗ failed'}
               </span>
               <span className="trace-when">{new Date(traceView.at).toLocaleString()}</span>
-              {reportSavedAt ? (
-                <span className="trace-saved" title={reportSavedAt}>
-                  ✓ report saved
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  className="trace-save"
-                  onClick={saveTraceReport}
-                  title="Save a shareable, print-friendly report to hand to a developer"
-                >
-                  📄 Save report
-                </button>
-              )}
               {traceSavedAt ? (
                 <span className="trace-saved" title={traceSavedAt}>
                   ✓ saved

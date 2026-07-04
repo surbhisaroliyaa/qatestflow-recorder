@@ -31,7 +31,8 @@ import {
   type RunInfo,
   type DraftFile
 } from './library'
-import { explainFailure, type FailureEvidence } from './translator'
+import { explainFailure, type FailureEvidence, type FailureAnalysis } from './translator'
+import { generateBugReportHtml } from './bugReportHtml'
 import { observerProgram } from './observerSource'
 import { saveBaseline, loadBaseline, isSafeBaselineId, diffImages } from './visual'
 import { scanAccessibility, a11yImpactRank, a11yThresholdLevel, type A11yScanResult } from './a11y'
@@ -58,7 +59,6 @@ import {
   deleteTrace,
   isSafeTraceId,
   generateTraceHtml,
-  generateReportHtml,
   traceDir,
   pruneTraces,
   type TraceManifest,
@@ -2878,37 +2878,6 @@ function createWindow(): void {
     }
   })
 
-  // F11: save a SHAREABLE REPORT — a summary-first, print-friendly HTML doc you
-  // hand to a dev/PM (verdict + failure front-and-centre + all steps), distinct
-  // from the debugging filmstrip above. Same trace data; only the full-size
-  // screenshots need embedding (the report doesn't use thumbnails or DOM html).
-  ipcMain.handle('trace:exportReport', async (_event, id: string): Promise<string | null> => {
-    if (typeof id !== 'string' || !isSafeTraceId(id)) return null
-    const manifest = await loadTrace(id)
-    if (!manifest) return null
-    const slug = (manifest.testName || id).replace(/[^a-zA-Z0-9-_]+/g, '-').slice(0, 60)
-    const picked = await dialog.showSaveDialog(mainWindow, {
-      title: 'Save test report',
-      defaultPath: `report-${slug}.html`,
-      filters: [{ name: 'HTML report', extensions: ['html'] }]
-    })
-    if (picked.canceled || !picked.filePath) return null
-    try {
-      const assets: Record<string, string> = {}
-      for (const step of manifest.steps) {
-        const file = step.screenshotFile
-        if (!file || assets[file]) continue
-        const buf = await readTraceAsset(id, file)
-        if (buf) assets[file] = `data:image/png;base64,${buf.toString('base64')}`
-      }
-      await writeFile(picked.filePath, generateReportHtml(manifest, assets), 'utf-8')
-      shell.openPath(picked.filePath)
-      return picked.filePath
-    } catch {
-      return null
-    }
-  })
-
   // Day 16(+): reveal a downloaded file in the OS file explorer (highlighted),
   // so a silent auto-save is confirmable and one click from opening. Guarded to
   // the library folder, same as the screenshot opener above.
@@ -2938,6 +2907,41 @@ function createWindow(): void {
       })
       if (result.canceled || !result.filePath) return null
       await writeFile(result.filePath, markdown, 'utf-8')
+      return result.filePath
+    }
+  )
+
+  // Merge (2026-07-04): the SAME bug report as a self-contained HTML page — the
+  // visual, print-to-PDF sibling of the markdown above, whose difference is the
+  // failure screenshot embedded inline. Main reads the screenshot (guarded to
+  // the library folder, like every other file read) and builds the page.
+  ipcMain.handle(
+    'report:saveHtml',
+    async (
+      _event,
+      ev: FailureEvidence,
+      analysis: FailureAnalysis | null,
+      defaultName: string
+    ): Promise<string | null> => {
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: 'Save bug report (web page)',
+        defaultPath: defaultName || 'bug-report.html',
+        filters: [{ name: 'HTML page', extensions: ['html'] }]
+      })
+      if (result.canceled || !result.filePath) return null
+      // Embed the failure screenshot as a data: URL so the page is one shareable
+      // file. Only read paths inside the library (same guard as other openers).
+      let shot: string | undefined
+      if (ev?.screenshotPath && ev.screenshotPath.startsWith(libraryDir())) {
+        try {
+          const buf = await readFile(ev.screenshotPath)
+          shot = `data:image/png;base64,${buf.toString('base64')}`
+        } catch {
+          // screenshot missing/unreadable — the report still renders without it
+        }
+      }
+      await writeFile(result.filePath, generateBugReportHtml(ev, analysis, shot), 'utf-8')
+      shell.openPath(result.filePath)
       return result.filePath
     }
   )

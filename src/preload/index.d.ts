@@ -167,6 +167,12 @@ interface SessionAPI {
 interface TranslatorAPI {
   explain: (evidence: FailureEvidence) => Promise<FailureAnalysis>
   saveReport: (markdown: string, defaultName: string) => Promise<string | null>
+  // Save the same bug report as a self-contained HTML page (screenshot embedded).
+  saveReportHtml: (
+    evidence: FailureEvidence,
+    analysis: FailureAnalysis | null,
+    defaultName: string
+  ) => Promise<string | null>
 }
 
 // === Drafts (Day 18) — auto-saved in-progress recordings ===
@@ -205,8 +211,6 @@ interface TraceAPI {
   openFile: (id: string, file: string) => Promise<void>
   // Copy the whole recording to a folder the user picks. Returns the path.
   export: (id: string) => Promise<string | null>
-  // F11: save a shareable, print-friendly summary report. Returns the path.
-  exportReport: (id: string) => Promise<string | null>
 }
 
 interface API {
