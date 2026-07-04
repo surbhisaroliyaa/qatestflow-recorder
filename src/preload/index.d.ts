@@ -205,6 +205,8 @@ interface TraceAPI {
   openFile: (id: string, file: string) => Promise<void>
   // Copy the whole recording to a folder the user picks. Returns the path.
   export: (id: string) => Promise<string | null>
+  // F11: save a shareable, print-friendly summary report. Returns the path.
+  exportReport: (id: string) => Promise<string | null>
 }
 
 interface API {

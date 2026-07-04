@@ -284,7 +284,10 @@ const api = {
       ipcRenderer.invoke('trace:getImage', id, file),
     openFile: (id: string, file: string): Promise<void> =>
       ipcRenderer.invoke('trace:openFile', id, file),
-    export: (id: string): Promise<string | null> => ipcRenderer.invoke('trace:export', id)
+    export: (id: string): Promise<string | null> => ipcRenderer.invoke('trace:export', id),
+    // F11: save a shareable, print-friendly summary report (distinct from export)
+    exportReport: (id: string): Promise<string | null> =>
+      ipcRenderer.invoke('trace:exportReport', id)
   }
 }
 

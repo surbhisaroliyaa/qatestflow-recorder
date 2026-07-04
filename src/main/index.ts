@@ -58,6 +58,7 @@ import {
   deleteTrace,
   isSafeTraceId,
   generateTraceHtml,
+  generateReportHtml,
   traceDir,
   pruneTraces,
   type TraceManifest,
@@ -2870,6 +2871,37 @@ function createWindow(): void {
         }
       }
       await writeFile(picked.filePath, generateTraceHtml(manifest, assets), 'utf-8')
+      shell.openPath(picked.filePath)
+      return picked.filePath
+    } catch {
+      return null
+    }
+  })
+
+  // F11: save a SHAREABLE REPORT — a summary-first, print-friendly HTML doc you
+  // hand to a dev/PM (verdict + failure front-and-centre + all steps), distinct
+  // from the debugging filmstrip above. Same trace data; only the full-size
+  // screenshots need embedding (the report doesn't use thumbnails or DOM html).
+  ipcMain.handle('trace:exportReport', async (_event, id: string): Promise<string | null> => {
+    if (typeof id !== 'string' || !isSafeTraceId(id)) return null
+    const manifest = await loadTrace(id)
+    if (!manifest) return null
+    const slug = (manifest.testName || id).replace(/[^a-zA-Z0-9-_]+/g, '-').slice(0, 60)
+    const picked = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save test report',
+      defaultPath: `report-${slug}.html`,
+      filters: [{ name: 'HTML report', extensions: ['html'] }]
+    })
+    if (picked.canceled || !picked.filePath) return null
+    try {
+      const assets: Record<string, string> = {}
+      for (const step of manifest.steps) {
+        const file = step.screenshotFile
+        if (!file || assets[file]) continue
+        const buf = await readTraceAsset(id, file)
+        if (buf) assets[file] = `data:image/png;base64,${buf.toString('base64')}`
+      }
+      await writeFile(picked.filePath, generateReportHtml(manifest, assets), 'utf-8')
       shell.openPath(picked.filePath)
       return picked.filePath
     } catch {
