@@ -29,6 +29,18 @@ export function findWeakAssertions(steps: RecorderStep[]): WeakAssertion[] {
     const value = (step.value ?? '').trim()
     const prev = i > 0 ? steps[i - 1] : undefined
 
+    // DEAD (F19): an AI check with no claim verifies nothing — there's nothing for
+    // the model to judge (and it fails loudly at replay). The claim IS the check.
+    if (kind === 'nl' && value === '') {
+      out.push({
+        index: i,
+        severity: 'dead',
+        reason:
+          'This AI check has no claim, so it verifies nothing (and fails at replay). Type what the page should show, e.g. "an order confirmation number is shown".'
+      })
+      return
+    }
+
     // DEAD: "contains empty string" is true for every element — verifies nothing.
     if ((kind === 'text-contains' || kind === 'class') && value === '') {
       out.push({
