@@ -252,6 +252,44 @@ export function generateReportHtml(
   const failSteps = steps.filter((s) => s.status === 'error')
   const multiFail = failSteps.length > 1
 
+  // F16 — UNIFIED VERDICT: bundle the run's steps into the four quality
+  // dimensions (functional / visual / accessibility / performance) and give each
+  // a verdict, so one report answers "does this flow work, look right, stay
+  // accessible, and stay fast?" — the combination no single tool reports.
+  const DIMS: { key: string; label: string; icon: string }[] = [
+    { key: 'functional', label: 'Functional', icon: '⚙️' },
+    { key: 'visual', label: 'Visual', icon: '📸' },
+    { key: 'accessibility', label: 'Accessibility', icon: '♿' },
+    { key: 'performance', label: 'Performance', icon: '⚡' }
+  ]
+  const dimOf = (type: string): string =>
+    type === 'snapshot'
+      ? 'visual'
+      : type === 'a11y'
+        ? 'accessibility'
+        : type === 'perf'
+          ? 'performance'
+          : 'functional'
+  const dimStat: Record<string, { total: number; failed: number; passed: number }> = {
+    functional: { total: 0, failed: 0, passed: 0 },
+    visual: { total: 0, failed: 0, passed: 0 },
+    accessibility: { total: 0, failed: 0, passed: 0 },
+    performance: { total: 0, failed: 0, passed: 0 }
+  }
+  for (const s of steps) {
+    const d = dimStat[dimOf(s.type)]
+    d.total++
+    if (s.status === 'error') d.failed++
+    else if (s.status === 'done') d.passed++
+  }
+  // A dimension's status: absent (no such steps) / pass / fail / incomplete.
+  const dimStatus = (k: string): 'absent' | 'pass' | 'fail' | 'incomplete' => {
+    const d = dimStat[k]
+    if (d.total === 0) return 'absent'
+    if (d.failed > 0) return 'fail'
+    return d.passed === d.total ? 'pass' : 'incomplete'
+  }
+
   // Environment = the origin of the first step that has a URL. Best-effort — the
   // trace stores per-step URLs, not a single baseURL.
   let env = ''
@@ -342,6 +380,17 @@ export function generateReportHtml(
   .tile .v { font-size:18px; font-weight:700; }
   .tile .v small { font-size:13px; font-weight:500; color:#8a929c; }
   .tile .v.pass { color:#1a7f37; } .tile .v.fail { color:#c5303e; }
+  /* F16 unified verdict band — the four quality dimensions at a glance */
+  .verdict-band { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-top:14px; }
+  .vd { border:1px solid #e2e5e9; border-left-width:4px; border-radius:10px; padding:11px 14px; background:#fff; }
+  .vd-top { display:flex; align-items:center; gap:8px; }
+  .vd-mark { width:20px; height:20px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; color:#fff; flex:0 0 auto; }
+  .vd-name { font-weight:700; font-size:13.5px; }
+  .vd-detail { font-size:12px; color:#6b7280; margin-top:4px; margin-left:28px; }
+  .vd-pass { border-left-color:#1a7f37; } .vd-pass .vd-mark { background:#1a7f37; }
+  .vd-fail { border-left-color:#c5303e; } .vd-fail .vd-mark { background:#c5303e; }
+  .vd-incomplete { border-left-color:#d9a23b; } .vd-incomplete .vd-mark { background:#d9a23b; }
+  .vd-absent { border-left-color:#d7dbe0; background:#fafbfc; } .vd-absent .vd-mark { background:#c2c8d0; } .vd-absent .vd-name { color:#8a929c; font-weight:600; }
   /* Failure callout */
   .failbox { margin:20px 0 0; border:1px solid #f1c1c1; border-left:4px solid #c5303e; border-radius:10px; background:#fff; overflow:hidden; }
   .failbox .fb-head { padding:12px 16px; background:#fdecea; font-weight:700; color:#a01722; }
@@ -402,6 +451,28 @@ export function generateReportHtml(
       <div class="tile"><div class="k">Steps</div><div class="v">${passed}<small> / ${steps.length} passed</small></div></div>
       <div class="tile"><div class="k">Issues</div><div class="v ${failed ? 'fail' : ''}">${failed}<small> failed${skipped + pending ? `, ${skipped + pending} not run` : ''}</small></div></div>
     </div>
+  </div>
+
+  <div class="verdict-band">
+    ${DIMS.map((dim) => {
+      const st = dimStatus(dim.key)
+      const d = dimStat[dim.key]
+      const detail =
+        st === 'absent'
+          ? 'not checked'
+          : st === 'fail'
+            ? `${d.failed} failed`
+            : st === 'incomplete'
+              ? `${d.passed}/${d.total} ran`
+              : d.total === 1
+                ? 'passed'
+                : `${d.total} passed`
+      const mark = st === 'pass' ? '✓' : st === 'fail' ? '✗' : st === 'incomplete' ? '◑' : '—'
+      return `<div class="vd vd-${st}">
+        <div class="vd-top"><span class="vd-mark">${mark}</span><span class="vd-name">${dim.icon} ${dim.label}</span></div>
+        <div class="vd-detail">${detail}</div>
+      </div>`
+    }).join('')}
   </div>
 
   ${
