@@ -2894,6 +2894,10 @@ function App(): React.JSX.Element {
               // an all-pass run captures nothing, so the tab is hidden; "⏺ always"
               // records every row, so it shows all of them.
               const evidenceRows = dataRun.results.filter((r) => r.screenshotPath || r.traceId)
+              // Screenshots are only captured on FAILURE; a passing row (Always
+              // mode) has just a recording. So label the tab by what's actually
+              // there — "Recordings" when no row failed, not "Screenshots &…".
+              const hasShots = evidenceRows.some((r) => r.screenshotPath)
               const tone = failedRows.length ? 'failed' : 'passed'
               const plural = dataRun.total === 1 ? '' : 's'
               const toggle = (tab: 'evidence' | 'explain'): void =>
@@ -2911,9 +2915,13 @@ function App(): React.JSX.Element {
                         type="button"
                         className={`data-tab${dataTab === 'evidence' ? ' active' : ''}`}
                         onClick={() => toggle('evidence')}
-                        title="Each captured row's screenshot and run recording"
+                        title={
+                          hasShots
+                            ? "Each captured row's screenshot, recording and report"
+                            : "Each captured row's recording and report"
+                        }
                       >
-                        📷 Screenshots &amp; recordings
+                        {hasShots ? '📷 Screenshots & recordings' : '⏺ Recordings'}
                       </button>
                     )}
                     {failedRows.length > 0 && (
