@@ -2955,6 +2955,16 @@ function App(): React.JSX.Element {
                               ⏺
                             </button>
                           )}
+                          {r.traceId && (
+                            <button
+                              type="button"
+                              className="shot-link trace-link"
+                              onClick={() => saveRunReport(r.traceId!)}
+                              title="Save this row's HTML report (pass or fail) — prints to PDF"
+                            >
+                              📄
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>
