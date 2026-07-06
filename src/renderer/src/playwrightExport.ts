@@ -528,7 +528,12 @@ export function generatePlaywrightTest(
       )
       continue
     }
-    lines.push(`  // ${stepText(step)}\n  ${action}`)
+    // F4: flag a selector this tool auto-repaired, so a reader of the exported
+    // spec knows the locator was AI-derived (not hand-authored) and worth a look.
+    const healNote = step.healedByAi
+      ? `  // ⚠ selector auto-healed by QATestFlow AI (matched on ${step.healedByAi.signals.join(' + ')}) — verify it still targets the intended element\n`
+      : ''
+    lines.push(`${healNote}  // ${stepText(step)}\n  ${action}`)
   }
 
   // Day 17: in multi-window mode, alias the fixture as page0 and grab its

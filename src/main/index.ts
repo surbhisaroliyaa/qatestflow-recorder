@@ -7,6 +7,7 @@ import { buildSelectors, labelFrom, type ElementFacts } from './selector'
 import {
   buildActionScript,
   buildFailureMarkScript,
+  buildLocateRectScript,
   removeFailureMarkScript,
   type ReplayStep
 } from './replay'
@@ -37,10 +38,18 @@ import {
   baselineKeyFor,
   saveBaseline as saveDomBaseline,
   loadBaseline as loadDomBaseline,
-  type Baseline as DomBaseline
+  type Baseline as DomBaseline,
+  type ElementFingerprint
 } from './baselines'
 import { observerProgram } from './observerSource'
-import { saveBaseline, loadBaseline, isSafeBaselineId, diffImages } from './visual'
+import {
+  saveBaseline,
+  loadBaseline,
+  isSafeBaselineId,
+  diffImages,
+  toCropPng,
+  cropSimilarity
+} from './visual'
 import { scanAccessibility, a11yImpactRank, a11yThresholdLevel, type A11yScanResult } from './a11y'
 import {
   measurePerformance,
@@ -1722,63 +1731,22 @@ function createWindow(): void {
         }
       }
 
-      // Day 18 (self-heal): on a failure, AUTO-find the element a broken step
-      // meant — by its recorded label — and build a fresh selector ladder, so
-      // the recovery panel can offer a one-click fix. Returns a pick-shaped
-      // suggestion (or undefined). Best-effort; never throws into the loop.
-      const suggestHeal = async (step: ReplayStep): Promise<unknown> => {
-        const label = (step as { label?: string }).label
-        if (
-          !label ||
-          step.type === 'navigate' ||
-          step.type === 'wait' ||
-          step.type === 'back' ||
-          step.type === 'dialog' ||
-          step.type === 'download' ||
-          step.type === 'upload' ||
-          step.type === 'a11y' ||
-          step.type === 'perf'
-        ) {
-          return undefined
-        }
-        try {
-          const frame = await resolveFrame(currentWC, step.frame)
-          if (!frame) return undefined
-          // Pass the step's role (if any candidate carries one) as a match bonus.
-          const role = (step.candidates ?? []).find((c) => c.role)?.role ?? ''
-          const found = (await frame.executeJavaScript(
-            `window.__qaflow && window.__qaflow.findByLabel(${JSON.stringify(label)}, ${JSON.stringify(role)})`,
-            true
-          )) as {
-            facts: ElementFacts
-            matchCount?: number
-            text?: string
-            inputValue?: string
-            disabled?: boolean
-            checked?: boolean
-          } | null
-          if (!found || !found.facts) return undefined
-          const { primary, candidates } = buildSelectors(found.facts)
-          // Don't suggest a selector replay would refuse (bare-tag last resort).
-          if (!candidates.some((c) => c.kind !== 'css')) return undefined
-          return {
-            label: labelFrom(found.facts),
-            selector: primary,
-            candidates,
-            frame: step.frame,
-            text: found.text,
-            inputValue: found.inputValue,
-            disabled: found.disabled,
-            checked: found.checked,
-            // >1 equally-good match → the label is ambiguous; the panel declines
-            // a one-click heal and asks for a manual pick instead.
-            ambiguousCount: found.matchCount ?? 1,
-            unreliable: false
-          }
-        } catch {
-          return undefined
-        }
-      }
+      // F4 (self-heal 2.0): a broken step can heal ONLY if it targets a named
+      // element (click/type/select/press/hover/assert) — navigate/wait/back/
+      // dialog/file/a11y/perf steps have no element to re-find. Shared by the
+      // green-run fingerprint capture AND the heal orchestrator (both below).
+      const canHeal = (step: ReplayStep): boolean =>
+        !!(step as { label?: string }).label &&
+        step.type !== 'navigate' &&
+        step.type !== 'wait' &&
+        step.type !== 'back' &&
+        step.type !== 'dialog' &&
+        step.type !== 'download' &&
+        step.type !== 'upload' &&
+        step.type !== 'closeTab' &&
+        step.type !== 'snapshot' &&
+        step.type !== 'a11y' &&
+        step.type !== 'perf'
 
       // Electron 32+ delivers the console params on the event object
       // (level is a string: 'error' | 'warning' | …); older versions used
@@ -2115,7 +2083,9 @@ function createWindow(): void {
           await saveDomBaseline(baselineKey, {
             testName: traceOpts?.testName ?? '',
             at: new Date().toISOString(),
-            steps: runSnaps
+            steps: runSnaps,
+            // F4: bank the element fingerprints from this green run too.
+            elements: runFingerprints
           })
         }
         return outcome
@@ -2142,6 +2112,9 @@ function createWindow(): void {
       // Stop), so the banner can show each failure's screenshot — not just the
       // first. The trace already keeps all; this surfaces them in the result.
       const failures: { index: number; error: string; screenshotPath?: string }[] = []
+      // F4 (self-heal 2.0): steps we've already AUTO-healed this run. Guards the
+      // re-run: if a healed step fails AGAIN it's a real failure, not a heal loop.
+      const aiHealedOnce = new Set<number>()
 
       // === F8: "what changed since last green run" ===================
       // Snapshot the page going INTO each step; persist the whole set as the
@@ -2150,6 +2123,39 @@ function createWindow(): void {
       const baselineKey = baselineKeyFor(traceOpts?.testName)
       const runSnaps: Record<number, PageSnapshot> = {}
       let greenBaseline: DomBaseline | null = null
+      // F4 (self-heal 2.0): the target-element fingerprint (position + pixel crop)
+      // for each healable step this run — persisted alongside the F8 baseline when
+      // the run goes green, so a LATER failure can heal by "where it was / what it
+      // looked like". Top-frame steps only: capturePage clips the viewport, so an
+      // iframe element's frame-relative rect wouldn't line up.
+      const runFingerprints: Record<number, ElementFingerprint> = {}
+      const captureFingerprint = async (idx: number, step: ReplayStep): Promise<void> => {
+        if (!baselineKey || !canHeal(step) || (step.frame && step.frame.length)) return
+        try {
+          const loc = (await currentWC.executeJavaScript(buildLocateRectScript(step), true)) as {
+            rect: { x: number; y: number; w: number; h: number } | null
+            vw: number
+            vh: number
+          }
+          if (!loc?.rect || !loc.vw || !loc.vh) return
+          const { x, y, w, h } = loc.rect
+          if (w < 4 || h < 4) return
+          // Clip the crop to the viewport (a partly off-screen element still gives
+          // a usable fingerprint from the visible slice).
+          const cx = Math.max(0, Math.floor(x))
+          const cy = Math.max(0, Math.floor(y))
+          const cw = Math.min(loc.vw - cx, Math.ceil(w))
+          const ch = Math.min(loc.vh - cy, Math.ceil(h))
+          if (cw < 4 || ch < 4) return
+          const img = await currentWC.capturePage({ x: cx, y: cy, width: cw, height: ch })
+          runFingerprints[idx] = {
+            rect: { x: x / loc.vw, y: y / loc.vh, w: w / loc.vw, h: h / loc.vh },
+            crop: toCropPng(img).toString('base64')
+          }
+        } catch {
+          // fingerprints are best-effort evidence — never break a run
+        }
+      }
       const captureSnapshot = async (): Promise<PageSnapshot | null> => {
         try {
           return (await currentWC.executeJavaScript(
@@ -2188,6 +2194,155 @@ function createWindow(): void {
         return d.hasChanges ? d : undefined
       }
 
+      // === F4 (self-heal 2.0): the heal orchestrator =================
+      // A step's selector broke. Re-find the element it MEANT using up to five
+      // signals — accessible name + role + recorded text (always), plus position
+      // + a pixel-crop compare when this test has a green baseline for the step.
+      // Returns the best candidate as a pick-shaped suggestion (for the one-click
+      // recovery panel) PLUS a verdict: `confident` (safe to auto-apply) needs a
+      // strong combined score AND a clear gap over the runner-up (so a page full
+      // of look-alike "Add to cart" buttons doesn't silently heal to the wrong
+      // one). `signals` names what actually matched, for the audit trail.
+      const computeHeal = async (
+        step: ReplayStep,
+        idx: number
+      ): Promise<
+        | {
+            suggestion: {
+              label: string
+              selector: string
+              candidates: ReturnType<typeof buildSelectors>['candidates']
+              frame?: ReplayStep['frame']
+              text?: string
+              inputValue?: string
+              disabled?: boolean
+              checked?: boolean
+              ambiguousCount: number
+              unreliable: boolean
+            }
+            confident: boolean
+            signals: string[]
+            score: number
+          }
+        | undefined
+      > => {
+        if (!canHeal(step)) return undefined
+        try {
+          const frame = await resolveFrame(currentWC, step.frame)
+          if (!frame) return undefined
+          const label = (step as { label?: string }).label ?? ''
+          const role = (step.candidates ?? []).find((c) => c.role)?.role ?? ''
+          const recordedText =
+            (step.candidates ?? []).find((c) => c.kind === 'text')?.text ?? label
+          // Position comes from the green baseline (top-frame steps only). Absent
+          // for iframe steps or tests that never ran green — heal still works on
+          // name/role/text, just without the geometric + visual signals.
+          const topFrame = !(step.frame && step.frame.length)
+          if (baselineKey && !greenBaseline) greenBaseline = await loadDomBaseline(baselineKey)
+          const fingerprint = topFrame ? greenBaseline?.elements?.[idx] : undefined
+          const wantRect = fingerprint?.rect ?? null
+          const found = (await frame.executeJavaScript(
+            `window.__qaflow && window.__qaflow.findByLabel(${JSON.stringify(label)}, ${JSON.stringify(role)}, ${JSON.stringify(recordedText)}, ${JSON.stringify(wantRect)}, ${JSON.stringify(step.type)})`,
+            true
+          )) as {
+            matches: {
+              facts: ElementFacts
+              rect: { x: number; y: number; w: number; h: number }
+              vw: number
+              vh: number
+              score: number
+              nameScore: number
+              roleMatch: boolean
+              textMatch: boolean
+              hasPos: boolean
+              posScore: number
+              text?: string
+              inputValue?: string
+              disabled?: boolean
+              checked?: boolean
+            }[]
+          } | null
+          const matches = found?.matches ?? []
+          if (!matches.length) return undefined
+
+          // Fifth signal — VISUAL. Clip a live crop of each top candidate and
+          // compare it to the green-run crop; fold the similarity into the score.
+          // Top-frame only (capturePage clips the viewport, not an iframe).
+          const scored = matches.map((m) => ({ m, score: m.score, visualSim: -1 }))
+          if (topFrame && fingerprint?.crop) {
+            for (const s of scored.slice(0, 3)) {
+              const { x, y, w, h } = s.m.rect
+              const cx = Math.max(0, Math.floor(x))
+              const cy = Math.max(0, Math.floor(y))
+              const cw = Math.min(s.m.vw - cx, Math.ceil(w))
+              const ch = Math.min(s.m.vh - cy, Math.ceil(h))
+              if (cw < 4 || ch < 4) continue
+              try {
+                const img = await currentWC.capturePage({ x: cx, y: cy, width: cw, height: ch })
+                const sim = cropSimilarity(fingerprint.crop, img)
+                s.visualSim = sim
+                // A close look strongly corroborates (+20); a clearly different
+                // look mildly discourages (-10, not fatal — a restyled-but-correct
+                // element can still heal on its name/position).
+                s.score += sim >= 0.85 ? 20 : sim >= 0 && sim < 0.5 ? -10 : 0
+              } catch {
+                // a capture problem just means "no visual evidence" for this one
+              }
+            }
+          }
+          scored.sort((a, b) => b.score - a.score)
+          const winner = scored[0]
+          const runnerUp = scored[1]
+
+          const { primary, candidates } = buildSelectors(winner.m.facts)
+          // Don't heal to a ladder replay would refuse (bare-tag last resort).
+          if (!candidates.some((c) => c.kind !== 'css')) return undefined
+
+          const signals: string[] = []
+          if (winner.m.nameScore >= 55) signals.push('name')
+          if (winner.m.roleMatch) signals.push('role')
+          if (winner.m.textMatch) signals.push('text')
+          if (winner.m.hasPos && winner.m.posScore > 0) signals.push('position')
+          if (winner.visualSim >= 0.85) signals.push('visual')
+
+          // Confident (safe to auto-apply) needs a strong match AND a clear win
+          // over the runner-up. The GAP is the real ambiguity guard: a unique
+          // match runs away (gap ≈ 999) and heals; several look-alikes stay
+          // bunched (small gap) and DECLINE to a manual pick. Position + crop
+          // feed the score, so they widen the gap for the true element rather
+          // than being separately required — a unique name-only match (no green
+          // baseline yet) still heals; a coincidental tie still won't.
+          const gap = runnerUp ? winner.score - runnerUp.score : 999
+          const confident = winner.score >= 90 && gap >= 25
+          // How many stay within a whisker of the winner — the panel's existing
+          // "too ambiguous" message keys off this when we decline to auto-heal.
+          const ambiguousCount = scored.filter((s) => winner.score - s.score < 12).length
+
+          return {
+            suggestion: {
+              label: labelFrom(winner.m.facts),
+              selector: primary,
+              candidates,
+              frame: step.frame,
+              text: winner.m.text,
+              inputValue: winner.m.inputValue,
+              disabled: winner.m.disabled,
+              checked: winner.m.checked,
+              ambiguousCount: confident ? 1 : ambiguousCount,
+              unreliable: false
+            },
+            confident,
+            signals,
+            // Clamp to 100 for display: the raw score sums signal bonuses (name
+            // 100 + position + visual) so it can exceed 100, but we present it as
+            // a 0–100 confidence. The gate above uses the raw score, not this.
+            score: Math.min(100, Math.round(winner.score))
+          }
+        } catch {
+          return undefined
+        }
+      }
+
       for (let i = 0; i < list.length; i++) {
         const step = list[i]
         // Steps turned off in the editor are skipped — leave their row neutral
@@ -2197,6 +2352,9 @@ function createWindow(): void {
         if (baselineKey) {
           const snap = await captureSnapshot()
           if (snap) runSnaps[i] = snap
+          // F4: fingerprint this step's target element (position + crop) too, so a
+          // future failure can heal against how it looked when it last worked.
+          await captureFingerprint(i, step)
         }
         evidenceStep = i // tag captured console/network lines with this step
         // Day 18 trace: remember where this step's console/network begins + when
@@ -2646,6 +2804,46 @@ function createWindow(): void {
         } catch (err) {
           onPopupOpened = null // disarm any popup hook if the step failed
           const message = err instanceof Error ? err.message : String(err)
+          // F4 (self-heal 2.0): a healable failure is a SELECTOR break (the
+          // element wasn't found) — not an assertion mismatch or a wrong-state
+          // element, where the selector is fine and re-finding wouldn't help.
+          const selectorBroke = /element not found|no reliable selector/i.test(message)
+          // Run the multi-signal heal ONCE (it does capture work) and reuse the
+          // result for both the auto-heal decision and the manual-pick panel.
+          const heal = selectorBroke ? await computeHeal(step, i) : undefined
+          // AUTO-HEAL: a confident, unambiguous match — swap in the healed ladder,
+          // stamp it "fixed by AI", and RE-RUN the step (that re-run IS the runtime
+          // validation: a heal that doesn't actually work fails again). Guarded to
+          // once per step so a genuinely-broken step can't loop. Works in BOTH
+          // interactive and unattended runs — the real "self-healing test".
+          if (heal?.confident && !aiHealedOnce.has(i)) {
+            aiHealedOnce.add(i)
+            const s = heal.suggestion
+            const healedStep: ReplayStep = {
+              ...step,
+              label: s.label,
+              selector: s.selector,
+              candidates: s.candidates,
+              frame: step.frame,
+              healedByAi: {
+                at: new Date().toISOString(),
+                signals: heal.signals,
+                score: heal.score
+              }
+            }
+            list[i] = healedStep
+            // Tell the renderer so it swaps the step in (a 💾 save keeps the fix)
+            // and shows the "fixed by AI" badge + live count.
+            mainWindow.webContents.send('recorder:auto-healed', {
+              index: i,
+              step: healedStep,
+              signals: heal.signals,
+              score: heal.score
+            })
+            mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
+            i-- // re-run the same index with the healed ladder
+            continue
+          }
           // Day 11.5: photograph the page AT the moment of failure — evidence
           // for a human now and required input for Day 13's AI translator.
           // Best-effort: a screenshot problem must never mask the real error.
@@ -2697,14 +2895,10 @@ function createWindow(): void {
             // Day 18: save the trace NOW so a ⏺ recording button in the recovery
             // panel can open it mid-pause (not just after the run ends).
             await persistTrace(false, i)
-            // Day 18: healing a SELECTOR only makes sense when the selector
-            // actually broke (the element wasn't found). For other failures —
-            // an assertion mismatch, a found-but-not-visible element — the
-            // selector is fine, so don't offer self-heal / manual pick.
-            const selectorBroke = /element not found|no reliable selector/i.test(message)
-            // Self-heal: AUTO-find the element this step meant by its recorded
-            // label and offer a one-click fix. Best-effort; only when it broke.
-            const suggestion = selectorBroke ? await suggestHeal(step) : undefined
+            // F4: we already ran the heal above. If it wasn't confident enough to
+            // auto-apply (weak match, or several look-alikes it couldn't separate),
+            // still offer it as a one-click fix / ambiguity warning in the panel.
+            const suggestion = heal?.suggestion
             mainWindow.webContents.send('recorder:replay-paused', {
               index: i,
               error: message,

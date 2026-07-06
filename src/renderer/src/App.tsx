@@ -376,6 +376,10 @@ function App(): React.JSX.Element {
   const [skippedIndices, setSkippedIndices] = useState<Set<number>>(new Set())
   // Steps whose selector was healed by a re-pick and not yet saved (🔧 hint).
   const [healedIndices, setHealedIndices] = useState<Set<number>>(new Set())
+  // F4 (self-heal 2.0): steps main AUTO-healed this run (🤖 "fixed by AI"). Kept
+  // for the live count + badge; the fix also rides on the step (healedByAi) so it
+  // shows even after a 💾 save/reload.
+  const [aiHealedIndices, setAiHealedIndices] = useState<Set<number>>(new Set())
   // A re-pick landed on an element with no stable hooks — explain why the
   // heal was refused (shown inside the recovery panel).
   const [recoveryWarning, setRecoveryWarning] = useState<string | null>(null)
@@ -720,6 +724,35 @@ function App(): React.JSX.Element {
     return unsubscribe
   }, [])
 
+  // F4 (self-heal 2.0): main auto-healed a broken selector mid-run. Swap the
+  // healed step into our list (so 💾 save keeps the repaired ladder) and flag it
+  // for the "fixed by AI" badge + live count. Skip a linked block row — we can't
+  // rewrite a block's selector from here without breaking the live link.
+  useEffect(() => {
+    const unsubscribe = window.api.recorder.onAutoHealed((info) => {
+      const h = info as { index: number; step: RecorderStep }
+      const idx = runPlanRef.current?.[h.index] ?? h.index
+      setAiHealedIndices((prev) => new Set(prev).add(idx))
+      // The healed step just re-ran successfully — clear any red mark on it.
+      setFailedIndex((prev) => (prev === idx ? null : prev))
+      setSteps((prev) => {
+        const target = prev[idx]
+        if (!target || target.blockRef) return prev
+        const next = prev.slice()
+        next[idx] = {
+          ...target,
+          label: h.step.label,
+          selector: h.step.selector,
+          candidates: h.step.candidates,
+          frame: h.step.frame,
+          healedByAi: h.step.healedByAi
+        }
+        return next
+      })
+    })
+    return unsubscribe
+  }, [])
+
   // Toggle recording. We no longer wipe on start — if steps already exist we
   // RESUME (append new steps to the end). Use the 🗑 Clear button to start over.
   // Starting any recording clears the previous replay's pass/fail marks.
@@ -828,6 +861,7 @@ function App(): React.JSX.Element {
     setRepickIndex(null)
     setSkippedIndices(new Set())
     setHealedIndices(new Set())
+    setAiHealedIndices(new Set())
     // Day 13: the analysis described a run that no longer exists.
     closeAnalysis()
     setLastEvidence(null)
@@ -1526,6 +1560,9 @@ function App(): React.JSX.Element {
     setBaseURL(base)
     setSavePanelOpen(false)
     setHealedIndices(new Set()) // healed selectors are on disk now — hint done
+    // AI heals are on disk now too (they ride on the step as healedByAi, so the
+    // badge still shows) — drop the transient live-run set.
+    setAiHealedIndices(new Set())
     // Day 18: it's a real test now — drop the auto-saved draft.
     if (draftIdRef.current) {
       window.api.drafts.delete(draftIdRef.current)
@@ -1726,6 +1763,7 @@ function App(): React.JSX.Element {
     setReplayingIndex(null)
     setSkippedIndices(new Set()) // skip marks describe the old order too
     setHealedIndices(new Set()) // healed indices may have shifted — drop the hint
+    setAiHealedIndices(new Set()) // AI-heal badges describe the old order too
     setDataRun(null) // Day 20: a past data-run summary describes the old steps
     setFailDetail(null)
   }
@@ -3429,6 +3467,45 @@ function App(): React.JSX.Element {
             </div>
           )}
 
+          {/* F4 (self-heal 2.0): steps main repaired ON ITS OWN mid-run */}
+          {aiHealedIndices.size > 0 && !isReplaying && (
+            <div className="replay-status healed">
+              🤖 {aiHealedIndices.size} broken selector{aiHealedIndices.size > 1 ? 's' : ''}{' '}
+              auto-healed by AI &amp; re-verified — 💾 save to keep the fix
+            </div>
+          )}
+          {/* F4: sticky note — what a 🤖 heal means and what to DO about it. */}
+          {aiHealedIndices.size > 0 && !isReplaying && (
+            <div className="help-note">
+              <span className="help-note-title">📌 A selector was auto-healed — what now?</span>
+              <ul>
+                <li>
+                  A step&apos;s selector broke (the app changed), so the tool re-found the element
+                  by <strong>name / role / text / position / look</strong>, re-ran the step to
+                  prove the fix works, and kept the run green. The 🤖 tag on each step shows{' '}
+                  <em>which</em> clues matched.
+                </li>
+                <li>
+                  <strong>If the change was expected</strong> (devs renamed an id / refactored
+                  markup — the usual case): hit <strong>💾 Save</strong> to keep the new selector.
+                  The test now points at the new element — you do <em>not</em> ask the devs to
+                  change anything back.
+                </li>
+                <li>
+                  <strong>If it looks wrong</strong> (the element moved somewhere odd, or only the
+                  &ldquo;visual&rdquo; clue matched): don&apos;t save yet — open{' '}
+                  <strong>🔀 What changed</strong> to see what differed from the last green run, and
+                  raise it with the devs if it&apos;s a real regression.
+                </li>
+                <li>
+                  The fix is <strong>in memory until you Save</strong>. Export to Playwright uses
+                  the healed selector automatically (with a <code>⚠ auto-healed</code> comment) —
+                  but exported CI tests don&apos;t self-heal, so Save + re-export to lock it in.
+                </li>
+              </ul>
+            </div>
+          )}
+
           {/* === Pillar 4: reusable step blocks (reuses the assert-panel look) === */}
           {blocksPanelOpen && (
             <div className="assert-panel">
@@ -3992,6 +4069,28 @@ function App(): React.JSX.Element {
                           title="Selector healed by re-pick — 💾 save to keep it"
                         >
                           🔧 healed
+                        </span>
+                      )}
+                      {/* F4: main auto-repaired this selector mid-run. Shows live
+                          (aiHealedIndices) AND after save/reload (step.healedByAi). */}
+                      {(aiHealedIndices.has(i) || step.healedByAi) && (
+                        <span
+                          className="healed-tag ai-healed-tag"
+                          title={
+                            step.healedByAi
+                              ? `Selector auto-healed by AI and re-verified by re-running the step (confidence ${step.healedByAi.score}/100) — 💾 save to keep the fix`
+                              : 'Selector auto-healed by AI this run — 💾 save to keep it'
+                          }
+                        >
+                          🤖 fixed by AI
+                          {/* Surface the matched clues INLINE (no hover needed) — the
+                              3-clue → 5-clue story is visible at a glance. */}
+                          {step.healedByAi?.signals?.length ? (
+                            <span className="ai-healed-signals">
+                              {' · '}
+                              {step.healedByAi.signals.join(' + ')}
+                            </span>
+                          ) : null}
                         </span>
                       )}
                       {/* Day 16(+): downloads auto-save silently — give a one-click

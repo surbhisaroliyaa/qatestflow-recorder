@@ -26,6 +26,10 @@ export interface ReplayCandidate {
 
 export interface ReplayStep {
   type: string
+  // The human-readable name of the target element. Replay locates by the
+  // candidate ladder, not this — but F4 self-heal re-finds a broken element by
+  // its recorded label, so it's declared here (steps have always carried it).
+  label?: string
   url?: string
   value?: string
   key?: string // for `press` steps — the key pressed (e.g. 'Enter')
@@ -47,6 +51,9 @@ export interface ReplayStep {
   // Day 17: set on the click/press that OPENS a new tab — the ordinal it opens.
   // Replay arms a wait-for-popup before the action and binds the new tab to it.
   opensWindow?: number
+  // F4 (self-heal 2.0): stamped when main auto-heals this step's broken selector
+  // mid-run. Carried on the in-memory step so the trace/report can mark it.
+  healedByAi?: { at: string; signals: string[]; score: number }
 }
 
 // === The in-page resolver ===========================================
@@ -470,6 +477,36 @@ export function buildActionScript(step: ReplayStep): string {
   // hidden") — so both resolve tolerantly; the action itself judges the state.
   const tolerant = step.type === 'hover' || step.type === 'assert'
   return `(async () => {${findPrelude(step.candidates ?? [], tolerant)}${action}\n})()`
+}
+
+// === F4 (self-heal 2.0): locate a step's element for fingerprinting =====
+// During a GREEN run we snapshot each element's POSITION (rect) + a pixel crop
+// so a later failure can heal by "where it was" + "what it looked like", not
+// just its name. This finds the step's element by the SAME candidate ladder
+// replay uses and returns its viewport rect + the viewport size (so main can
+// normalise the rect and clip a screenshot to it). Short poll: the page may
+// still be settling as we go into the step. null rect = couldn't locate it.
+export function buildLocateRectScript(step: ReplayStep): string {
+  return `(async () => {${ladderPrelude(step.candidates ?? [])}
+    const deadline = Date.now() + 1500;
+    let el = null;
+    while (Date.now() < deadline) {
+      for (const c of cands) {
+        const cand = findByCandidate(c);
+        if (cand && isVisible(cand)) { el = cand; break; }
+      }
+      if (el) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!el) return { rect: null, vw: window.innerWidth, vh: window.innerHeight };
+    try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
+    const r = el.getBoundingClientRect();
+    return {
+      rect: { x: r.left, y: r.top, w: r.width, h: r.height },
+      vw: window.innerWidth,
+      vh: window.innerHeight
+    };
+  })()`
 }
 
 // === Failure screenshot annotation (Day 12.9, Surbhi's idea) =========

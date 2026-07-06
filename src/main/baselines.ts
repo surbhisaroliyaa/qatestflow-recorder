@@ -11,10 +11,22 @@ import { mkdir, readFile, writeFile } from 'fs/promises'
 import { libraryDir, slugify } from './library'
 import type { PageSnapshot } from './domDiff'
 
+// F4 (self-heal 2.0): what the step's TARGET element looked like on the green
+// run — its normalised position (rect as 0–1 fractions of the viewport) and a
+// small pixel crop (base64 PNG). A later failure heals against these ("it was
+// here, it looked like this"), not just the recorded name.
+export interface ElementFingerprint {
+  rect?: { x: number; y: number; w: number; h: number } // 0–1 of the viewport
+  crop?: string // base64 PNG, canonically sized (see visual.toCropPng)
+}
+
 export interface Baseline {
   testName: string
   at: string // ISO time this green baseline was captured
   steps: Record<number, PageSnapshot> // page state going INTO each step index
+  // F4: per-step target-element fingerprint (position + crop). Optional +
+  // sparse — only healable element steps whose element we could locate get one.
+  elements?: Record<number, ElementFingerprint>
 }
 
 function baselinesDir(): string {

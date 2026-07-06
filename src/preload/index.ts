@@ -141,6 +141,14 @@ const api = {
       return () => ipcRenderer.removeListener('recorder:replay-paused', listener)
     },
 
+    // F4 (self-heal 2.0): main auto-healed a broken selector mid-run and re-ran
+    // the step — swap in the healed step + show a "fixed by AI" badge.
+    onAutoHealed: (callback: (info: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, info: unknown): void => callback(info)
+      ipcRenderer.on('recorder:auto-healed', listener)
+      return () => ipcRenderer.removeListener('recorder:auto-healed', listener)
+    },
+
     // Answer the pause: retry (optionally with a healed step), skip, or stop.
     recovery: (decision: unknown): void => ipcRenderer.send('recorder:recovery', decision),
 

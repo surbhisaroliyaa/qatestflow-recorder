@@ -65,6 +65,41 @@ export interface DiffResult {
   diffPng?: Buffer
 }
 
+// === F4 (self-heal 2.0): element-crop fingerprints ===================
+// A tiny, fixed-size PNG of an element, used as a VISUAL fingerprint for
+// self-heal. Canonical size means two captures compare pixel-for-pixel even if
+// the element was resized a little between the green run and the failure.
+export function toCropPng(image: NativeImage, size = 48): Buffer {
+  return image.resize({ width: size, height: size }).toPNG()
+}
+
+// How visually alike a stored crop (base64 PNG) and a fresh capture are, 0–1
+// (1 = identical). Both are forced to the same canonical size first. Best-
+// effort: any decode/size problem returns 0 (treated as "no visual evidence").
+export function cropSimilarity(baseCropB64: string, candidate: NativeImage, size = 48): number {
+  try {
+    const base = nativeImage.createFromBuffer(Buffer.from(baseCropB64, 'base64')).resize({
+      width: size,
+      height: size
+    })
+    const cur = candidate.resize({ width: size, height: size })
+    const b = base.toBitmap()
+    const c = cur.toBitmap()
+    if (!b.length || b.length !== c.length) return 0
+    let changed = 0
+    const total = b.length / 4 || 1
+    for (let i = 0; i < b.length; i += 4) {
+      const db = Math.abs(b[i] - c[i])
+      const dg = Math.abs(b[i + 1] - c[i + 1])
+      const dr = Math.abs(b[i + 2] - c[i + 2])
+      if (Math.max(db, dg, dr) > 32) changed++
+    }
+    return 1 - changed / total
+  } catch {
+    return 0
+  }
+}
+
 // Compare a stored baseline PNG against a fresh capture. A pixel "differs"
 // when its biggest channel change exceeds `colorTol` (ignores sub-perceptual
 // noise + light anti-aliasing). Returns the changed ratio + a diff image.

@@ -89,6 +89,18 @@ interface RecorderAPI {
   ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
+  // F4 (self-heal 2.0): main auto-healed a broken selector mid-run and re-ran the
+  // step. The renderer swaps in the healed step (so a 💾 save keeps the fix) and
+  // shows a "fixed by AI" badge. `signals` = which of role/text/name/position/
+  // visual matched; `score` = the heal confidence (0–100).
+  onAutoHealed: (
+    callback: (info: {
+      index: number
+      step: RecorderStep
+      signals: string[]
+      score: number
+    }) => void
+  ) => () => void
   recovery: (decision: RecoveryDecision) => void
   setPicking: (active: boolean) => Promise<void>
   onPicked: (callback: (picked: PickedElement) => void) => () => void
@@ -649,6 +661,11 @@ declare global {
     // the ordinal of the tab it opened. Lets replay arm a wait-for-page before
     // the click, and export wrap it in Promise.all([waitForEvent('page'), …]).
     opensWindow?: number
+    // F4 (self-heal 2.0): stamped when main auto-healed this step's broken
+    // selector during a run — the element was re-found by role/text/accessible-
+    // name/position/visual and validated by re-running. Persists with the test
+    // (a saved audit trail: "this selector was AI-repaired, on these signals").
+    healedByAi?: { at: string; signals: string[]; score: number }
   }
 
   // Day 17: one open browser tab, as the renderer's tab strip sees it.

@@ -2898,6 +2898,20 @@ body {
   color: #d29922;
 }
 
+/* F4: AI-auto-healed selector — a distinct violet from the amber re-pick tag,
+   so "the tool fixed this itself" reads apart from "I re-picked this". */
+.ai-healed-tag {
+  color: #b48ce6;
+  cursor: help;
+}
+
+/* The matched clues (name + position + visual …), shown inline after the badge
+   as dimmer metadata so the signal list reads as detail, not a second label. */
+.ai-healed-signals {
+  color: #8a7fb0;
+  font-weight: 400;
+}
+
 /* Parent-anchored primary selector: located via an ancestor + position, so it's
    lower-confidence than an own-hook. A soft amber flag, not an error. */
 .anchored-note {

@@ -39,7 +39,13 @@ export function observerProgram(): void {
     __qaflow?: {
       setActive: (v: boolean) => void
       setPicking: (v: boolean) => void
-      findByLabel: (label: string, role?: string) => unknown
+      findByLabel: (
+        label: string,
+        role?: string,
+        text?: string,
+        rect?: { x: number; y: number; w: number; h: number } | null,
+        action?: string
+      ) => unknown
     }
   }
   if (g.__qaflowInstalled) {
@@ -254,7 +260,13 @@ export function observerProgram(): void {
     // Day 18 (self-heal): main calls this on a replay failure to AUTO-find the
     // element a broken step meant — by its recorded human label. Returns the
     // best visible match's facts (same shape a manual pick produces) or null.
-    findByLabel: (label: string, role?: string): unknown => findElementByLabel(label, role)
+    findByLabel: (
+      label: string,
+      role?: string,
+      text?: string,
+      rect?: { x: number; y: number; w: number; h: number } | null,
+      action?: string
+    ): unknown => findElementByLabel(label, role, text, rect, action)
   }
 
   // Timestamp until which the next click is ignored (implicit form submission
@@ -611,10 +623,28 @@ export function observerProgram(): void {
     return ''
   }
 
-  // Find the single best VISIBLE element whose name matches `label`. Scores
-  // exact > contains > token-overlap, with a small bonus for the same role.
-  // Returns the same payload a manual pick sends, or null when nothing fits.
-  function findElementByLabel(rawLabel: string, role?: string): unknown {
+  // F4 (self-heal 2.0): find the VISIBLE elements a broken step might have meant,
+  // scored by MULTIPLE signals — accessible NAME (the backbone) plus, when the
+  // caller has them from the green baseline, the same ROLE, the recorded visible
+  // TEXT, and the recorded POSITION on the page. Returns the top few candidates
+  // WITH their live rects + a per-signal breakdown, so the host can add a fifth
+  // signal (a pixel crop compare) and decide whether the winner is confident +
+  // unambiguous enough to auto-heal. `wantRect` is normalised 0–1 of the viewport
+  // (center used); null when no baseline position was captured.
+  //
+  // `action` is the step's action ('type' / 'select' / 'click' / …). It gates the
+  // candidate set to elements that can actually DO that action — you can't type
+  // into a <div> of help text — so static text that merely MENTIONS the field's
+  // name (e.g. SauceDemo's "Accepted usernames are:" box) never competes with the
+  // real input. Without it, such text scores as a near-tie and the ambiguity guard
+  // wrongly declines a heal that should be obvious.
+  function findElementByLabel(
+    rawLabel: string,
+    role?: string,
+    wantText?: string,
+    wantRect?: { x: number; y: number; w: number; h: number } | null,
+    action?: string
+  ): unknown {
     const norm = (s: string): string =>
       (s || '')
         .toLowerCase()
@@ -623,53 +653,116 @@ export function observerProgram(): void {
     const want = norm(rawLabel)
     if (!want) return null
     const wantTokens = want.split(' ').filter(Boolean)
+    const wantTextN = norm(wantText || '')
+    const vw = window.innerWidth || 1
+    const vh = window.innerHeight || 1
+    const wantCx = wantRect ? wantRect.x + wantRect.w / 2 : null
+    const wantCy = wantRect ? wantRect.y + wantRect.h / 2 : null
+    // Can this element perform the step's action? A `type` needs a fillable field
+    // (text-like input / textarea / contenteditable); a `select` needs a <select>.
+    // Other actions (click/hover/assert) don't restrict — almost anything is a
+    // valid click/assert target.
+    const NON_FILLABLE_INPUT = ['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image']
+    const canDoAction = (el: Element): boolean => {
+      if (action === 'type') {
+        const tag = el.tagName
+        if (tag === 'TEXTAREA') return true
+        if (tag === 'INPUT') {
+          const t = (el.getAttribute('type') || 'text').toLowerCase()
+          return NON_FILLABLE_INPUT.indexOf(t) < 0
+        }
+        return (el as HTMLElement).isContentEditable === true
+      }
+      if (action === 'select') return el.tagName === 'SELECT'
+      return true
+    }
     const nodes = Array.prototype.slice.call(
       document.querySelectorAll('a,button,input,select,textarea,label,img,[role],[data-test],[data-testid]')
     ) as Element[]
-    let best: Element | null = null
-    let bestScore = 0
-    // How many DISTINCT visible elements tie at the current top score. When this
-    // is >1 the label is ambiguous (e.g. six "Add to cart" buttons) — healing to
-    // "the best match" would just grab the first in DOM order, which may be the
-    // wrong element. The host uses this to decline a confident one-click fix.
-    let topCount = 0
+    const scored: {
+      el: Element
+      r: DOMRect
+      combined: number
+      nameScore: number
+      roleMatch: boolean
+      textMatch: boolean
+      hasPos: boolean
+      posScore: number
+    }[] = []
     for (const el of nodes) {
+      if (!canDoAction(el)) continue
       const r = el.getBoundingClientRect()
       if (!r.width && !r.height) continue
       const cs = getComputedStyle(el)
       if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') continue
       const name = norm(accessibleNameOf(el))
-      if (!name) continue
-      let score = 0
-      if (name === want) score = 100
-      else if (name.indexOf(want) >= 0 || want.indexOf(name) >= 0) score = 70
-      else {
-        const nameTokens = new Set(name.split(' ').filter(Boolean))
-        const shared = wantTokens.filter((t) => nameTokens.has(t)).length
-        if (shared) score = Math.round((shared / wantTokens.length) * 55)
+      // NAME score: exact > contains > token-overlap (the original heuristic).
+      let nameScore = 0
+      if (name) {
+        if (name === want) nameScore = 100
+        else if (name.indexOf(want) >= 0 || want.indexOf(name) >= 0) nameScore = 70
+        else {
+          const nameTokens = new Set(name.split(' ').filter(Boolean))
+          const shared = wantTokens.filter((t) => nameTokens.has(t)).length
+          if (shared) nameScore = Math.round((shared / wantTokens.length) * 55)
+        }
       }
-      if (!score) continue
-      if (role && roleFor(el) === role) score += 15
-      if (score > bestScore) {
-        bestScore = score
-        best = el
-        topCount = 1
-      } else if (score === bestScore) {
-        topCount++
+      // TEXT signal: the recorded visible text still shows on this element.
+      let textMatch = false
+      if (wantTextN) {
+        const t = norm(el.textContent || '')
+        if (t && (t === wantTextN || t.indexOf(wantTextN) >= 0 || wantTextN.indexOf(t) >= 0)) {
+          textMatch = true
+        }
       }
+      // Need SOME textual anchor — name or the recorded text — to be in the race.
+      if (!nameScore && !textMatch) continue
+      const roleMatch = !!(role && roleFor(el) === role)
+      // POSITION signal: how close this element sits to where the recorded one
+      // was (normalised centers). +1 right on top → 0 about a third of the
+      // viewport away → clamped at -1 far off. Only when a baseline rect exists.
+      let posScore = 0
+      const hasPos = wantCx != null
+      if (hasPos) {
+        const cx = (r.left + r.width / 2) / vw
+        const cy = (r.top + r.height / 2) / vh
+        const dist = Math.sqrt((cx - (wantCx as number)) ** 2 + (cy - (wantCy as number)) ** 2)
+        // Floored gently (-0.5): a moved element shouldn't be buried — layout
+        // shifts are common exactly WHEN selectors break — but position still
+        // strongly separates duplicates (span ≈ 30 pts) so the right one of six
+        // look-alikes wins.
+        posScore = Math.max(-0.5, 1 - dist / 0.35)
+      }
+      let combined = nameScore
+      if (roleMatch) combined += 10
+      if (textMatch) combined += 15
+      if (hasPos) combined += Math.round(posScore * 20)
+      if (combined < 50) continue // too weak on every signal to be a real match
+      scored.push({ el, r, combined, nameScore, roleMatch, textMatch, hasPos, posScore })
     }
-    if (!best || bestScore < 60) return null
-    const input = best instanceof HTMLInputElement ? best : null
-    return {
-      facts: collectFacts(best),
-      // >1 means several equally-good matches — the caller should warn, not
-      // silently heal to this one.
-      matchCount: topCount,
-      text: (best.textContent || '').trim().slice(0, 100) || undefined,
-      inputValue: input ? input.value : undefined,
-      disabled: 'disabled' in best ? !!(best as { disabled?: boolean }).disabled : undefined,
-      checked: input && (input.type === 'checkbox' || input.type === 'radio') ? input.checked : undefined
-    }
+    if (!scored.length) return null
+    scored.sort((a, b) => b.combined - a.combined)
+    const matches = scored.slice(0, 5).map((s) => {
+      const input = s.el instanceof HTMLInputElement ? s.el : null
+      return {
+        facts: collectFacts(s.el),
+        rect: { x: s.r.left, y: s.r.top, w: s.r.width, h: s.r.height },
+        vw,
+        vh,
+        score: s.combined,
+        nameScore: s.nameScore,
+        roleMatch: s.roleMatch,
+        textMatch: s.textMatch,
+        hasPos: s.hasPos,
+        posScore: s.posScore,
+        text: (s.el.textContent || '').trim().slice(0, 100) || undefined,
+        inputValue: input ? input.value : undefined,
+        disabled: 'disabled' in s.el ? !!(s.el as { disabled?: boolean }).disabled : undefined,
+        checked:
+          input && (input.type === 'checkbox' || input.type === 'radio') ? input.checked : undefined
+      }
+    })
+    return { matches }
   }
 
   function meaningfulTarget(start: Element): Element {
