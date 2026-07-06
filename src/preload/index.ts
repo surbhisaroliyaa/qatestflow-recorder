@@ -229,6 +229,9 @@ const api = {
   translator: {
     explain: (evidence: unknown): Promise<unknown> =>
       ipcRenderer.invoke('translator:explain', evidence),
+    // F9 Stage 3: deep root-cause over a whole run trace (by trace id).
+    deepRca: (traceId: string): Promise<unknown> =>
+      ipcRenderer.invoke('translator:deepRca', traceId),
     // Save a generated bug report; resolves to the path or null on cancel.
     saveReport: (markdown: string, defaultName: string): Promise<string | null> =>
       ipcRenderer.invoke('report:save', markdown, defaultName)

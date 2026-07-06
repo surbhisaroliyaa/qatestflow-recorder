@@ -47,6 +47,8 @@ interface ReplayResult {
   // F8: what changed on the page since the last green run (present on a failure
   // when a green baseline exists and something differs).
   whatChanged?: DomDiff
+  // F9 (Stage 2): the finer failure category, auto-classified on any failure.
+  category?: FailureCategory
 }
 
 // Day 18: how aggressively to keep a run trace (mirrors Playwright's `trace`).
@@ -181,6 +183,9 @@ interface SessionAPI {
 // === Failure translator (Day 13) ===
 interface TranslatorAPI {
   explain: (evidence: FailureEvidence) => Promise<FailureAnalysis>
+  // F9 Stage 3: deep root-cause over a whole run trace. Null when there's no
+  // trace or Claude is unavailable.
+  deepRca: (traceId: string) => Promise<FailureAnalysis | null>
   saveReport: (markdown: string, defaultName: string) => Promise<string | null>
 }
 
@@ -278,6 +283,8 @@ declare global {
     error?: string
     screenshotPath?: string // page capture at the failing step (Day 11.5)
     traceId?: string // Day 18: the kept run trace, openable in the viewer
+    // F9 (Stage 2): the finer failure category, auto-stamped on a failed run.
+    category?: FailureCategory
   }
 
   // === Accessibility scan (F13) ===
@@ -529,7 +536,19 @@ declare global {
     verdict: FailureVerdict
     explanation: string
     suggestion: string
+    // F9: what the failure blocked (how far the flow got, what never ran).
+    impact?: string
+    // F9 (finer categories): precise triage sub-type.
+    category?: FailureCategory
   }
+  type FailureCategory =
+    | 'stale-selector'
+    | 'stale-data'
+    | 'app-bug'
+    | 'timing'
+    | 'environment'
+    | 'authoring'
+    | 'unknown'
 
   // The human's answer to a pause: retry the step (optionally swapped for a
   // re-picked, healed version), skip it for this run only, or stop the run.

@@ -33,7 +33,14 @@ import {
   type RunInfo,
   type DraftFile
 } from './library'
-import { explainFailure, evaluateNlAssertion, type FailureEvidence } from './translator'
+import {
+  explainFailure,
+  evaluateNlAssertion,
+  categorizeFailure,
+  deepRcaFailure,
+  type FailureEvidence,
+  type FailureCategory
+} from './translator'
 import { diffSnapshots, type PageSnapshot, type DomDiff } from './domDiff'
 import {
   baselineKeyFor,
@@ -2018,6 +2025,7 @@ function createWindow(): void {
         harServed?: number
         harPassthrough?: number
         whatChanged?: DomDiff
+        category?: FailureCategory
       }): Promise<{
         ok: boolean
         failedAt?: number
@@ -2031,6 +2039,7 @@ function createWindow(): void {
         harServed?: number
         harPassthrough?: number
         whatChanged?: DomDiff
+        category?: FailureCategory
       }> => {
         // Detach EVERY tab we touched (console + CDP), and clear the replay flag
         // in each so normal browsing gets its real native dialogs back.
@@ -2088,6 +2097,34 @@ function createWindow(): void {
             // F4: bank the element fingerprints from this green run too.
             elements: runFingerprints
           })
+        }
+        // F9 (Stage 2): stamp every FAILURE with its finer category — the cheap,
+        // offline rule classifier over the evidence we already have — so the
+        // suite-wide breakdown can count failures by type without needing anyone
+        // to open Explain. Deterministic; best-effort (never blocks the result).
+        if (!outcome.ok && !outcome.aborted) {
+          try {
+            const stepTexts = traceOpts?.stepTexts ?? []
+            outcome.category = categorizeFailure({
+              pageUrl: '',
+              pageTitle: '',
+              stepType: '',
+              stepIndex: outcome.failedAt ?? 0,
+              stepText: stepTexts[outcome.failedAt ?? 0] ?? '',
+              error: outcome.error ?? '',
+              consoleErrors: outcome.consoleErrors ?? consoleErrors,
+              networkErrors: outcome.networkErrors ?? networkErrors,
+              allSteps: stepTexts,
+              failures: (outcome.failures ?? []).map((f) => ({
+                index: f.index,
+                stepText: stepTexts[f.index] ?? '',
+                error: f.error,
+                screenshotPath: f.screenshotPath
+              }))
+            })
+          } catch {
+            // classification is best-effort — a failure without a category is fine
+          }
         }
         return outcome
       }
@@ -3266,6 +3303,26 @@ function createWindow(): void {
   ipcMain.handle('translator:explain', (_event, evidence: FailureEvidence) =>
     explainFailure(evidence, libraryDir())
   )
+
+  // F9 Stage 3: Deep RCA over a whole run trace. Loads the trace, hands every
+  // step (status + error + logs + screenshot filename) to the LLM with cwd set
+  // to the trace folder so it can Read the step screenshots. Returns null when
+  // there's no trace or Claude is unavailable (the renderer explains why).
+  ipcMain.handle('translator:deepRca', async (_event, traceId: string) => {
+    const manifest = await loadTrace(traceId)
+    if (!manifest) return null
+    const steps = manifest.steps.map((s) => ({
+      index: s.index,
+      text: s.text,
+      status: s.status,
+      durationMs: s.durationMs,
+      error: s.error,
+      screenshotFile: s.screenshotFile,
+      consoleErrors: s.consoleErrors ?? [],
+      networkErrors: s.networkErrors ?? []
+    }))
+    return deepRcaFailure(manifest.testName, steps, traceDir(traceId))
+  })
 
   // Save a generated bug report as a .md file the user picks a place for.
   // Same pattern as recorder:export — main owns the disk.

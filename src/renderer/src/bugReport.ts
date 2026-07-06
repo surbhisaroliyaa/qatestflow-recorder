@@ -63,13 +63,14 @@ export function generateBugReport(ev: FailureEvidence, analysis: FailureAnalysis
     lines.push(
       '## Triage',
       '',
-      `**Verdict:** ${VERDICT_TITLES[analysis.verdict] ?? analysis.verdict} _(${
-        analysis.source === 'ai' ? 'analyzed by Claude' : 'rule-based analysis'
-      })_`,
+      `**Verdict:** ${VERDICT_TITLES[analysis.verdict] ?? analysis.verdict}${
+        analysis.category ? ` · ${analysis.category}` : ''
+      } _(${analysis.source === 'ai' ? 'analyzed by Claude' : 'rule-based analysis'})_`,
       '',
       analysis.explanation,
       ''
     )
+    if (analysis.impact) lines.push(`**Impact:** ${analysis.impact}`, '')
     if (analysis.suggestion) lines.push(`**Suggested next action:** ${analysis.suggestion}`, '')
   }
 

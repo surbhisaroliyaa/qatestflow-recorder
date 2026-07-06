@@ -74,6 +74,17 @@ const VERDICT_LABELS: Record<FailureVerdict, string> = {
   unknown: 'Unclassified'
 }
 
+// F9 (finer categories): the precise triage sub-type shown beside the verdict.
+const CATEGORY_LABELS: Record<FailureCategory, string> = {
+  'stale-selector': 'stale selector',
+  'stale-data': 'stale data / wrong value',
+  'app-bug': 'app bug',
+  timing: 'timing',
+  environment: 'unreachable',
+  authoring: 'weak selector',
+  unknown: 'unclassified'
+}
+
 // F13: how severe axe considers each violation — drives the sort order (worst
 // first) and the chip colour. Anything unrated sorts last.
 const A11Y_IMPACT_ORDER: Record<string, number> = {
@@ -169,6 +180,12 @@ function App(): React.JSX.Element {
   // Day 11 — test library. The current test's identity (empty/null = an
   // unsaved recording) + the saved-tests list shown on the welcome screen.
   const [savedTests, setSavedTests] = useState<SavedTestSummary[]>([])
+  // F9 (Stage 2): when set, the library shows ONLY the currently-failing tests of
+  // this category — the drill-in from the failure-breakdown strip.
+  const [failureFilter, setFailureFilter] = useState<FailureCategory | null>(null)
+  // F9 (Stage 2): the breakdown lives at the BOTTOM of the library and is
+  // COLLAPSED by default (a quiet toggle) — failures shouldn't dominate on open.
+  const [breakdownOpen, setBreakdownOpen] = useState(false)
   // Day 18 — auto-saved drafts (unsaved in-progress recordings). `draftIdRef`
   // is the current recording's draft id; the timer debounces the auto-save.
   const [drafts, setDrafts] = useState<DraftSummary[]>([])
@@ -330,6 +347,7 @@ function App(): React.JSX.Element {
     traceId?: string // Day 20: this row's run recording, openable per row
     consoleErrors?: string[] // this row's evidence — for per-row 💡 Explain
     networkErrors?: string[]
+    category?: FailureCategory // F9 (Stage 2): this row's auto-classified failure type
   }
   const [dataRun, setDataRun] = useState<{
     total: number
@@ -367,6 +385,9 @@ function App(): React.JSX.Element {
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
   const [analysis, setAnalysis] = useState<FailureAnalysis | null>(null)
+  // F9 Stage 3: the current analysis came from Deep RCA (whole-trace) — badges it
+  // and swaps the waiting message (it takes longer).
+  const [isDeep, setIsDeep] = useState(false)
   // The evidence bundle the open analysis was built from — the bug report
   // generator reuses it so both documents describe the same failure.
   const [lastEvidence, setLastEvidence] = useState<FailureEvidence | null>(null)
@@ -982,6 +1003,7 @@ function App(): React.JSX.Element {
     consoleErrors?: string[]
     networkErrors?: string[]
     failures?: { index: number; error: string; screenshotPath?: string }[]
+    category?: FailureCategory // F9 (Stage 2): auto-classified failure type
   }> => {
     setFailedIndex(null)
     setReplayError(null)
@@ -1056,7 +1078,8 @@ function App(): React.JSX.Element {
         failedAt: result.failedAt,
         error: result.error,
         screenshotPath: result.screenshotPath,
-        traceId: result.traceId
+        traceId: result.traceId,
+        category: result.category // F9 (Stage 2): auto-classified failure type
       })
     }
     return result
@@ -1271,7 +1294,8 @@ function App(): React.JSX.Element {
         screenshotPath: result.screenshotPath,
         traceId: result.traceId,
         consoleErrors: result.consoleErrors,
-        networkErrors: result.networkErrors
+        networkErrors: result.networkErrors,
+        category: result.category
       }
       results.push(entry)
       setDataRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
@@ -1289,7 +1313,8 @@ function App(): React.JSX.Element {
         error: failed.length
           ? `${failed.length}/${results.length} rows failed — e.g. ${first.label}: ${first.error}`
           : undefined,
-        screenshotPath: first?.screenshotPath
+        screenshotPath: first?.screenshotPath,
+        category: first?.category // F9 (Stage 2): representative failure type
       })
     }
   }
@@ -1344,6 +1369,7 @@ function App(): React.JSX.Element {
     setBugReport(null)
     setReportSavedPath(null)
     setAnalysis(null)
+    setIsDeep(false)
     setAnalysisOpen(true)
     setAnalyzing(true)
     // The page's live URL + title live inside the native browser view — only
@@ -1395,6 +1421,7 @@ function App(): React.JSX.Element {
     setBugReport(null)
     setReportSavedPath(null)
     setAnalysis(null)
+    setIsDeep(false)
     setAnalysisOpen(true)
     setAnalyzing(true)
     let pageUrl = urlInput
@@ -1453,6 +1480,32 @@ function App(): React.JSX.Element {
     setAnalysis(null)
     setBugReport(null)
     setReportSavedPath(null)
+    setIsDeep(false)
+  }
+
+  // F9 Stage 3: Deep RCA — feed the WHOLE run trace (every step + screenshot) to
+  // the LLM to find a root cause that may be EARLIER than the reported failure.
+  // Opt-in (this button), one failure at a time; slower than a normal explain.
+  const handleDeepRca = async (): Promise<void> => {
+    if (!lastTraceId) return
+    setIsDeep(true)
+    setBugReport(null)
+    setAnalyzing(true)
+    setAnalysis(null)
+    try {
+      const res = (await window.api.translator.deepRca(lastTraceId)) as FailureAnalysis | null
+      setAnalysis(
+        res ?? {
+          source: 'rules',
+          verdict: 'unknown',
+          explanation:
+            'Deep RCA could not run — it needs the Claude CLI (and a saved run trace). The normal analysis still applies.',
+          suggestion: ''
+        }
+      )
+    } finally {
+      setAnalyzing(false)
+    }
   }
 
   // Bug report = the SAME evidence formatted for humans (plus the verdict,
@@ -2361,6 +2414,7 @@ function App(): React.JSX.Element {
                     : `${savedTests.length} saved test flow${savedTests.length === 1 ? '' : 's'}`}
                 </span>
               </div>
+
               {(() => {
                 // Sections in display order: E2E + Daily always shown (even
                 // empty, so they're discoverable), customs after, legacy
@@ -2371,9 +2425,20 @@ function App(): React.JSX.Element {
                 }
                 if (savedTests.some((t) => !t.suite)) groups.push('')
                 return groups.map((suite) => {
-                  const tests = savedTests.filter((t) => t.suite === suite)
+                  const tests = savedTests
+                    .filter((t) => t.suite === suite)
+                    // F9 (Stage 2): drill-in — when a breakdown chip is active, show
+                    // only the currently-failing tests of that category.
+                    .filter(
+                      (t) =>
+                        !failureFilter ||
+                        (t.lastRun?.status === 'failed' &&
+                          (((t.lastRun.category as string) || 'unknown') === failureFilter))
+                    )
                   const suiteKey = suite || '(unsorted)'
-                  const isOpen = openSuites.has(suiteKey)
+                  // With a filter active, hide sections that have nothing to show.
+                  if (failureFilter && tests.length === 0) return null
+                  const isOpen = failureFilter ? true : openSuites.has(suiteKey)
                   return (
                     <div key={suiteKey} className="library-section">
                       <div className="library-section-header">
@@ -2598,6 +2663,67 @@ function App(): React.JSX.Element {
                     </div>
                   )
                 })
+              })()}
+
+              {/* F9 (Stage 2): failure breakdown — at the BOTTOM of the library,
+                  COLLAPSED by default. On open you just see a quiet one-line
+                  toggle; expand it to see the categories + drill in. */}
+              {(() => {
+                const failing = savedTests.filter((t) => t.lastRun?.status === 'failed')
+                if (!failing.length) return null
+                const counts = new Map<string, number>()
+                for (const t of failing) {
+                  const c = (t.lastRun?.category as string) || 'unknown'
+                  counts.set(c, (counts.get(c) ?? 0) + 1)
+                }
+                const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1])
+                return (
+                  <div className="failure-breakdown-wrap">
+                    <button
+                      type="button"
+                      className="failure-breakdown-toggle"
+                      onClick={() =>
+                        setBreakdownOpen((o) => {
+                          if (o) setFailureFilter(null) // collapsing clears the drill-in
+                          return !o
+                        })
+                      }
+                      title="Show a breakdown of your failing tests by cause"
+                    >
+                      🩹 {failing.length} failing — by type {breakdownOpen ? '▾' : '▸'}
+                    </button>
+                    {breakdownOpen && (
+                      <div className="failure-breakdown">
+                        {ordered.map(([cat, n]) => (
+                          <button
+                            key={cat}
+                            type="button"
+                            className={`category-chip cat-${cat} breakdown-chip${
+                              failureFilter === cat ? ' active' : ''
+                            }`}
+                            onClick={() =>
+                              setFailureFilter((f) => (f === cat ? null : (cat as FailureCategory)))
+                            }
+                            title={`Show the ${n} test${n > 1 ? 's' : ''} that failed with "${
+                              CATEGORY_LABELS[cat as FailureCategory] ?? cat
+                            }"`}
+                          >
+                            {CATEGORY_LABELS[cat as FailureCategory] ?? cat} <strong>{n}</strong>
+                          </button>
+                        ))}
+                        {failureFilter && (
+                          <button
+                            type="button"
+                            className="breakdown-clear"
+                            onClick={() => setFailureFilter(null)}
+                          >
+                            clear ✕
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
               })()}
             </div>
           )}
@@ -4492,8 +4618,9 @@ function App(): React.JSX.Element {
             ) : analyzing ? (
               <div className="analysis-body">
                 <p className="analysis-waiting">
-                  Analyzing the failure… asking Claude first — if it isn&apos;t available, this
-                  falls back to the built-in rules automatically.
+                  {isDeep
+                    ? '🔬 Deep RCA — reading the whole trace and every step screenshot to find the root cause. This takes longer than a normal explain…'
+                    : 'Analyzing the failure… asking Claude first — if it isn’t available, this falls back to the built-in rules automatically.'}
                 </p>
               </div>
             ) : analysis ? (
@@ -4502,13 +4629,24 @@ function App(): React.JSX.Element {
                   <span className={`verdict-chip ${analysis.verdict}`}>
                     {VERDICT_LABELS[analysis.verdict] ?? analysis.verdict}
                   </span>
+                  {analysis.category && (
+                    <span className={`category-chip cat-${analysis.category}`}>
+                      {CATEGORY_LABELS[analysis.category] ?? analysis.category}
+                    </span>
+                  )}
                   <span className="analysis-source">
+                    {isDeep && <span className="deep-badge">🔬 Deep RCA · </span>}
                     {analysis.source === 'ai'
                       ? 'analyzed by Claude'
                       : 'built-in rules (Claude unavailable)'}
                   </span>
                 </div>
                 <p className="analysis-text">{analysis.explanation}</p>
+                {analysis.impact && (
+                  <p className="analysis-impact">
+                    <strong>Impact:</strong> {analysis.impact}
+                  </p>
+                )}
                 {analysis.suggestion && (
                   <p className="analysis-suggestion">→ {analysis.suggestion}</p>
                 )}
@@ -4577,6 +4715,17 @@ function App(): React.JSX.Element {
                   <button className="modal-btn" onClick={closeAnalysis}>
                     Close
                   </button>
+                  {/* F9 Stage 3: opt-in deep root-cause over the whole trace —
+                      only when a run trace was kept, and not mid-analysis. */}
+                  {lastTraceId && !analyzing && (
+                    <button
+                      className="modal-btn"
+                      onClick={handleDeepRca}
+                      title="Deep RCA: feed the WHOLE run trace — every step's screenshot, DOM, console/network — to Claude to find a root cause that may be earlier than where it failed. Slower; uses the saved trace."
+                    >
+                      🔬 Deep RCA
+                    </button>
+                  )}
                   <button
                     className="modal-btn primary"
                     onClick={handleGenerateReport}

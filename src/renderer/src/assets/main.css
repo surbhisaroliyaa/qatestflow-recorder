@@ -3278,6 +3278,81 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* F9: the finer category — a quieter chip beside the verdict (the verdict is the
+   headline; this is the precise triage sub-type). */
+.category-chip {
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #262d38;
+  color: #b8c4d4;
+  border: 1px solid #3a4557;
+}
+.category-chip.cat-stale-selector,
+.category-chip.cat-authoring {
+  color: #ffe0a3;
+  border-color: #5c4a1f;
+}
+.category-chip.cat-app-bug {
+  color: #f0b6b2;
+  border-color: #5c2a2a;
+}
+.category-chip.cat-stale-data {
+  color: #e0c2f0;
+  border-color: #4a2f5c;
+}
+
+/* F9 (Stage 2): the failure breakdown — a quiet collapsed toggle at the BOTTOM
+   of the library that expands to the category chips. */
+.failure-breakdown-wrap {
+  margin: 10px 0 2px;
+}
+.failure-breakdown-toggle {
+  background: none;
+  border: none;
+  color: #8b93a7;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 2px;
+}
+.failure-breakdown-toggle:hover {
+  color: #e0a0a0;
+}
+.failure-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  margin: 4px 0 0;
+  background: #1a1f27;
+  border: 1px solid #2c333f;
+  border-radius: 8px;
+}
+/* The category chips are clickable here (drill-in) — add affordance + active state. */
+.breakdown-chip {
+  cursor: pointer;
+}
+.breakdown-chip:hover {
+  filter: brightness(1.25);
+}
+.breakdown-chip.active {
+  outline: 2px solid #6ea8fe;
+  outline-offset: 1px;
+}
+.breakdown-clear {
+  font-size: 11px;
+  color: #8b93a7;
+  background: none;
+  border: none;
+  cursor: pointer;
+  margin-left: 2px;
+}
+.breakdown-clear:hover {
+  color: #e6edf3;
+}
+
 .verdict-chip.app-bug {
   background: #4a2422;
   color: #ffb3ae;
@@ -3318,6 +3393,24 @@ body {
   font-size: 13px;
   line-height: 1.6;
   color: #d8d8d8;
+}
+
+/* F9 Stage 3: marks an analysis that came from whole-trace Deep RCA. */
+.deep-badge {
+  color: #7fd0e0;
+  font-weight: 700;
+}
+
+/* F9: the "how bad / what it blocked" line — neutral slate, between the
+   explanation (why) and the suggestion (do this next). */
+.analysis-impact {
+  margin: 0;
+  padding: 8px 10px;
+  background: #1e2530;
+  border: 1px solid #384357;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #c5d1e0;
 }
 
 /* The "do this next" line — green, like a passing outcome. */

@@ -51,11 +51,38 @@ export interface FailureEvidence {
 
 export type FailureVerdict = 'app-bug' | 'test-bug' | 'timing' | 'environment' | 'unknown'
 
+// F9 (finer categories): the precise, triage-oriented sub-type — what to DO
+// about it. `verdict` is the 4-bucket headline (drives the report band); this
+// splits `test-bug` into the actions that differ, and flags the one case the
+// tool genuinely can't disambiguate (a value mismatch = app bug OR stale test
+// data). Deterministic from the error string, so it's cheap enough to compute
+// on EVERY failure (the suite-wide breakdown relies on that).
+//   stale-selector : element not found on a healthy page  → re-pick / self-heal
+//   stale-data     : a value/option mismatch              → app bug OR edit the expected value
+//   app-bug        : found-but-wrong-state, or missing element on a broken page
+//   timing         : found but never actionable in time   → add a wait
+//   environment    : site unreachable                     → check network/URL
+//   authoring      : no reliable selector was recorded    → target a better element
+//   unknown        : unclassified
+export type FailureCategory =
+  | 'stale-selector'
+  | 'stale-data'
+  | 'app-bug'
+  | 'timing'
+  | 'environment'
+  | 'authoring'
+  | 'unknown'
+
 export interface FailureAnalysis {
   source: 'ai' | 'rules' // which backend produced this
   verdict: FailureVerdict
   explanation: string
   suggestion: string
+  // F9: what the failure BLOCKED — how far the flow got and what never ran.
+  // Deterministic (computed from step positions), so it's always present.
+  impact?: string
+  // F9 (finer categories): the precise triage sub-type (see FailureCategory).
+  category?: FailureCategory
 }
 
 // === The rule-based backend =========================================
@@ -117,6 +144,7 @@ function buildNotes(ev: FailureEvidence): string[] {
 
 interface OneVerdict {
   verdict: FailureVerdict
+  category: FailureCategory
   explanation: string
   suggestion: string
 }
@@ -130,11 +158,12 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
   const serverErrors = siteNetErrors.filter((l) => /HTTP 5\d\d/.test(l))
   const hasJsErrors = ev.consoleErrors.length > 0
 
-  const finish = (verdict: FailureVerdict, explanation: string, suggestion: string): OneVerdict => ({
-    verdict,
-    explanation,
-    suggestion
-  })
+  const finish = (
+    verdict: FailureVerdict,
+    category: FailureCategory,
+    explanation: string,
+    suggestion: string
+  ): OneVerdict => ({ verdict, category, explanation, suggestion })
 
   // Couldn't reach the site at all — nothing about the app or test ran.
   if (
@@ -143,6 +172,7 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
     )
   ) {
     return finish(
+      'environment',
       'environment',
       `The browser could not load the page at all (${err}). Neither the test nor the application got a chance to run — this is a network / environment problem, not a product or test defect.`,
       'Check the URL, your internet connection, and whether the site is up, then run again.'
@@ -156,12 +186,14 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
     if (serverErrors.length || hasJsErrors) {
       return finish(
         'app-bug',
+        'app-bug',
         `The step "${ev.stepText}" could not find its element — and the page shows signs of being genuinely broken, so the element is likely missing because the application failed to render it, not because the selector went stale.`,
         'Treat this as an application defect: generate the bug report and attach the screenshot and logs.'
       )
     }
     return finish(
       'test-bug',
+      'stale-selector',
       `The step "${ev.stepText}" could not find its element (selector: ${ev.selector ?? 'n/a'}), and the page otherwise looks healthy (no console or network errors). Most likely the page changed — the recorded selector no longer matches anything.`,
       'Use Re-pick during an interactive replay (or the selector ladder) to point the step at the right element, then save the healed test.'
     )
@@ -172,11 +204,13 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
     if (hasJsErrors || serverErrors.length) {
       return finish(
         'app-bug',
+        'app-bug',
         `The element for "${ev.stepText}" exists but never became visible/enabled — and the page logged real errors, so it may be stuck mid-load because something in the application broke.`,
         'Check the console/network evidence in the bug report; if the page is stuck, that is an application defect.'
       )
     }
     return finish(
+      'timing',
       'timing',
       `The element for "${ev.stepText}" was found but stayed hidden or disabled past the wait limit. On a healthy page that usually means the page is simply slower than the test — an animation, a spinner, or a delayed fetch.`,
       'Retry the run; if it fails the same way, insert a wait step (or a visible-check) before this step to give the page time.'
@@ -187,6 +221,7 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
   if (err.includes('No reliable selector')) {
     return finish(
       'test-bug',
+      'authoring',
       `The recorded element has no stable hooks (no id, role, or text), so replay refuses to guess — acting on the wrong element would be worse than failing. The test step needs a better target, the application did nothing wrong.`,
       'Re-record or re-pick a more specific element (a label, button, or a container with an id).'
     )
@@ -196,6 +231,7 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
   if (err.startsWith('Expected ')) {
     return finish(
       'app-bug',
+      'stale-data',
       `A check failed: ${err}. The element was found fine — its STATE is what differs from what was recorded as correct. Unless the expected value itself is outdated test data, the application is showing the wrong thing.`,
       'If the expectation is still correct, report this as an application bug; if the app legitimately changed, edit the expected value in the step.'
     )
@@ -205,12 +241,14 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
   if (err.includes('Option not found')) {
     return finish(
       serverErrors.length || hasJsErrors ? 'app-bug' : 'unknown',
+      'stale-data',
       `The dropdown for "${ev.stepText}" no longer contains the recorded option (${err}). Either the application's option list changed (app side) or the recorded choice is outdated test data (test side).`,
       'Open the page, look at the dropdown: if the option should exist, file the bug; if it was renamed, edit the step value.'
     )
   }
 
   return finish(
+    'unknown',
     'unknown',
     `The step "${ev.stepText}" failed with: ${err}.`,
     'Check the screenshot and the console/network evidence to narrow it down.'
@@ -243,6 +281,7 @@ export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
       })
     }))
     const verdict = headlineVerdict(parts.map((p) => p.verdict))
+    const headline = parts.find((p) => p.verdict === verdict) ?? parts[0]
     const explanation = [
       `This test failed at ${ev.failures.length} steps.`,
       ...parts.map(
@@ -250,17 +289,38 @@ export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
       ),
       ...notes
     ].join(' ')
-    const suggestion = parts.find((p) => p.verdict === verdict)?.suggestion ?? parts[0].suggestion
-    return { source: 'rules', verdict, explanation, suggestion }
+    return {
+      source: 'rules',
+      verdict,
+      category: headline.category,
+      explanation,
+      suggestion: headline.suggestion
+    }
   }
 
   const one = classifyOne(ev)
   return {
     source: 'rules',
     verdict: one.verdict,
+    category: one.category,
     explanation: [one.explanation, ...notes].join(' '),
     suggestion: one.suggestion
   }
+}
+
+// F9: the finer category for a failure, deterministic from the error — the
+// headline failure's category when several failed. Cheap + offline, so it can be
+// stamped on every failure (the suite-wide breakdown, Stage 2). Independent of
+// which backend wrote the prose, so it's also attached to AI explanations.
+export function categorizeFailure(ev: FailureEvidence): FailureCategory {
+  if (ev.failures && ev.failures.length > 1) {
+    const parts = ev.failures.map((f) =>
+      classifyOne({ ...ev, stepIndex: f.index, stepText: f.stepText, error: f.error, selector: f.selector })
+    )
+    const v = headlineVerdict(parts.map((p) => p.verdict))
+    return (parts.find((p) => p.verdict === v) ?? parts[0]).category
+  }
+  return classifyOne(ev).category
 }
 
 // === The Claude CLI backend =========================================
@@ -418,12 +478,115 @@ async function aiExplain(ev: FailureEvidence, cwd: string): Promise<FailureAnaly
   return out ? parseAiAnswer(out) : null
 }
 
+// === F9: impact line ================================================
+// "Why it failed" (verdict/explanation) tells you the cause; this tells you the
+// COST — how far the flow got and what never ran, so a PM/dev reads "how bad"
+// at a glance. Deterministic from the step positions (no LLM needed), so it's
+// attached to every analysis regardless of backend.
+function computeImpact(ev: FailureEvidence): string {
+  const total = ev.allSteps.length
+  if (!total) return ''
+  // Continue-mode: several steps failed but the run went the distance.
+  if (ev.failures && ev.failures.length > 1) {
+    return `${ev.failures.length} of ${total} steps failed — the test did not complete cleanly.`
+  }
+  const ran = Math.min(Math.max(ev.stepIndex + 1, 1), total) // 1-based steps reached
+  const skipped = total - ran
+  if (skipped <= 0) {
+    return `Reached the final step (${ran} of ${total}) — the flow ran end-to-end, but its last check failed.`
+  }
+  const next = ev.allSteps
+    .slice(ran, ran + 3)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  const preview = next.length ? ` (${next.join('; ')}${skipped > 3 ? '; …' : ''})` : ''
+  return `Blocked at step ${ran} of ${total} — the remaining ${skipped} step${
+    skipped > 1 ? 's' : ''
+  } never ran${preview}.`
+}
+
 // === The front door ==================================================
 // Try the AI; fall back to the rules on any failure. The renderer shows
 // `source` so the user always knows which brain answered.
 export async function explainFailure(ev: FailureEvidence, cwd: string): Promise<FailureAnalysis> {
   const ai = await aiExplain(ev, cwd).catch(() => null)
-  return ai ?? ruleBasedExplain(ev)
+  const analysis = ai ?? ruleBasedExplain(ev)
+  const impact = computeImpact(ev)
+  if (impact) analysis.impact = impact
+  // F9: the finer category is deterministic from the error — attach it whichever
+  // backend wrote the prose (the AI path returns only the 4-bucket verdict).
+  analysis.category = categorizeFailure(ev)
+  return analysis
+}
+
+// === F9 Stage 3: Deep RCA (whole-trace root-cause) ==================
+// The normal Explain looks at the FAILING step + logs. Deep RCA is opt-in (a
+// 🔬 button, one failure at a time) and hands the LLM the WHOLE run trace —
+// every step's status, error, console/network, and SCREENSHOT — so it can find
+// a root cause that started EARLIER than where the test reported the failure
+// (a cascading failure). Costly (many screenshots), so never automatic.
+// Shape mirrors buildPrompt/parseAiAnswer so the panel renders it identically.
+export interface TraceStepLite {
+  index: number
+  text: string
+  status: string
+  durationMs?: number
+  error?: string
+  screenshotFile?: string
+  consoleErrors: string[]
+  networkErrors: string[]
+}
+
+function buildDeepPrompt(testName: string | undefined, steps: TraceStepLite[]): string {
+  const lines: string[] = [
+    'You are a senior QA engineer doing ROOT-CAUSE analysis on a failed UI test.',
+    'You have the FULL step-by-step trace below — every step with its status, any',
+    'error, its console/network problems, and a screenshot file you can open with',
+    'the Read tool (the files are in your current directory).',
+    '',
+    'CRITICAL: the step the test reported as "error" is often only the SYMPTOM. The',
+    'real cause can be an EARLIER step that silently went wrong (e.g. a login that',
+    'looked ok but landed on the wrong page, a dismissed modal that never appeared).',
+    'Walk the trace in order, LOOK at the screenshots around the failure, and find',
+    'the earliest step where things actually went wrong.',
+    '',
+    `Test: ${testName || '(unsaved recording)'}`,
+    '',
+    'Trace:'
+  ]
+  for (const s of steps) {
+    lines.push(
+      `  Step ${s.index + 1} [${s.status}] ${s.text}${s.durationMs ? ` (${s.durationMs}ms)` : ''}`
+    )
+    if (s.error) lines.push(`     error: ${s.error}`)
+    for (const c of s.consoleErrors.slice(0, 3)) lines.push(`     console: ${c.slice(0, 160)}`)
+    for (const n of s.networkErrors.slice(0, 3)) lines.push(`     network: ${n.slice(0, 160)}`)
+    if (s.screenshotFile) lines.push(`     screenshot: ${s.screenshotFile}`)
+  }
+  lines.push(
+    '',
+    'Open the screenshots around the failure before answering. Then respond in',
+    'EXACTLY this format (no markdown, no preamble):',
+    'VERDICT: <app-bug|test-bug|timing|environment|unknown>',
+    'EXPLANATION: <2-4 sentences. State the EARLIEST step where it actually went',
+    '  wrong (cite "step N") and how the later failure followed from it.>',
+    'SUGGESTION: <one sentence: the next action to take>'
+  )
+  return lines.join('\n')
+}
+
+// Run Deep RCA. cwd MUST be the trace directory (so the model can Read the
+// step screenshots by filename). Returns null on any problem — no rule fallback
+// (cross-step visual reasoning is inherently the LLM's job); the caller shows a
+// clear "needs Claude" message.
+export async function deepRcaFailure(
+  testName: string | undefined,
+  steps: TraceStepLite[],
+  traceCwd: string
+): Promise<FailureAnalysis | null> {
+  const out = await runClaude(buildDeepPrompt(testName, steps), traceCwd, 180_000).catch(() => null)
+  const parsed = out ? parseAiAnswer(out) : null
+  return parsed ? { ...parsed, source: 'ai' } : null
 }
 
 // === F19: AI (natural-language) assertion ============================

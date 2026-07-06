@@ -23,6 +23,10 @@ export interface RunInfo {
   failedAt?: number // step index of the first failure
   error?: string
   screenshotPath?: string // page capture at the failing step (Day 11.5)
+  // F9 (Stage 2): the finer failure category (stale-selector / stale-data / …),
+  // stamped automatically on every failed run so the suite-wide breakdown can
+  // count failures by type. Absent on passes and on older runs.
+  category?: string
 }
 
 // How many past runs each test remembers (newest first). Enough to spot
