@@ -2026,6 +2026,8 @@ function createWindow(): void {
         harPassthrough?: number
         whatChanged?: DomDiff
         category?: FailureCategory
+        aiHealed?: number
+        healable?: { index: number; label: string; signals: string[]; score: number; step: ReplayStep }
       }): Promise<{
         ok: boolean
         failedAt?: number
@@ -2040,6 +2042,8 @@ function createWindow(): void {
         harPassthrough?: number
         whatChanged?: DomDiff
         category?: FailureCategory
+        aiHealed?: number
+        healable?: { index: number; label: string; signals: string[]; score: number; step: ReplayStep }
       }> => {
         // Detach EVERY tab we touched (console + CDP), and clear the replay flag
         // in each so normal browsing gets its real native dialogs back.
@@ -2126,6 +2130,9 @@ function createWindow(): void {
             // classification is best-effort — a failure without a category is fine
           }
         }
+        // F9/B: how many selectors F4 auto-healed this run — lets a suite report
+        // surface "N tests auto-healed" and offer to save the repaired selectors.
+        if (aiHealedOnce.size) outcome.aiHealed = aiHealedOnce.size
         return outcome
       }
 
@@ -3006,6 +3013,33 @@ function createWindow(): void {
           // This step is a real failure (Stop, or a non-interactive run that
           // ends at the first failure) — record it before returning.
           failures.push({ index: i, error: message, screenshotPath })
+          // Option 2 (conservative unattended heal): the selector broke and
+          // self-heal FOUND a likely fix but wasn't confident enough to auto-apply
+          // (and there was no one to click Accept in a batch run). We DON'T apply
+          // it silently — a wrong guess that "works" is a false pass. Instead we
+          // hand the suggestion back so the suite report can list it "healable —
+          // review & accept", keeping a human in the loop before it turns green.
+          const healable =
+            heal && !heal.confident
+              ? {
+                  index: i,
+                  label: heal.suggestion.label,
+                  signals: heal.signals,
+                  score: heal.score,
+                  step: {
+                    ...step,
+                    label: heal.suggestion.label,
+                    selector: heal.suggestion.selector,
+                    candidates: heal.suggestion.candidates,
+                    frame: step.frame,
+                    healedByAi: {
+                      at: new Date().toISOString(),
+                      signals: heal.signals,
+                      score: heal.score
+                    }
+                  } as ReplayStep
+                }
+              : undefined
           return await finish({
             ok: false,
             failedAt: i,
@@ -3014,7 +3048,8 @@ function createWindow(): void {
             failures,
             consoleErrors: consoleErrors.slice(),
             networkErrors: networkErrors.slice(),
-            whatChanged: await computeWhatChanged(i)
+            whatChanged: await computeWhatChanged(i),
+            healable
           })
         }
       }

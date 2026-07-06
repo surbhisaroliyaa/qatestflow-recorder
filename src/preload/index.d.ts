@@ -49,6 +49,12 @@ interface ReplayResult {
   whatChanged?: DomDiff
   // F9 (Stage 2): the finer failure category, auto-classified on any failure.
   category?: FailureCategory
+  // B: how many selectors F4 auto-healed this run (for the suite report).
+  aiHealed?: number
+  // Option 2: the selector broke and self-heal found a LIKELY fix that wasn't
+  // confident enough to auto-apply — surfaced so a human can review & accept it
+  // (never applied silently in a batch run — a wrong guess would be a false pass).
+  healable?: { index: number; label: string; signals: string[]; score: number; step: RecorderStep }
 }
 
 // Day 18: how aggressively to keep a run trace (mirrors Playwright's `trace`).

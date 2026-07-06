@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { generatePlaywrightTest, generatePageObjectTest, stepText } from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
-import { classifyRuns } from './flaky'
+import { classifyRuns, type FlakyTag } from './flaky'
 import { trustScore } from './trust'
 import { findWeakAssertions } from './deadAssertions'
 import { diffSteps, diffCounts } from './stepDiff'
@@ -77,7 +77,7 @@ const VERDICT_LABELS: Record<FailureVerdict, string> = {
 // F9 (finer categories): the precise triage sub-type shown beside the verdict.
 const CATEGORY_LABELS: Record<FailureCategory, string> = {
   'stale-selector': 'stale selector',
-  'stale-data': 'stale data / wrong value',
+  'stale-data': 'stale data',
   'app-bug': 'app bug',
   timing: 'timing',
   environment: 'unreachable',
@@ -186,6 +186,14 @@ function App(): React.JSX.Element {
   // F9 (Stage 2): the breakdown lives at the BOTTOM of the library and is
   // COLLAPSED by default (a quiet toggle) — failures shouldn't dominate on open.
   const [breakdownOpen, setBreakdownOpen] = useState(false)
+  // A1 (scalable library): free-text search + a status filter, so a big library
+  // (hundreds of tests) stays navigable. Compose with the F9 category drill-in.
+  const [librarySearch, setLibrarySearch] = useState('')
+  const [libraryFilter, setLibraryFilter] = useState<'all' | 'failing' | 'passing' | 'flaky'>(
+    'all'
+  )
+  // A2 (scalable library): fileNames ticked for a bulk action (run / delete).
+  const [selectedTests, setSelectedTests] = useState<Set<string>>(new Set())
   // Day 18 — auto-saved drafts (unsaved in-progress recordings). `draftIdRef`
   // is the current recording's draft id; the timer debounces the auto-save.
   const [drafts, setDrafts] = useState<DraftSummary[]>([])
@@ -322,6 +330,32 @@ function App(): React.JSX.Element {
     failedAt?: number
     error?: string
     screenshotPath?: string
+    category?: FailureCategory // B: failure type (for the by-category breakdown)
+    healed?: number // B: selectors auto-healed in this test's run
+  }
+  // B: a test whose selectors auto-healed this run, with the repaired steps ready
+  // to persist — "Save all healed" in the report writes them all at once.
+  interface HealedSave {
+    fileName: string
+    name: string
+    saveInput: {
+      name: string
+      baseURL: string
+      suite: string
+      steps: RecorderStep[]
+      storageState?: string
+      viewport?: { width: number; height: number }
+      dataRows?: Record<string, string>[]
+    }
+  }
+  // Option 2: a failed test whose selector self-heal COULD fix (found but not
+  // confident) — surfaced in the report for human review & one-click accept.
+  interface HealableFail {
+    fileName: string
+    name: string
+    suite: string
+    hasBlocks: boolean // block tests: index may not map to display steps — review only
+    healable: { index: number; label: string; signals: string[]; score: number; step: RecorderStep }
   }
   const [suiteRun, setSuiteRun] = useState<{
     suite: string
@@ -330,6 +364,10 @@ function App(): React.JSX.Element {
     currentName: string
     results: SuiteRunEntry[]
     running: boolean
+    healedSaves?: HealedSave[] // B: healed tests captured this run (for Save all)
+    healedSaved?: boolean // B: the user already clicked Save all healed
+    healables?: HealableFail[] // Option 2: failed-but-healable tests to review
+    accepted?: string[] // Option 2: fileNames whose healable fix was accepted
   } | null>(null)
 
   // Day 20 — data-driven runs. The table of rows this test runs against (each
@@ -433,6 +471,59 @@ function App(): React.JSX.Element {
   // a test with no linked blocks.
   const runPlanRef = useRef<number[] | null>(null)
   const toDisplayIdx = (i: number): number => runPlanRef.current?.[i] ?? i
+
+  // A1 (scalable library): the flaky tag for a test (from its run history) + a
+  // single predicate that answers "does this test pass ALL the active library
+  // filters" — name search + status filter + the F9 category drill-in, ANDed.
+  const testFlakyTag = (t: SavedTestSummary): FlakyTag => {
+    const runs = t.runs?.length ? t.runs : t.lastRun ? [t.lastRun] : []
+    return classifyRuns(runs).tag
+  }
+  const anyLibraryFilter = (): boolean =>
+    librarySearch.trim() !== '' || libraryFilter !== 'all' || failureFilter !== null
+  // A2 (bulk actions): tests ticked for a bulk operation (run / delete).
+  const toggleSelect = (fileName: string): void =>
+    setSelectedTests((prev) => {
+      const n = new Set(prev)
+      if (n.has(fileName)) n.delete(fileName)
+      else n.add(fileName)
+      return n
+    })
+  const handleRunSelected = (): void => {
+    const tests = savedTests.filter((t) => selectedTests.has(t.fileName))
+    if (tests.length) handleRunSuite(`${tests.length} selected tests`, tests)
+  }
+  const handleDeleteSelected = async (): Promise<void> => {
+    const tests = savedTests.filter((t) => selectedTests.has(t.fileName))
+    if (!tests.length) return
+    if (
+      !window.confirm(
+        `Delete ${tests.length} selected test${tests.length > 1 ? 's' : ''}? This can’t be undone.`
+      )
+    ) {
+      return
+    }
+    for (const t of tests) await window.api.library.remove(t.fileName)
+    setSelectedTests(new Set())
+    setSavedTests(await window.api.library.list())
+  }
+  const matchesLibraryFilters = (t: SavedTestSummary): boolean => {
+    const q = librarySearch.trim().toLowerCase()
+    if (q && !t.name.toLowerCase().includes(q)) return false
+    if (libraryFilter === 'failing' && t.lastRun?.status !== 'failed') return false
+    if (libraryFilter === 'passing' && t.lastRun?.status !== 'passed') return false
+    if (libraryFilter === 'flaky' && testFlakyTag(t) !== 'flaky') return false
+    if (
+      failureFilter &&
+      !(
+        t.lastRun?.status === 'failed' &&
+        ((t.lastRun.category as string) || 'unknown') === failureFilter
+      )
+    ) {
+      return false
+    }
+    return true
+  }
   // Mirror state into the refs AFTER render (React forbids touching refs
   // during render). The onPicked subscriber only reads them when an IPC
   // event arrives, which is always after the effect has run.
@@ -1004,6 +1095,9 @@ function App(): React.JSX.Element {
     networkErrors?: string[]
     failures?: { index: number; error: string; screenshotPath?: string }[]
     category?: FailureCategory // F9 (Stage 2): auto-classified failure type
+    aiHealed?: number // B: how many selectors auto-healed this run
+    // Option 2: a found-but-not-confident heal, for review & accept in the report
+    healable?: { index: number; label: string; signals: string[]; score: number; step: RecorderStep }
   }> => {
     setFailedIndex(null)
     setReplayError(null)
@@ -1746,7 +1840,45 @@ function App(): React.JSX.Element {
           status: result.ok ? 'passed' : 'failed',
           failedAt: result.failedAt,
           error: result.error,
-          screenshotPath: result.screenshotPath
+          screenshotPath: result.screenshotPath,
+          category: result.category,
+          healed: result.aiHealed
+        }
+        // B: this test's selectors auto-healed — capture the REPAIRED display
+        // steps (block-aware, updated by the auto-heal events) so the report can
+        // offer "Save all healed" and persist every fix in one click.
+        if (result.aiHealed && result.aiHealed > 0) {
+          await new Promise((r) => setTimeout(r, 0)) // let heal events flush into `steps`
+          const save: HealedSave = {
+            fileName: t.fileName,
+            name: data.name,
+            saveInput: {
+              name: data.name,
+              baseURL: data.baseURL,
+              suite,
+              steps: stepsRef.current.slice(),
+              storageState: data.storageState,
+              viewport: data.viewport,
+              dataRows: data.dataRows
+            }
+          }
+          setSuiteRun((prev) =>
+            prev ? { ...prev, healedSaves: [...(prev.healedSaves ?? []), save] } : prev
+          )
+        }
+        // Option 2: the test FAILED but self-heal found a likely fix — capture it
+        // for the report's "review & accept" list (never auto-applied in a batch).
+        if (result.healable) {
+          const hf: HealableFail = {
+            fileName: t.fileName,
+            name: data.name,
+            suite,
+            hasBlocks: (data.steps as RecorderStep[]).some((s) => s.type === 'block'),
+            healable: result.healable
+          }
+          setSuiteRun((prev) =>
+            prev ? { ...prev, healables: [...(prev.healables ?? []), hf] } : prev
+          )
         }
       }
       setSuiteRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
@@ -1758,6 +1890,117 @@ function App(): React.JSX.Element {
     if (!window.confirm(`Delete "${test.name}"? This cannot be undone.`)) return
     await window.api.library.remove(test.fileName)
     setSavedTests(await window.api.library.list())
+  }
+
+  // B: persist EVERY selector a suite run auto-healed, in one click — no
+  // per-test opening/saving across a big suite.
+  const handleSaveAllHealed = async (): Promise<void> => {
+    const saves = suiteRun?.healedSaves ?? []
+    if (!saves.length) return
+    for (const s of saves) await window.api.library.save(s.saveInput)
+    setSavedTests(await window.api.library.list())
+    setSuiteRun((prev) => (prev ? { ...prev, healedSaved: true } : prev))
+  }
+
+  // Option 2: accept a found-but-not-confident heal from the report — patch the
+  // failing step's selector, stamp it healedByAi, and save. This is the HUMAN
+  // confirming the fix (we never applied it silently). Skipped for block tests
+  // (the expanded index may not map to a display step — review those manually).
+  const handleAcceptHealable = async (hf: HealableFail): Promise<void> => {
+    if (hf.hasBlocks) return
+    const data = await window.api.library.load(hf.fileName)
+    if (!data) return
+    const steps = (data.steps as RecorderStep[]).slice()
+    const idx = hf.healable.index
+    if (idx < 0 || idx >= steps.length) return
+    const s = hf.healable.step
+    steps[idx] = {
+      ...steps[idx],
+      label: s.label,
+      selector: s.selector,
+      candidates: s.candidates,
+      frame: s.frame,
+      healedByAi: s.healedByAi
+    }
+    await window.api.library.save({
+      name: data.name,
+      baseURL: data.baseURL,
+      suite: hf.suite,
+      steps,
+      storageState: data.storageState,
+      viewport: data.viewport,
+      dataRows: data.dataRows
+    })
+    setSavedTests(await window.api.library.list())
+    setSuiteRun((prev) =>
+      prev ? { ...prev, accepted: [...(prev.accepted ?? []), hf.fileName] } : prev
+    )
+  }
+  const handleAcceptAllHealable = async (): Promise<void> => {
+    for (const hf of suiteRun?.healables ?? []) {
+      if (!hf.hasBlocks && !suiteRun?.accepted?.includes(hf.fileName)) await handleAcceptHealable(hf)
+    }
+  }
+
+  // B: one shareable markdown report for a whole suite run — pass/fail, the
+  // by-category failure breakdown, and the auto-healed tests.
+  const generateSuiteReport = (): string => {
+    if (!suiteRun) return ''
+    const r = suiteRun.results
+    const passed = r.filter((x) => x.status === 'passed').length
+    const failed = r.length - passed
+    const healed = r.reduce((s, x) => s + (x.healed ?? 0), 0)
+    const byCat = new Map<string, number>()
+    for (const x of r) {
+      if (x.status === 'failed') {
+        const c = x.category ?? 'unknown'
+        byCat.set(c, (byCat.get(c) ?? 0) + 1)
+      }
+    }
+    const lines: string[] = [
+      `# Suite run — ${suiteRun.suite}`,
+      '',
+      `**${passed}/${r.length} passed · ${failed} failed${healed ? ` · ${healed} selector${healed > 1 ? 's' : ''} auto-healed` : ''}**`,
+      ''
+    ]
+    if (byCat.size) {
+      lines.push('## Failures by type', '')
+      for (const [c, n] of [...byCat.entries()].sort((a, b) => b[1] - a[1])) {
+        lines.push(`- ${CATEGORY_LABELS[c as FailureCategory] ?? c}: ${n}`)
+      }
+      lines.push('')
+    }
+    if (suiteRun.healables?.length) {
+      lines.push('## Healable failures (review before accepting)', '')
+      for (const hf of suiteRun.healables) {
+        lines.push(
+          `- ${hf.name} → suggests "${hf.healable.label}" (${hf.healable.signals.join(' + ')} · ${hf.healable.score}/100)`
+        )
+      }
+      lines.push('')
+    }
+    lines.push('## Tests', '')
+    for (const x of r) {
+      const icon = x.status === 'passed' ? '✓' : '✗'
+      const tags = [
+        x.healed ? `🤖 ${x.healed} healed` : '',
+        x.status === 'failed' && x.category ? (CATEGORY_LABELS[x.category] ?? x.category) : ''
+      ]
+        .filter(Boolean)
+        .join(' · ')
+      lines.push(
+        `- ${icon} **${x.name}**${tags ? ` — ${tags}` : ''}` +
+          (x.status === 'failed' && x.error ? `\n  - ${x.error}` : '')
+      )
+    }
+    return lines.join('\n')
+  }
+  const handleCopySuiteReport = (): void => {
+    navigator.clipboard.writeText(generateSuiteReport()).catch(() => {})
+  }
+  const handleSaveSuiteReport = async (): Promise<void> => {
+    const slug = (suiteRun?.suite || 'suite').toLowerCase().replace(/[^a-z0-9]+/g, '-')
+    await window.api.translator.saveReport(generateSuiteReport(), `${slug}-run-report.md`)
   }
 
   // Clone a saved test: duplicate it (steps + session + data + viewport) under a
@@ -2415,6 +2658,140 @@ function App(): React.JSX.Element {
                 </span>
               </div>
 
+              {/* A1 (scalable library): search + status filters, so a big library
+                  stays navigable. Only shown once there are a few tests. */}
+              {savedTests.length > 3 && (
+                <div className="library-toolbar">
+                  <input
+                    className="library-search"
+                    value={librarySearch}
+                    onChange={(e) => setLibrarySearch(e.target.value)}
+                    placeholder="🔎 search tests by name…"
+                    spellCheck={false}
+                  />
+                  <div className="library-filters">
+                    {(['all', 'failing', 'passing', 'flaky'] as const).map((f) => (
+                      <button
+                        key={f}
+                        type="button"
+                        className={`library-filter-chip${libraryFilter === f ? ' active' : ''}`}
+                        onClick={() => setLibraryFilter(f)}
+                      >
+                        {f === 'all'
+                          ? 'All'
+                          : f === 'failing'
+                            ? '✗ Failing'
+                            : f === 'passing'
+                              ? '✓ Passing'
+                              : '⚡ Flaky'}
+                      </button>
+                    ))}
+                    {/* F9 category drill-in, co-located with the status filters —
+                        a quiet "by cause" toggle that expands the category chips
+                        RIGHT HERE, beside the status chips (compose both without
+                        jumping around the page). Only when something is failing. */}
+                    {(() => {
+                      const failing = savedTests.filter((t) => t.lastRun?.status === 'failed')
+                      if (!failing.length) return null
+                      const counts = new Map<string, number>()
+                      for (const t of failing) {
+                        const c = (t.lastRun?.category as string) || 'unknown'
+                        counts.set(c, (counts.get(c) ?? 0) + 1)
+                      }
+                      const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1])
+                      return (
+                        <>
+                          <button
+                            type="button"
+                            className={`library-filter-chip${breakdownOpen ? ' active' : ''}`}
+                            onClick={() =>
+                              setBreakdownOpen((o) => {
+                                if (o) setFailureFilter(null) // collapsing clears the drill-in
+                                return !o
+                              })
+                            }
+                            title="Filter the failing tests by cause"
+                          >
+                            🩹 by cause {breakdownOpen ? '▾' : '▸'}
+                          </button>
+                          {breakdownOpen &&
+                            ordered.map(([cat, n]) => (
+                              <button
+                                key={cat}
+                                type="button"
+                                className={`category-chip cat-${cat} breakdown-chip${
+                                  failureFilter === cat ? ' active' : ''
+                                }`}
+                                onClick={() =>
+                                  setFailureFilter((f) =>
+                                    f === cat ? null : (cat as FailureCategory)
+                                  )
+                                }
+                                title={`Show the ${n} test${n > 1 ? 's' : ''} that failed with "${
+                                  CATEGORY_LABELS[cat as FailureCategory] ?? cat
+                                }"`}
+                              >
+                                {CATEGORY_LABELS[cat as FailureCategory] ?? cat} <strong>{n}</strong>
+                              </button>
+                            ))}
+                        </>
+                      )
+                    })()}
+                    {anyLibraryFilter() && (
+                      <button
+                        type="button"
+                        className="library-filter-clear"
+                        onClick={() => {
+                          setLibrarySearch('')
+                          setLibraryFilter('all')
+                          setFailureFilter(null)
+                        }}
+                      >
+                        clear ✕
+                      </button>
+                    )}
+                    {/* A2: select every test currently matching the filters. */}
+                    <button
+                      type="button"
+                      className="library-filter-clear"
+                      onClick={() =>
+                        setSelectedTests(
+                          new Set(savedTests.filter(matchesLibraryFilters).map((t) => t.fileName))
+                        )
+                      }
+                    >
+                      select all{anyLibraryFilter() ? ' shown' : ''}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* A2 (scalable library): bulk-action bar — appears once tests are
+                  ticked. Run / delete the whole selection at once (the payoff of
+                  the search + F9 category drill-in: operate on a group). */}
+              {selectedTests.size > 0 && (
+                <div className="library-bulkbar">
+                  <span className="library-bulk-count">{selectedTests.size} selected</span>
+                  <button type="button" className="library-bulk-btn" onClick={handleRunSelected}>
+                    ▶ Run selected
+                  </button>
+                  <button
+                    type="button"
+                    className="library-bulk-btn danger"
+                    onClick={handleDeleteSelected}
+                  >
+                    🗑 Delete
+                  </button>
+                  <button
+                    type="button"
+                    className="library-filter-clear"
+                    onClick={() => setSelectedTests(new Set())}
+                  >
+                    clear ✕
+                  </button>
+                </div>
+              )}
+
               {(() => {
                 // Sections in display order: E2E + Daily always shown (even
                 // empty, so they're discoverable), customs after, legacy
@@ -2425,20 +2802,16 @@ function App(): React.JSX.Element {
                 }
                 if (savedTests.some((t) => !t.suite)) groups.push('')
                 return groups.map((suite) => {
+                  // A1: search + status filter + F9 category drill-in, all ANDed.
                   const tests = savedTests
                     .filter((t) => t.suite === suite)
-                    // F9 (Stage 2): drill-in — when a breakdown chip is active, show
-                    // only the currently-failing tests of that category.
-                    .filter(
-                      (t) =>
-                        !failureFilter ||
-                        (t.lastRun?.status === 'failed' &&
-                          (((t.lastRun.category as string) || 'unknown') === failureFilter))
-                    )
+                    .filter(matchesLibraryFilters)
                   const suiteKey = suite || '(unsorted)'
-                  // With a filter active, hide sections that have nothing to show.
-                  if (failureFilter && tests.length === 0) return null
-                  const isOpen = failureFilter ? true : openSuites.has(suiteKey)
+                  const filtering = anyLibraryFilter()
+                  // With any filter active, hide sections that have nothing to show,
+                  // and force sections open so the matches are visible.
+                  if (filtering && tests.length === 0) return null
+                  const isOpen = filtering ? true : openSuites.has(suiteKey)
                   return (
                     <div key={suiteKey} className="library-section">
                       <div className="library-section-header">
@@ -2509,6 +2882,15 @@ function App(): React.JSX.Element {
                             return (
                               <li key={test.fileName} className="library-item">
                                 <div className="library-item-head">
+                                  {/* A2: tick for a bulk action (run / delete). */}
+                                  <input
+                                    type="checkbox"
+                                    className="library-check"
+                                    checked={selectedTests.has(test.fileName)}
+                                    onChange={() => toggleSelect(test.fileName)}
+                                    title="Select for a bulk action (run / delete)"
+                                    aria-label={`Select ${test.name}`}
+                                  />
                                   <button
                                     type="button"
                                     className="library-row"
@@ -2665,66 +3047,15 @@ function App(): React.JSX.Element {
                 })
               })()}
 
-              {/* F9 (Stage 2): failure breakdown — at the BOTTOM of the library,
-                  COLLAPSED by default. On open you just see a quiet one-line
-                  toggle; expand it to see the categories + drill in. */}
-              {(() => {
-                const failing = savedTests.filter((t) => t.lastRun?.status === 'failed')
-                if (!failing.length) return null
-                const counts = new Map<string, number>()
-                for (const t of failing) {
-                  const c = (t.lastRun?.category as string) || 'unknown'
-                  counts.set(c, (counts.get(c) ?? 0) + 1)
-                }
-                const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1])
-                return (
-                  <div className="failure-breakdown-wrap">
-                    <button
-                      type="button"
-                      className="failure-breakdown-toggle"
-                      onClick={() =>
-                        setBreakdownOpen((o) => {
-                          if (o) setFailureFilter(null) // collapsing clears the drill-in
-                          return !o
-                        })
-                      }
-                      title="Show a breakdown of your failing tests by cause"
-                    >
-                      🩹 {failing.length} failing — by type {breakdownOpen ? '▾' : '▸'}
-                    </button>
-                    {breakdownOpen && (
-                      <div className="failure-breakdown">
-                        {ordered.map(([cat, n]) => (
-                          <button
-                            key={cat}
-                            type="button"
-                            className={`category-chip cat-${cat} breakdown-chip${
-                              failureFilter === cat ? ' active' : ''
-                            }`}
-                            onClick={() =>
-                              setFailureFilter((f) => (f === cat ? null : (cat as FailureCategory)))
-                            }
-                            title={`Show the ${n} test${n > 1 ? 's' : ''} that failed with "${
-                              CATEGORY_LABELS[cat as FailureCategory] ?? cat
-                            }"`}
-                          >
-                            {CATEGORY_LABELS[cat as FailureCategory] ?? cat} <strong>{n}</strong>
-                          </button>
-                        ))}
-                        {failureFilter && (
-                          <button
-                            type="button"
-                            className="breakdown-clear"
-                            onClick={() => setFailureFilter(null)}
-                          >
-                            clear ✕
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )
-              })()}
+              {/* A1: nothing matches the active search/filter. */}
+              {anyLibraryFilter() && savedTests.filter(matchesLibraryFilters).length === 0 && (
+                <div className="library-no-match">
+                  No tests match{librarySearch.trim() ? ` “${librarySearch.trim()}”` : ''}
+                  {libraryFilter !== 'all' ? ` · ${libraryFilter}` : ''}
+                  {failureFilter ? ` · ${CATEGORY_LABELS[failureFilter] ?? failureFilter}` : ''}.
+                </div>
+              )}
+
             </div>
           )}
         </div>
@@ -4505,51 +4836,193 @@ function App(): React.JSX.Element {
         </aside>
       </div>
 
-      {/* === Day 11.5: suite-run summary (shown when the run finishes) === */}
-      {suiteSummaryOpen && suiteRun && (
-        <div className="modal-backdrop" onClick={() => setSuiteRun(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">
-                {suiteRun.suite}: {suiteRun.results.filter((r) => r.status === 'passed').length}{' '}
-                passed, {suiteRun.results.filter((r) => r.status === 'failed').length} failed
-              </span>
-              <button className="modal-close" onClick={() => setSuiteRun(null)} aria-label="Close">
-                ✕
-              </button>
-            </div>
-            <ul className="suite-summary">
-              {suiteRun.results.map((r) => (
-                <li key={r.fileName} className="suite-result">
-                  <span className={`run-dot ${r.status}`} />
-                  <span className="suite-result-name">{r.name}</span>
-                  {r.status === 'failed' && (
-                    <span className="suite-result-error">
-                      {r.failedAt !== undefined ? `step ${r.failedAt + 1} — ` : ''}
-                      {r.error}
-                    </span>
-                  )}
-                  {r.screenshotPath && (
-                    <button
-                      type="button"
-                      className="shot-link"
-                      onClick={() => window.api.library.openScreenshot(r.screenshotPath!)}
-                      title="Open the failure screenshot"
-                    >
-                      📷
+      {/* === Day 11.5 + B: suite-run REPORT (shown when the run finishes) === */}
+      {suiteSummaryOpen &&
+        suiteRun &&
+        (() => {
+          const r = suiteRun.results
+          const passed = r.filter((x) => x.status === 'passed').length
+          const failed = r.length - passed
+          const healedCount = r.reduce((s, x) => s + (x.healed ?? 0), 0)
+          const healedSaves = suiteRun.healedSaves ?? []
+          const byCat = new Map<string, number>()
+          for (const x of r) {
+            if (x.status === 'failed') {
+              const c = x.category ?? 'unknown'
+              byCat.set(c, (byCat.get(c) ?? 0) + 1)
+            }
+          }
+          const cats = [...byCat.entries()].sort((a, b) => b[1] - a[1])
+          return (
+            <div className="modal-backdrop" onClick={() => setSuiteRun(null)}>
+              <div className="modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <span className="modal-title">
+                    {suiteRun.suite}: {passed} passed, {failed} failed
+                    {healedCount ? ` · ${healedCount} auto-healed` : ''}
+                  </span>
+                  <button
+                    className="modal-close"
+                    onClick={() => setSuiteRun(null)}
+                    aria-label="Close"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* B: failures grouped by cause (the suite-level triage view). */}
+                {cats.length > 0 && (
+                  <div className="failure-breakdown">
+                    <span className="failure-breakdown-label">Failures by type:</span>
+                    {cats.map(([c, n]) => (
+                      <span key={c} className={`category-chip cat-${c}`}>
+                        {CATEGORY_LABELS[c as FailureCategory] ?? c} <strong>{n}</strong>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* B: heal review — persist every auto-healed selector in one click. */}
+                {healedSaves.length > 0 && (
+                  <div className={`blast-radius${suiteRun.healedSaved ? ' blast-radius-safe' : ''}`}>
+                    {suiteRun.healedSaved ? (
+                      <span className="blast-radius-head">
+                        ✓ Saved the repaired selectors for {healedSaves.length} test
+                        {healedSaves.length > 1 ? 's' : ''}.
+                      </span>
+                    ) : (
+                      <>
+                        <span className="blast-radius-head">
+                          🤖 {healedCount} selector{healedCount > 1 ? 's' : ''} auto-healed across{' '}
+                          {healedSaves.length} test{healedSaves.length > 1 ? 's' : ''} — keep the
+                          fixes:
+                        </span>
+                        <ul className="blast-list">
+                          {healedSaves.map((h) => (
+                            <li key={h.fileName}>{h.name}</li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* Option 2: failed tests self-heal COULD fix — review & accept.
+                    We never auto-applied these (a low-confidence heal that "works"
+                    could be a false pass); a human confirms before they go green. */}
+                {(suiteRun.healables ?? []).length > 0 && (
+                  <div className="healable-review">
+                    <div className="healable-head">
+                      🔧 {suiteRun.healables!.length} failed test
+                      {suiteRun.healables!.length > 1 ? 's' : ''} could be self-healed — review before
+                      accepting (a low-confidence heal may target the wrong element):
+                    </div>
+                    <ul className="blast-list">
+                      {suiteRun.healables!.map((hf) => {
+                        const accepted = suiteRun.accepted?.includes(hf.fileName)
+                        return (
+                          <li key={hf.fileName} className="healable-row">
+                            <span>
+                              <strong>{hf.name}</strong> → suggests “{hf.healable.label}”{' '}
+                              <span className="healable-meta">
+                                ({hf.healable.signals.join(' + ')} · {hf.healable.score}/100)
+                              </span>
+                            </span>
+                            {accepted ? (
+                              <span className="healable-accepted">✓ accepted</span>
+                            ) : (
+                              <span className="healable-actions">
+                                <button
+                                  type="button"
+                                  className="modal-btn"
+                                  onClick={() => handleLoadTest(hf.fileName)}
+                                  title="Open the test to replay + verify the fix yourself"
+                                >
+                                  Open
+                                </button>
+                                {!hf.hasBlocks && (
+                                  <button
+                                    type="button"
+                                    className="modal-btn"
+                                    onClick={() => handleAcceptHealable(hf)}
+                                    title="Trust this heal — patch the selector and save"
+                                  >
+                                    Accept &amp; save
+                                  </button>
+                                )}
+                              </span>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                    {suiteRun.healables!.some(
+                      (hf) => !hf.hasBlocks && !suiteRun.accepted?.includes(hf.fileName)
+                    ) && (
+                      <button
+                        type="button"
+                        className="modal-btn"
+                        onClick={handleAcceptAllHealable}
+                      >
+                        Accept &amp; save all
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                <ul className="suite-summary">
+                  {r.map((x) => (
+                    <li key={x.fileName} className="suite-result">
+                      <span className={`run-dot ${x.status}`} />
+                      <span className="suite-result-name">{x.name}</span>
+                      {x.healed ? (
+                        <span className="healed-tag ai-healed-tag">🤖 {x.healed}</span>
+                      ) : null}
+                      {x.status === 'failed' && x.category && (
+                        <span className={`category-chip cat-${x.category}`}>
+                          {CATEGORY_LABELS[x.category] ?? x.category}
+                        </span>
+                      )}
+                      {x.status === 'failed' && (
+                        <span className="suite-result-error">
+                          {x.failedAt !== undefined ? `step ${x.failedAt + 1} — ` : ''}
+                          {x.error}
+                        </span>
+                      )}
+                      {x.screenshotPath && (
+                        <button
+                          type="button"
+                          className="shot-link"
+                          onClick={() => window.api.library.openScreenshot(x.screenshotPath!)}
+                          title="Open the failure screenshot"
+                        >
+                          📷
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="modal-footer">
+                  {healedSaves.length > 0 && !suiteRun.healedSaved && (
+                    <button className="modal-btn primary" onClick={handleSaveAllHealed}>
+                      💾 Save all healed ({healedSaves.length})
                     </button>
                   )}
-                </li>
-              ))}
-            </ul>
-            <div className="modal-footer">
-              <button className="modal-btn primary" onClick={() => setSuiteRun(null)}>
-                Close
-              </button>
+                  <button className="modal-btn" onClick={handleCopySuiteReport}>
+                    Copy report
+                  </button>
+                  <button className="modal-btn" onClick={handleSaveSuiteReport}>
+                    Save .md
+                  </button>
+                  <button className="modal-btn" onClick={() => setSuiteRun(null)}>
+                    Close
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          )
+        })()}
 
       {/* === Day 20: data-run overview popup — auto-appears when the matrix
            finishes (which rows passed / failed). Drilling into a row's
