@@ -463,8 +463,56 @@ export interface BlockSummary {
   updatedAt: string
 }
 
+// F7 (blast-radius): one test that LINKS a given block, and how many times it
+// references it (a block can be inserted more than once in a test).
+export interface BlockLink {
+  fileName: string // the test's path relative to the library (e.g. "E2E/login.json")
+  name: string
+  suite: string
+  count: number // how many `block` steps in this test point at the block
+}
+
 function blocksDir(): string {
   return join(libraryDir(), '_blocks')
+}
+
+// F7 (blast-radius map): which saved tests LINK each block, so the UI can warn
+// "editing this block changes these N tests" before you touch it. Returns a map
+// of block fileName → the tests that reference it (empty/absent = unused, so it's
+// safe to edit freely). One pass over every test file; blocks are flattened on
+// save, so a live link is always one level (a test → a block, never nested).
+export async function blockUsage(): Promise<Record<string, BlockLink[]>> {
+  await ensureDir()
+  const relPaths: string[] = []
+  const entries = await readdir(libraryDir(), { withFileTypes: true })
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith('.json')) relPaths.push(entry.name)
+    if (entry.isDirectory() && !entry.name.startsWith('_')) {
+      const inner = await readdir(join(libraryDir(), entry.name))
+      for (const f of inner) if (f.endsWith('.json')) relPaths.push(`${entry.name}/${f}`)
+    }
+  }
+  const usage: Record<string, BlockLink[]> = {}
+  for (const fileName of relPaths) {
+    const test = await readTestFile(fileName)
+    if (!test) continue
+    // Count each block ref in THIS test (a block may appear more than once).
+    const counts = new Map<string, number>()
+    for (const step of test.steps as { type?: string; blockRef?: string }[]) {
+      if (step?.type === 'block' && step.blockRef) {
+        counts.set(step.blockRef, (counts.get(step.blockRef) ?? 0) + 1)
+      }
+    }
+    for (const [blockRef, count] of counts) {
+      ;(usage[blockRef] ??= []).push({
+        fileName,
+        name: test.name,
+        suite: fileName.includes('/') ? fileName.split('/')[0] : '',
+        count
+      })
+    }
+  }
+  return usage
 }
 
 async function readBlockFile(fileName: string): Promise<BlockFile | null> {

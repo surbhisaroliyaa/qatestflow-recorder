@@ -236,6 +236,12 @@ function App(): React.JSX.Element {
   // a block's steps are loaded into the editor to update the block itself.
   const [blockCache, setBlockCache] = useState<Record<string, RecorderStep[]>>({})
   const [editingBlockRef, setEditingBlockRef] = useState<string | null>(null)
+  // F7 (blast-radius): block fileName → the saved tests that live-link it, so the
+  // panel can show "used by N tests" and warn before an edit changes them all.
+  const [blockUsage, setBlockUsage] = useState<Record<string, BlockLink[]>>({})
+  // F7: minimise the blocks panel (▾/▸) to hand the whole sidebar to the step
+  // list — needed when editing a block with many steps.
+  const [blocksCollapsed, setBlocksCollapsed] = useState(false)
   // The user's OWN test steps, stashed while they detour into editing a block.
   // Editing a block loads its steps into the editor; this holds their recording
   // so it's restored (never discarded) when the block edit finishes or cancels.
@@ -1874,6 +1880,9 @@ function App(): React.JSX.Element {
   // === Pillar 4: reusable step blocks ================================
   const refreshBlocks = async (): Promise<void> => {
     setBlocks((await window.api.blocks.list()) ?? [])
+    // F7: load the blast-radius map alongside the list, so every row can show
+    // how many tests it affects (and the edit banner can name them).
+    setBlockUsage((await window.api.blocks.usage()) ?? {})
   }
   // Open the blocks panel. `insertAt` = where a chosen block's steps land
   // (null = append); also seed the save-range to the full current step list.
@@ -1883,6 +1892,7 @@ function App(): React.JSX.Element {
     setBlockTo(steps.length)
     setBlockNameInput('')
     setInsertMenuIndex(null)
+    setBlocksCollapsed(false) // always open expanded
     setEditingBlockRef(null) // opening to insert is not an edit detour
     setStashedSteps(null)
     setBlocksPanelOpen(true)
@@ -2018,9 +2028,11 @@ function App(): React.JSX.Element {
       return
     }
     setPendingDeleteBlock(fileName)
+    // F7: longer arm window (6s) so there's time to read the blast-radius banner
+    // that appears listing the tests this delete would break, before confirming.
     setTimeout(() => {
       setPendingDeleteBlock((cur) => (cur === fileName ? null : cur))
-    }, 3000)
+    }, 6000)
   }
   // Load any linked block's steps into the cache (for display + data columns).
   // Runs when the step list or cache changes; the "missing" guard stops it after
@@ -3508,15 +3520,99 @@ function App(): React.JSX.Element {
 
           {/* === Pillar 4: reusable step blocks (reuses the assert-panel look) === */}
           {blocksPanelOpen && (
-            <div className="assert-panel">
+            <div className={`assert-panel blocks-panel${blocksCollapsed ? ' collapsed' : ''}`}>
               <div className="assert-target">
                 <span className="assert-title">🧩 Reusable step blocks</span>
+                {/* F7: minimise arrow — collapse to give the step list the whole
+                    sidebar (for editing a block with many steps). */}
+                <button
+                  type="button"
+                  className="block-collapse"
+                  onClick={() => setBlocksCollapsed((c) => !c)}
+                  title={
+                    blocksCollapsed
+                      ? 'Expand the blocks panel'
+                      : 'Minimise — give the step list the whole sidebar'
+                  }
+                  aria-label={blocksCollapsed ? 'Expand blocks panel' : 'Minimise blocks panel'}
+                >
+                  {blocksCollapsed ? '▸' : '▾'}
+                </button>
               </div>
+              {/* Minimised mid-edit: keep Update / Close reachable without expanding. */}
+              {blocksCollapsed && editingBlockRef && (
+                <div className="assert-actions">
+                  <button className="modal-btn" onClick={closeBlocksPanel}>
+                    Close
+                  </button>
+                  <button
+                    className="modal-btn primary"
+                    onClick={handleSaveBlock}
+                    disabled={!blockNameInput.trim() || steps.length === 0}
+                  >
+                    Update block
+                  </button>
+                </div>
+              )}
 
-              <div className="block-section-label">
-                Insert a block{' '}
-                {blockInsertAt !== null ? `at step ${blockInsertAt + 1}` : 'at the end'}
-              </div>
+              <div className="block-body">
+              {/* F7: blast-radius banner — always visible (no hover). Shows the
+                  tests a block feeds the moment it's IN FOCUS: armed for delete
+                  (red — "breaks these") or being edited (amber — "changes these").
+                  Delete takes priority since it's the destructive, timed action. */}
+              {(() => {
+                const focusRef = pendingDeleteBlock ?? editingBlockRef
+                if (!focusRef) return null
+                const deleting = !!pendingDeleteBlock
+                const name = deleting
+                  ? (blocks.find((x) => x.fileName === focusRef)?.name ?? 'this block')
+                  : blockNameInput
+                const links = blockUsage[focusRef] ?? []
+                const cls = deleting
+                  ? 'blast-radius blast-radius-delete'
+                  : links.length === 0
+                    ? 'blast-radius blast-radius-safe'
+                    : 'blast-radius'
+                return (
+                  <div className={cls}>
+                    {links.length === 0 ? (
+                      <span className="blast-radius-head">
+                        {deleting
+                          ? `Deleting “${name}” is safe — no test links it. Click ✕ again to confirm.`
+                          : '✓ No test links this block yet — updating it affects nothing else.'}
+                      </span>
+                    ) : (
+                      <>
+                        <span className="blast-radius-head">
+                          {deleting ? '⚠ Deleting ' : '⚠ Updating '}
+                          <strong>“{name}”</strong>
+                          {deleting ? ' breaks ' : ' changes '}
+                          {links.length} linked test{links.length > 1 ? 's' : ''}
+                          {deleting ? ' — click ✕ again to confirm:' : ':'}
+                        </span>
+                        <ul className="blast-list">
+                          {links.map((l) => (
+                            <li key={l.fileName}>
+                              {l.name}
+                              {l.suite && <span className="blast-suite"> · {l.suite}</span>}
+                              {l.count > 1 && <span className="blast-count"> ×{l.count}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                )
+              })()}
+
+              {/* F7: while EDITING a block, hide the insert list so the block's
+                  loaded steps sit in view right below the compact panel. */}
+              {!editingBlockRef && (
+                <>
+                  <div className="block-section-label">
+                    Insert a block{' '}
+                    {blockInsertAt !== null ? `at step ${blockInsertAt + 1}` : 'at the end'}
+                  </div>
               {blocks.length > 0 && (
                 <div className="block-hint">
                   🔗 linked — stays in sync when you edit the block · ⧉ copy — an independent
@@ -3529,8 +3625,16 @@ function App(): React.JSX.Element {
                 </div>
               ) : (
                 <ul className="block-list">
-                  {blocks.map((b) => (
-                    <li key={b.fileName} className="block-row">
+                  {blocks.map((b) => {
+                    // F7: which tests link THIS block — drives the usage chip + the
+                    // sharper delete warning ("breaks N tests").
+                    const links = blockUsage[b.fileName] ?? []
+                    const usedBy = links.length
+                    const linkNames = links
+                      .map((l) => `• ${l.name}${l.suite ? ` (${l.suite})` : ''}${l.count > 1 ? ` ×${l.count}` : ''}`)
+                      .join('\n')
+                    return (
+                      <li key={b.fileName} className="block-row">
                       <button
                         type="button"
                         className="block-insert"
@@ -3539,6 +3643,18 @@ function App(): React.JSX.Element {
                       >
                         🔗 {b.name} <span className="block-count">{b.stepCount} steps</span>
                       </button>
+                      {/* F7: blast-radius at a glance — how many tests this block
+                          feeds; hover to see which. "unused" = safe to change. */}
+                      <span
+                        className={`block-usage${usedBy === 0 ? ' block-usage-none' : ''}`}
+                        title={
+                          usedBy === 0
+                            ? 'No test links this block — safe to edit or delete'
+                            : `Used by ${usedBy} test${usedBy > 1 ? 's' : ''}:\n${linkNames}`
+                        }
+                      >
+                        {usedBy === 0 ? 'unused' : `used by ${usedBy}`}
+                      </span>
                       <button
                         type="button"
                         className="block-mini"
@@ -3563,16 +3679,27 @@ function App(): React.JSX.Element {
                         onClick={() => armOrDeleteBlock(b.fileName)}
                         title={
                           pendingDeleteBlock === b.fileName
-                            ? `Click again to permanently delete "${b.name}"`
-                            : `Delete block "${b.name}"`
+                            ? `Click again to permanently delete "${b.name}"${usedBy ? ` — BREAKS ${usedBy} linked test${usedBy > 1 ? 's' : ''}` : ''}`
+                            : `Delete block "${b.name}"${usedBy ? ` (breaks ${usedBy} linked test${usedBy > 1 ? 's' : ''})` : ''}`
                         }
                         aria-label={`Delete block ${b.name}`}
                       >
                         {pendingDeleteBlock === b.fileName ? 'Sure?' : '✕'}
                       </button>
                     </li>
-                  ))}
+                    )
+                  })}
                 </ul>
+              )}
+                </>
+              )}
+
+              {/* F7: a clear "you're editing a block" cue when the insert list is hidden. */}
+              {editingBlockRef && (
+                <div className="block-editing-hint">
+                  ✎ Editing block — its steps are loaded in the list below. Change them, then{' '}
+                  <strong>Update block</strong> to push the fix to every linked test.
+                </div>
               )}
 
               <div className="block-section-label">
@@ -3619,6 +3746,7 @@ function App(): React.JSX.Element {
                 >
                   {editingBlockRef ? 'Update block' : 'Save block'}
                 </button>
+              </div>
               </div>
             </div>
           )}

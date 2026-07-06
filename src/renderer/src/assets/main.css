@@ -1164,6 +1164,10 @@ body {
   margin: 0;
   padding: 8px;
   overflow-y: auto;
+  /* F7: always keep the lion's share of the sidebar + scroll inside, so an open
+     panel above (e.g. editing a block) can't squeeze the steps to a sliver. */
+  flex: 1 1 auto;
+  min-height: 120px;
 }
 
 .step-item {
@@ -2974,6 +2978,104 @@ body {
 .block-count {
   color: #8b93a7;
   font-size: 11px;
+}
+/* F7 (blast-radius): "used by N" chip on each block row — hover for the names.
+   Amber when it feeds tests (editing has reach), muted when unused (safe). */
+.block-usage {
+  align-self: center;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: #3a3324;
+  color: #ffe8a3;
+  cursor: help;
+}
+.block-usage-none {
+  background: #21262d;
+  color: #6e7681;
+}
+/* F7: the blast-radius banner shown while EDITING a block — the list of tests
+   an "Update block" will change. Amber card; green when nothing links it. */
+.blast-radius {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #3a3324;
+  border: 1px solid #5c4a1f;
+  color: #ffe8a3;
+  font-size: 12px;
+}
+.blast-radius-safe {
+  background: #1f2b22;
+  border-color: #2a4a34;
+  color: #9fdcb0;
+}
+/* Delete is destructive → a stronger red banner (vs amber for an edit). */
+.blast-radius-delete {
+  background: #3a2526;
+  border-color: #5c2a2a;
+  color: #f0b6b2;
+}
+/* F7: cue shown while editing a block (the insert list is hidden), pointing at
+   the steps loaded below. */
+.block-editing-hint {
+  font-size: 12px;
+  color: #9db4d0;
+  padding: 2px 2px 4px;
+}
+/* F7: the blocks panel is capped so it can never take more than ~half the
+   sidebar — its body scrolls inside, leaving the step list a usable area. */
+.blocks-panel {
+  flex: none;
+  max-height: 55%;
+  overflow: hidden;
+}
+.blocks-panel .block-body {
+  /* the header/mini-actions stay fixed; only the body scrolls within the cap */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Minimised: hide the body entirely so the step list gets the whole sidebar. */
+.blocks-panel.collapsed {
+  max-height: none;
+}
+.blocks-panel.collapsed .block-body {
+  display: none;
+}
+/* The ▾/▸ minimise arrow, pushed to the right of the panel title. */
+.block-collapse {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #8b93a7;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.block-collapse:hover {
+  color: #e6edf3;
+}
+.blast-radius-head {
+  font-weight: 600;
+}
+.blast-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.blast-list li {
+  margin: 2px 0;
+}
+.blast-suite {
+  color: #c9ad6a;
+}
+.blast-count {
+  color: #c9ad6a;
+  font-weight: 600;
 }
 .block-del,
 .block-mini {

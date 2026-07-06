@@ -207,6 +207,8 @@ interface BlocksAPI {
   list: () => Promise<BlockSummary[]>
   load: (fileName: string) => Promise<BlockData | null>
   delete: (fileName: string) => Promise<void>
+  // F7 (blast-radius): map of block fileName → the tests that live-link it.
+  usage: () => Promise<Record<string, BlockLink[]>>
 }
 
 // === Run trace (Day 18) ===
@@ -380,6 +382,13 @@ declare global {
     name: string
     stepCount: number
     updatedAt: string
+  }
+  // F7 (blast-radius): one test that live-links a block, and how many times.
+  interface BlockLink {
+    fileName: string
+    name: string
+    suite: string
+    count: number
   }
   interface BlockData {
     version: 1

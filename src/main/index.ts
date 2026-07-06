@@ -26,6 +26,7 @@ import {
   listBlocks,
   loadBlock,
   deleteBlock,
+  blockUsage,
   libraryDir,
   slugify,
   loadHar,
@@ -3052,6 +3053,8 @@ function createWindow(): void {
   ipcMain.handle('blocks:list', () => listBlocks())
   ipcMain.handle('blocks:load', (_event, fileName: string) => loadBlock(fileName))
   ipcMain.handle('blocks:delete', (_event, fileName: string) => deleteBlock(fileName))
+  // F7 (blast-radius): which tests link each block, so the UI can warn before an edit.
+  ipcMain.handle('blocks:usage', () => blockUsage())
 
   // === Visual regression (Day 19) ====================================
   // Capture the current page as a baseline + emit a `snapshot` step. The

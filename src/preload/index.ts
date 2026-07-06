@@ -282,7 +282,9 @@ const api = {
       ipcRenderer.invoke('blocks:save', input),
     list: (): Promise<unknown[]> => ipcRenderer.invoke('blocks:list'),
     load: (fileName: string): Promise<unknown> => ipcRenderer.invoke('blocks:load', fileName),
-    delete: (fileName: string): Promise<void> => ipcRenderer.invoke('blocks:delete', fileName)
+    delete: (fileName: string): Promise<void> => ipcRenderer.invoke('blocks:delete', fileName),
+    // F7 (blast-radius): map of block fileName → the tests that link it.
+    usage: (): Promise<unknown> => ipcRenderer.invoke('blocks:usage')
   },
 
   // === Run trace (Day 18) ===
