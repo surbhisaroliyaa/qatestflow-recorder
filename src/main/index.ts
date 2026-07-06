@@ -1914,15 +1914,20 @@ function createWindow(): void {
             d.sendCommand('Network.enable').catch(() => {
               // network domain unavailable — console evidence still works
             })
-            // F29 (chaos): throttle this tab to a slow-network profile (~Slow 3G)
-            // so the run exercises the app + test under adverse conditions. Stable
-            // CDP command (no request interception). Best-effort.
+            // F29 (chaos): throttle this tab to a "Slow 3G" profile so the run
+            // exercises the app + test under adverse conditions. These are Chrome
+            // DevTools' Slow-3G values — a real slow-network condition AND clearly
+            // noticeable (each request gets +2s of latency). Stable CDP command
+            // (no request interception). Best-effort.
             if (chaos?.slowNetwork) {
+              // Disable the cache first — otherwise re-navigations are served from
+              // cache and the network throttle has nothing to slow.
+              d.sendCommand('Network.setCacheDisabled', { cacheDisabled: true }).catch(() => {})
               d.sendCommand('Network.emulateNetworkConditions', {
                 offline: false,
-                latency: 400,
-                downloadThroughput: (500 * 1024) / 8,
-                uploadThroughput: (500 * 1024) / 8
+                latency: 2000, // ~2s round-trip per request (Chrome's Slow 3G)
+                downloadThroughput: (400 * 1024) / 8, // ~400 kbps
+                uploadThroughput: (400 * 1024) / 8
               }).catch(() => {})
             }
             // F1: with a HAR loaded, intercept the API calls (XHR/fetch) and
