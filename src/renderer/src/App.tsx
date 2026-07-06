@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { generatePlaywrightTest, generatePageObjectTest, stepText } from './playwrightExport'
+import {
+  generatePlaywrightTest,
+  generatePageObjectTest,
+  generateCiWorkflow,
+  stepText
+} from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
 import { classifyRuns, type FlakyTag } from './flaky'
@@ -145,6 +150,8 @@ function App(): React.JSX.Element {
   const [savedPath, setSavedPath] = useState<string | null>(null)
   // Day 17 (page-object export): toggle between inline and full POM output.
   const [poExport, setPoExport] = useState(false)
+  // F33 (CI export): also write a GitHub Actions workflow beside the spec.
+  const [exportCi, setExportCi] = useState(false)
   // POM mode produces a SECOND file (the page class). Null = inline (one file).
   const [exportPage, setExportPage] = useState<string | null>(null)
   const [exportPageFileName, setExportPageFileName] = useState('')
@@ -297,6 +304,9 @@ function App(): React.JSX.Element {
     () => (localStorage.getItem('qaflow.traceMode') as 'always' | 'failure' | 'off') || 'failure'
   )
   const [lastTraceId, setLastTraceId] = useState<string | null>(null)
+  // F29 (chaos): replay under a throttled (~Slow 3G) network to test resilience /
+  // surface timing flakiness. Off by default.
+  const [chaosSlowNet, setChaosSlowNet] = useState(false)
   // Day 20: every failed step of the last replay (Continue can bypass several),
   // so the banner can surface each one's screenshot/explanation. `failDetail`
   // is which inline list is expanded ('shots' | 'explain' | null) — only when
@@ -435,6 +445,8 @@ function App(): React.JSX.Element {
   // Day 12 — recovery. Non-null while a replay is PAUSED at a failed step
   // (main's loop is holding for our decision: retry / re-pick / skip / stop).
   const [recovery, setRecovery] = useState<ReplayPaused | null>(null)
+  // F30: replay is paused at a manual (wait-for-human) step — its instruction.
+  const [manualPause, setManualPause] = useState<{ index: number; message: string } | null>(null)
   // Which step a re-pick is healing (null = the picker is for an assertion).
   const [repickIndex, setRepickIndex] = useState<number | null>(null)
   // Steps bypassed via Skip THIS run (amber rows) — cleared on the next run.
@@ -842,6 +854,15 @@ function App(): React.JSX.Element {
     return unsubscribe
   }, [])
 
+  // F30: replay hit a manual (wait-for-human) step — show the "do it, then
+  // continue" prompt; the run is holding until we send manualContinue.
+  useEffect(() => {
+    const unsubscribe = window.api.recorder.onManualPause((info) => {
+      setManualPause(info as { index: number; message: string })
+    })
+    return unsubscribe
+  }, [])
+
   // F4 (self-heal 2.0): main auto-healed a broken selector mid-run. Swap the
   // healed step into our list (so 💾 save keeps the repaired ladder) and flag it
   // for the "fixed by AI" badge + live count. Skip a linked block row — we can't
@@ -1046,6 +1067,13 @@ function App(): React.JSX.Element {
   // Page Object mode the page class is written to a pages/ folder beside the spec.
   const handleSaveExport = async (): Promise<void> => {
     if (!exportCode) return
+    // F33: an opt-in GitHub Actions workflow that runs the tests on every PR.
+    // Wire any {{env:NAME}} the export uses (emitted as process.env.NAME) to repo
+    // secrets so they're never hard-coded.
+    const secretNames = Array.from(
+      new Set([...exportCode.matchAll(/process\.env\.(\w+)/g)].map((m) => m[1]))
+    )
+    const ciWorkflow = exportCi ? generateCiWorkflow(secretNames) : undefined
     // Day 16(+): gather the upload files this test references so main can copy
     // them into a fixtures/ folder next to the saved spec (portable export).
     const fixturePaths = Array.from(
@@ -1061,7 +1089,8 @@ function App(): React.JSX.Element {
       storageState,
       exportPage ?? undefined,
       exportPage ? exportPageFileName : undefined,
-      exportHarName() // F1: copy the .har (saved or fresh) into hars/ beside the spec
+      exportHarName(), // F1: copy the .har (saved or fresh) into hars/ beside the spec
+      ciWorkflow // F33: optional .github/workflows/playwright.yml
     )
     if (path) setSavedPath(path)
   }
@@ -1109,6 +1138,7 @@ function App(): React.JSX.Element {
     setLastTraceId(null)
     setSkippedIndices(new Set())
     setRecovery(null)
+    setManualPause(null) // F30: clear any stale manual-step prompt
     setWhatChanged(null)
     setWhatChangedOpen(false)
     setLastConsoleErrors([])
@@ -1133,7 +1163,8 @@ function App(): React.JSX.Element {
           stepTexts: list.map((s) => stepText(s)),
           testName: testName || undefined
         },
-        harFile
+        harFile,
+        chaosSlowNet ? { slowNetwork: true } : undefined // F29
       )
     } catch (err) {
       result = { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -2439,11 +2470,17 @@ function App(): React.JSX.Element {
   // text appears) that replaces a guessy sleep with a precise wait.
   const handleAddWait = (
     at: number | null,
-    kind: 'time' | 'network-idle' | 'text' = 'time'
+    kind: 'time' | 'network-idle' | 'text' | 'manual' = 'time'
   ): void => {
     setInsertMenuIndex(null)
     if (kind === 'network-idle') insertStep({ type: 'wait', waitKind: 'network-idle' }, at)
     else if (kind === 'text') insertStep({ type: 'wait', waitKind: 'text', value: '' }, at)
+    // F30: a human gate (2FA/CAPTCHA/manual check) — pauses replay until you continue.
+    else if (kind === 'manual')
+      insertStep(
+        { type: 'wait', waitKind: 'manual', value: 'Complete the manual step, then Continue.' },
+        at
+      )
     else insertStep({ type: 'wait', waitKind: 'time', value: '2' }, at)
   }
 
@@ -3336,6 +3373,15 @@ function App(): React.JSX.Element {
                   <option value="always">⏺ always</option>
                   <option value="off">⏺ off</option>
                 </select>
+                {/* F29 (chaos): replay under a throttled network to test resilience. */}
+                <button
+                  className={`data-btn${chaosSlowNet ? ' active' : ''}`}
+                  onClick={() => setChaosSlowNet((v) => !v)}
+                  disabled={isReplaying || isRecording}
+                  title="Chaos: replay under a throttled (~Slow 3G) network — surfaces timing flakiness and tests the app under load. (Slow network only; error/500 injection is deferred — see notes.)"
+                >
+                  🐢 Slow net{chaosSlowNet ? ' ✓' : ''}
+                </button>
                 {/* Day 20: open the data-driven table (run the flow per row) */}
                 <button
                   className={`data-btn${isDataDriven ? ' active' : ''}`}
@@ -3750,6 +3796,30 @@ function App(): React.JSX.Element {
                 )}
             </>
           ) : null}
+
+          {/* F30: manual (wait-for-human) step — the run is holding here. Rendered
+              INLINE in the steps panel (NOT a modal) because the embedded browser
+              is a native view that draws over any HTML overlay — and the page must
+              stay visible + clickable so you can do the manual action (2FA etc.). */}
+          {manualPause && (
+            <div className="assert-panel manual-panel">
+              <div className="assert-target">
+                <span className="assert-title">🙋 Manual step — step {manualPause.index + 1}</span>
+              </div>
+              <p className="manual-message">{manualPause.message}</p>
+              <div className="assert-actions">
+                <button
+                  className="modal-btn primary"
+                  onClick={() => {
+                    window.api.recorder.manualContinue()
+                    setManualPause(null)
+                  }}
+                >
+                  ▶ Continue
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* === Day 12: recovery panel — the replay is paused on a failed
               step, browser frozen at the scene. Not a modal: the page must
@@ -4711,6 +4781,13 @@ function App(): React.JSX.Element {
                             title="Wait until specific text appears on the page — then edit the text on the new step"
                           >
                             🔤 Wait for text…
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddWait(i + 1, 'manual')}
+                            title="Pause replay for a human step (2FA / CAPTCHA / manual check), then continue when you're done"
+                          >
+                            🙋 Wait for me (manual)…
                           </button>
                           <button type="button" onClick={() => openBlocksPanel(i + 1)}>
                             🧩 Insert block here
@@ -5772,17 +5849,36 @@ function App(): React.JSX.Element {
               <code>{exportTab === 'page' && exportPage ? exportPage : exportCode}</code>
             </pre>
             <div className="modal-footer">
-              {savedPath && <span className="saved-path">Saved to {savedPath}</span>}
+              {savedPath && (
+                <span className="saved-path">
+                  Saved to {savedPath}
+                  {exportCi && ' + .github/workflows/playwright.yml (hidden folder)'}
+                </span>
+              )}
+              {/* F33: opt-in — write a GitHub Actions workflow beside the spec so
+                  the exported tests run on every PR. */}
+              <label
+                className="export-ci-toggle"
+                title="Also write .github/workflows/playwright.yml — runs these tests on every push / PR"
+              >
+                <input
+                  type="checkbox"
+                  checked={exportCi}
+                  onChange={(e) => setExportCi(e.target.checked)}
+                />
+                ⚙️ CI workflow
+              </label>
               <button className="modal-btn" onClick={handleCopyExport}>
                 Copy
               </button>
               <button className="modal-btn primary" onClick={handleSaveExport}>
-                {exportPage ? 'Save files' : 'Save .ts'}
+                {exportPage || exportCi ? 'Save files' : 'Save .ts'}
               </button>
             </div>
           </div>
         </div>
       )}
+
     </div>
   )
 }

@@ -3401,6 +3401,34 @@ body {
   font-style: italic;
 }
 
+/* F30: the wait-for-human pause — an inline panel in the steps column (NOT a
+   modal; the native browser view would cover an overlay). Blue accent so it
+   reads as "waiting on you", distinct from the red recovery/failure panel. */
+.manual-panel {
+  border-color: #3d6ea5;
+}
+.manual-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #cfe4ff;
+}
+
+/* F33: the "add CI workflow" checkbox in the export modal footer. */
+.export-ci-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: auto;
+  font-size: 12px;
+  color: #b8c4d4;
+  cursor: pointer;
+}
+.export-ci-toggle input {
+  accent-color: #3d6ea5;
+  cursor: pointer;
+}
+
 /* A2 (scalable library): per-row select checkbox + the bulk-action bar. */
 .library-check {
   flex: none;

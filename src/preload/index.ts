@@ -85,7 +85,8 @@ const api = {
       sessionFile?: string,
       pageObjectCode?: string,
       pageObjectFileName?: string,
-      harFile?: string
+      harFile?: string,
+      ciWorkflow?: string
     ): Promise<string | null> =>
       ipcRenderer.invoke(
         'recorder:export',
@@ -94,7 +95,8 @@ const api = {
         sessionFile,
         pageObjectCode,
         pageObjectFileName,
-        harFile
+        harFile,
+        ciWorkflow
       ),
 
     // Day 16(+): pick a different file for an upload step. Shows an OS open
@@ -128,9 +130,18 @@ const api = {
       interactive?: boolean,
       storageState?: string,
       traceOpts?: unknown,
-      harFile?: string
+      harFile?: string,
+      chaos?: { slowNetwork?: boolean }
     ): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
-      ipcRenderer.invoke('recorder:replay', steps, interactive, storageState, traceOpts, harFile),
+      ipcRenderer.invoke(
+        'recorder:replay',
+        steps,
+        interactive,
+        storageState,
+        traceOpts,
+        harFile,
+        chaos
+      ),
 
     // === Recovery (Day 12) ===
     // An interactive replay paused at a failed step — main's loop is holding,
@@ -151,6 +162,15 @@ const api = {
 
     // Answer the pause: retry (optionally with a healed step), skip, or stop.
     recovery: (decision: unknown): void => ipcRenderer.send('recorder:recovery', decision),
+
+    // F30: replay paused at a manual (wait-for-human) step — the message to show.
+    onManualPause: (callback: (info: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, info: unknown): void => callback(info)
+      ipcRenderer.on('recorder:manual-pause', listener)
+      return () => ipcRenderer.removeListener('recorder:manual-pause', listener)
+    },
+    // F30: the human finished the manual step — resume the run.
+    manualContinue: (): void => ipcRenderer.send('recorder:manual-continue'),
 
     // Subscribe to per-step replay progress. Returns an unsubscribe fn.
     onReplayProgress: (callback: (progress: unknown) => void): (() => void) => {

@@ -1468,6 +1468,15 @@ function createWindow(): void {
   }
   ipcMain.on('recorder:recovery', (_event, decision: RecoveryDecision) => resolveRecovery(decision))
 
+  // F30: a manual (wait-for-human) step pauses replay here; the renderer's
+  // "▶ Continue" resolves this so the run resumes where it left off.
+  let manualResolve: (() => void) | null = null
+  ipcMain.on('recorder:manual-continue', () => {
+    const pending = manualResolve
+    manualResolve = null
+    pending?.()
+  })
+
   // === Replay ========================================================
   // Run the recorded steps one-by-one inside the embedded browser. We report
   // progress per step so React can highlight the current/failed step. A plain
@@ -1483,7 +1492,11 @@ function createWindow(): void {
       traceOpts?: { mode: 'always' | 'failure' | 'off'; stepTexts?: string[]; testName?: string },
       // F1: serve responses from this HAR. A test's saved `har` filename, or the
       // sentinel '__last' to use the just-captured (unsaved) HAR. Absent = live.
-      harFile?: string
+      harFile?: string,
+      // F29 (chaos): replay under adverse conditions to test resilience / surface
+      // timing flakiness. `slowNetwork` throttles via CDP emulateNetworkConditions
+      // (the STABLE path — unlike F1's Fetch interception which crashed the view).
+      chaos?: { slowNetwork?: boolean }
     ): Promise<{
       ok: boolean
       failedAt?: number
@@ -1901,6 +1914,17 @@ function createWindow(): void {
             d.sendCommand('Network.enable').catch(() => {
               // network domain unavailable — console evidence still works
             })
+            // F29 (chaos): throttle this tab to a slow-network profile (~Slow 3G)
+            // so the run exercises the app + test under adverse conditions. Stable
+            // CDP command (no request interception). Best-effort.
+            if (chaos?.slowNetwork) {
+              d.sendCommand('Network.emulateNetworkConditions', {
+                offline: false,
+                latency: 400,
+                downloadThroughput: (500 * 1024) / 8,
+                uploadThroughput: (500 * 1024) / 8
+              }).catch(() => {})
+            }
             // F1: with a HAR loaded, intercept the API calls (XHR/fetch) and
             // serve the saved response when we have one; otherwise let it hit the
             // live network (augment mode). We deliberately DON'T intercept the
@@ -2603,6 +2627,21 @@ function createWindow(): void {
               await waitForNetworkIdle()
             } else if (kind === 'text') {
               await waitForText(step.value ?? '')
+            } else if (kind === 'manual') {
+              // F30: a human gate (2FA/CAPTCHA/manual check). Interactively we PAUSE
+              // and hold here until the user clicks Continue. Unattended (Run All /
+              // CI) there's no human, so it's a no-op — the run proceeds (a manual
+              // step can't be automated; downstream steps depending on it may fail,
+              // which is honest — these steps are for watched runs).
+              if (interactive) {
+                mainWindow.webContents.send('recorder:manual-pause', {
+                  index: i,
+                  message: step.value || 'Complete the manual step, then continue.'
+                })
+                await new Promise<void>((resolve) => {
+                  manualResolve = resolve
+                })
+              }
             } else {
               const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
               await wait(seconds * 1000)
@@ -3388,7 +3427,8 @@ function createWindow(): void {
       sessionFile?: string,
       pageObjectCode?: string,
       pageObjectFileName?: string,
-      harFile?: string
+      harFile?: string,
+      ciWorkflow?: string
     ): Promise<string | null> => {
       const result = await dialog.showSaveDialog(mainWindow, {
         title: 'Save Playwright test',
@@ -3437,6 +3477,14 @@ function createWindow(): void {
         const pagesDir = join(dirname(result.filePath), 'pages')
         await mkdir(pagesDir, { recursive: true }).catch(() => {})
         await writeFile(join(pagesDir, pageObjectFileName), pageObjectCode, 'utf-8').catch(() => {})
+      }
+      // F33: a GitHub Actions workflow that runs the tests on every PR. Written to
+      // .github/workflows/ RELATIVE TO THE SPEC — the file's header tells the user
+      // to move it to the repo root if the spec lives in a subfolder.
+      if (ciWorkflow) {
+        const wfDir = join(dirname(result.filePath), '.github', 'workflows')
+        await mkdir(wfDir, { recursive: true }).catch(() => {})
+        await writeFile(join(wfDir, 'playwright.yml'), ciWorkflow, 'utf-8').catch(() => {})
       }
       return result.filePath
     }

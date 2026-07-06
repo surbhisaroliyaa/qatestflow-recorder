@@ -8,6 +8,52 @@
 
 import { TOKEN_RE, extractTokens } from './dataDriven'
 
+// F33 (CI export): a standard GitHub Actions workflow that runs the exported
+// Playwright tests on every push / PR — the official Playwright CI template, so
+// a team can drop the exported spec into their repo and it runs in CI unchanged.
+// `secretNames` = any {{env:NAME}} tokens the tests use, wired to repo secrets so
+// they're never hard-coded (matches how the export reads process.env.NAME).
+export function generateCiWorkflow(secretNames: string[] = []): string {
+  const envBlock = secretNames.length
+    ? '\n        env:\n' +
+      secretNames.map((n) => `          ${n}: \${{ secrets.${n} }}`).join('\n')
+    : ''
+  return `# GitHub Actions — run the exported Playwright tests on every push / PR.
+# Place this file at your repo root as .github/workflows/playwright.yml
+# (GitHub only picks up workflows under .github/workflows/ at the repo root).
+# Assumes a Playwright project (package.json + a playwright config). If the
+# exported spec uses {{env:NAME}} values, add each NAME under repo Settings →
+# Secrets and variables → Actions.
+name: Playwright Tests
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+jobs:
+  test:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+      - name: Run Playwright tests
+        run: npx playwright test${envBlock}
+      - uses: actions/upload-artifact@v4
+        if: \${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+`
+}
+
 // Safely wrap a value in quotes (handles quotes/newlines inside it).
 function quote(value: string): string {
   return JSON.stringify(value)
@@ -217,6 +263,7 @@ export function stepText(step: RecorderStep): string {
       const kind = step.waitKind ?? 'time'
       if (kind === 'network-idle') return 'Wait for network to go idle'
       if (kind === 'text') return `Wait for text "${step.value ?? ''}" to appear`
+      if (kind === 'manual') return `Manual step: ${step.value ?? 'wait for a human'}`
       return `Wait ${step.value ?? '1'}s`
     }
     case 'dialog':
@@ -334,6 +381,16 @@ function actionFor(
     if (kind === 'network-idle') return `await ${pageVar}.waitForLoadState('networkidle')`
     if (kind === 'text') {
       return `await ${pageVar}.getByText(${quote(step.value ?? '')}).first().waitFor()`
+    }
+    // F30: a manual (human) step can't be automated in CI. Emit page.pause()
+    // (opens the Playwright Inspector for a human to act, then Resume) with the
+    // instruction inline — commented, since it would hang an unattended CI run.
+    if (kind === 'manual') {
+      return (
+        `// 🙋 MANUAL STEP — ${step.value ?? 'wait for a human (2FA / CAPTCHA / manual check)'}\n` +
+        `  // Handle it yourself when running headed, then resume:\n` +
+        `  // await ${pageVar}.pause()`
+      )
     }
     const ms = Math.max(0, (parseFloat(step.value ?? '0') || 0) * 1000)
     return `await ${pageVar}.waitForTimeout(${ms})`

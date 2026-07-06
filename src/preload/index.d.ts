@@ -78,7 +78,8 @@ interface RecorderAPI {
     sessionFile?: string,
     pageObjectCode?: string,
     pageObjectFileName?: string,
-    harFile?: string // F1: copy this .har into hars/ beside the exported spec
+    harFile?: string, // F1: copy this .har into hars/ beside the exported spec
+    ciWorkflow?: string // F33: write .github/workflows/playwright.yml beside the spec
   ) => Promise<string | null>
   pickUploadFile: () => Promise<string | null>
   revealDownload: (path: string) => Promise<void>
@@ -93,7 +94,9 @@ interface RecorderAPI {
     traceOpts?: TraceOptions,
     // F1: serve responses from this HAR — a test's saved `har` filename, or
     // '__last' for the just-captured (unsaved) one. Absent = hit live network.
-    harFile?: string
+    harFile?: string,
+    // F29 (chaos): replay under adverse conditions (e.g. throttled network).
+    chaos?: { slowNetwork?: boolean }
   ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
@@ -110,6 +113,9 @@ interface RecorderAPI {
     }) => void
   ) => () => void
   recovery: (decision: RecoveryDecision) => void
+  // F30: replay paused at a manual (wait-for-human) step; resume with manualContinue.
+  onManualPause: (callback: (info: { index: number; message: string }) => void) => () => void
+  manualContinue: () => void
   setPicking: (active: boolean) => Promise<void>
   onPicked: (callback: (picked: PickedElement) => void) => () => void
   onPickCancel: (callback: () => void) => () => void
@@ -661,7 +667,9 @@ declare global {
     // pause of `value` seconds; 'network-idle' = until the page stops making
     // network requests; 'text' = until `value` text appears on the page. The
     // condition kinds replace guessy fixed sleeps with a precise wait.
-    waitKind?: 'time' | 'network-idle' | 'text'
+    // F30: 'manual' pauses replay for a human (2FA/CAPTCHA/manual check), then
+    // continues on confirm. `value` holds the on-screen instruction.
+    waitKind?: 'time' | 'network-idle' | 'text' | 'manual'
     // Day 16: which native dialog this step answers (alert/confirm/prompt). The
     // dialog's message is carried in `label`.
     dialogKind?: 'alert' | 'confirm' | 'prompt'
