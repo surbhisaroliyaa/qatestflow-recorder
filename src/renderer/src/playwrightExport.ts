@@ -61,6 +61,38 @@ jobs:
 `
 }
 
+// F17 (cross-browser): a playwright.config.ts with one project per engine, so
+// `npx playwright test` runs the exported spec on Chromium + Firefox + WebKit.
+// Emitted beside the spec when the export's "cross-browser config" is ticked —
+// the same three projects the in-app cross-browser runner uses.
+export function generatePlaywrightConfig(
+  browsers: ('chromium' | 'firefox' | 'webkit')[] = ['chromium', 'firefox', 'webkit']
+): string {
+  const DEVICE: Record<string, string> = {
+    chromium: 'Desktop Chrome',
+    firefox: 'Desktop Firefox',
+    webkit: 'Desktop Safari'
+  }
+  const projects = browsers
+    .map((b) => `    { name: '${b}', use: { ...devices['${DEVICE[b]}'] } }`)
+    .join(',\n')
+  return `// Playwright config — runs the exported test on every browser engine.
+// Install once:  npm i -D @playwright/test && npx playwright install
+// Run:           npx playwright test            (all projects)
+//                npx playwright test --project=webkit   (just one)
+import { defineConfig, devices } from '@playwright/test'
+
+export default defineConfig({
+  testDir: '.',
+  reporter: [['html', { open: 'never' }]],
+  use: { trace: 'on-first-retry' },
+  projects: [
+${projects}
+  ]
+})
+`
+}
+
 // Safely wrap a value in quotes (handles quotes/newlines inside it).
 function quote(value: string): string {
   return JSON.stringify(value)
@@ -598,6 +630,17 @@ export function generatePlaywrightTest(
     const healNote = step.healedByAi
       ? `  // ⚠ selector auto-healed by QATestFlow AI (matched on ${step.healedByAi.signals.join(' + ')}) — verify it still targets the intended element\n`
       : ''
+    // F26: an optional step (e.g. a cookie banner that may not appear) is wrapped
+    // in try/catch so its absence is skipped, not a test failure — matching how
+    // replay treats it. The action is indented one level deeper inside the try.
+    if (step.optional) {
+      const indented = action.replace(/\n/g, '\n  ')
+      lines.push(
+        `${healNote}  // ${stepText(step)} (optional — skipped if not present)\n` +
+          `  try {\n    ${indented}\n  } catch { /* optional step: element not present, skipped */ }`
+      )
+      continue
+    }
     lines.push(`${healNote}  // ${stepText(step)}\n  ${action}`)
   }
 

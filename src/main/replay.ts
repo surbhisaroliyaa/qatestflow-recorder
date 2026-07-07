@@ -38,6 +38,10 @@ export interface ReplayStep {
   attrName?: string // for `attribute` asserts — which attribute to check (Day 11)
   secret?: boolean
   disabled?: boolean // turned off in the editor — skipped during replay
+  // F26 (conditional): this step MAY be absent (an optional cookie banner /
+  // popup). Replay uses a shorter find timeout for it, and a failure is treated
+  // as a skip (not a test failure) — see the run loop in index.ts.
+  optional?: boolean
   baselineId?: string // Day 19: a `snapshot` step's baseline image id
   selector?: string
   candidates?: ReplayCandidate[]
@@ -190,12 +194,12 @@ function ladderPrelude(candidates: ReplayCandidate[]): string {
   )
 }
 
-function findPrelude(candidates: ReplayCandidate[], allowHidden = false): string {
+function findPrelude(candidates: ReplayCandidate[], allowHidden = false, timeoutMs = 8000): string {
   return (
     ladderPrelude(candidates) +
     `
     const ALLOW_HIDDEN = ${allowHidden ? 'true' : 'false'};
-    const deadline = Date.now() + 8000;
+    const deadline = Date.now() + ${timeoutMs};
     let el = null, everFound = false, hidden = null, hiddenAt = 0;
     while (Date.now() < deadline) {
       for (const c of cands) {
@@ -476,7 +480,10 @@ export function buildActionScript(step: ReplayStep): string {
   // right now (you must be able to FIND a hidden element to report "it's
   // hidden") — so both resolve tolerantly; the action itself judges the state.
   const tolerant = step.type === 'hover' || step.type === 'assert'
-  return `(async () => {${findPrelude(step.candidates ?? [], tolerant)}${action}\n})()`
+  // F26: an optional step's element may simply not be there — don't burn the
+  // full 8s wait on it; 2.5s is plenty to confirm presence, then it skips.
+  const findTimeout = step.optional ? 2500 : 8000
+  return `(async () => {${findPrelude(step.candidates ?? [], tolerant, findTimeout)}${action}\n})()`
 }
 
 // === F4 (self-heal 2.0): locate a step's element for fingerprinting =====

@@ -3,11 +3,21 @@ import {
   generatePlaywrightTest,
   generatePageObjectTest,
   generateCiWorkflow,
+  generatePlaywrightConfig,
   stepText
 } from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
 import { retargetSteps } from './environments'
+import {
+  fillableFields,
+  generateEdgeCases,
+  countEdgeCases,
+  EDGE_GROUP_LABELS,
+  type EdgeGroup,
+  type EdgeCase
+} from './edgeCases'
+import { generateTestDoc, generateSuiteDoc, type DocMeta } from './livingDocs'
 import { classifyRuns, type FlakyTag } from './flaky'
 import { trustScore } from './trust'
 import { findWeakAssertions } from './deadAssertions'
@@ -153,6 +163,9 @@ function App(): React.JSX.Element {
   const [poExport, setPoExport] = useState(false)
   // F33 (CI export): also write a GitHub Actions workflow beside the spec.
   const [exportCi, setExportCi] = useState(false)
+  // F17 (cross-browser): also write a playwright.config.ts (chromium/firefox/
+  // webkit projects) beside the spec.
+  const [exportXbrowser, setExportXbrowser] = useState(false)
   // POM mode produces a SECOND file (the page class). Null = inline (one file).
   const [exportPage, setExportPage] = useState<string | null>(null)
   const [exportPageFileName, setExportPageFileName] = useState('')
@@ -303,6 +316,46 @@ function App(): React.JSX.Element {
   const [envManagerOpen, setEnvManagerOpen] = useState(false)
   // The environment being edited in the manager (null = the list view).
   const [envDraft, setEnvDraft] = useState<Environment | null>(null)
+  // F20 (edge-case explosion): the picker (choose fields + families to explode),
+  // and the run/report that follows. `edgeFlat`/`edgeMap` are the flattened steps
+  // the variants are built from (blocks expanded once, like a data run).
+  const [edgeModalOpen, setEdgeModalOpen] = useState(false)
+  const [edgeFlat, setEdgeFlat] = useState<RecorderStep[]>([])
+  const [edgeMap, setEdgeMap] = useState<number[]>([])
+  const [edgeFields, setEdgeFields] = useState<Set<number>>(new Set())
+  const [edgeGroups, setEdgeGroups] = useState<Set<EdgeGroup>>(
+    new Set<EdgeGroup>(['empty', 'boundary', 'invalid', 'injection'])
+  )
+  // F17 (cross-browser): the runner modal — pick engines, run real Playwright,
+  // show per-browser pass/fail. `xbInstalled` null = not checked yet.
+  const [xbOpen, setXbOpen] = useState(false)
+  const [xbSel, setXbSel] = useState<Set<string>>(
+    new Set(['chromium', 'firefox', 'webkit'])
+  )
+  const [xbRunning, setXbRunning] = useState(false)
+  const [xbInstalled, setXbInstalled] = useState<boolean | null>(null)
+  // F31 (living docs): a generated plain-English doc of the current test.
+  const [docOpen, setDocOpen] = useState(false)
+  const [docContent, setDocContent] = useState('')
+  const [docSavedPath, setDocSavedPath] = useState<string | null>(null)
+  const [xbResult, setXbResult] = useState<Awaited<
+    ReturnType<typeof window.api.xbrowser.run>
+  > | null>(null)
+  // The streaming edge-case run + its per-variant outcomes (null = not running).
+  const [edgeRun, setEdgeRun] = useState<{
+    total: number
+    current: number
+    currentLabel: string
+    running: boolean
+    hasAssertion: boolean // did the test have a success check? (drives the verdict)
+    results: {
+      case: EdgeCase
+      ok: boolean
+      failedAt?: number
+      error?: string
+      screenshotPath?: string
+    }[]
+  } | null>(null)
   // Day 11.5 — sections (suites). The section list, the current test's
   // section, and the save panel's chosen/typed section.
   const [suites, setSuites] = useState<string[]>([])
@@ -865,7 +918,11 @@ function App(): React.JSX.Element {
         a11yPanelOpen ||
         perfPanelOpen ||
         historyOpen ||
-        envManagerOpen
+        envManagerOpen ||
+        edgeModalOpen ||
+        edgeRun !== null ||
+        xbOpen ||
+        docOpen
     )
   }, [
     exportCode,
@@ -876,7 +933,11 @@ function App(): React.JSX.Element {
     a11yPanelOpen,
     perfPanelOpen,
     historyOpen,
-    envManagerOpen
+    envManagerOpen,
+    edgeModalOpen,
+    edgeRun,
+    xbOpen,
+    docOpen
   ])
 
   // Day 18: remember the trace policy across sessions.
@@ -1124,6 +1185,8 @@ function App(): React.JSX.Element {
       new Set([...exportCode.matchAll(/process\.env\.(\w+)/g)].map((m) => m[1]))
     )
     const ciWorkflow = exportCi ? generateCiWorkflow(secretNames) : undefined
+    // F17: an opt-in cross-browser playwright.config.ts beside the spec.
+    const configFile = exportXbrowser ? generatePlaywrightConfig() : undefined
     // Day 16(+): gather the upload files this test references so main can copy
     // them into a fixtures/ folder next to the saved spec (portable export).
     const fixturePaths = Array.from(
@@ -1140,7 +1203,8 @@ function App(): React.JSX.Element {
       exportPage ?? undefined,
       exportPage ? exportPageFileName : undefined,
       exportHarName(), // F1: copy the .har (saved or fresh) into hars/ beside the spec
-      ciWorkflow // F33: optional .github/workflows/playwright.yml
+      ciWorkflow, // F33: optional .github/workflows/playwright.yml
+      configFile // F17: optional cross-browser playwright.config.ts
     )
     if (path) setSavedPath(path)
   }
@@ -1498,6 +1562,198 @@ function App(): React.JSX.Element {
         category: first?.category // F9 (Stage 2): representative failure type
       })
     }
+  }
+
+  // === F20: edge-case explosion =====================================
+  // Open the picker: flatten the flow once (so blocks become real steps), detect
+  // the text fields worth exploding, and default to all of them + all families.
+  const handleOpenEdgeModal = async (): Promise<void> => {
+    const { flat, map } = await buildRunPlan(steps)
+    setEdgeFlat(flat)
+    setEdgeMap(map)
+    setEdgeFields(new Set(fillableFields(flat).map((f) => f.index)))
+    setEdgeGroups(new Set<EdgeGroup>(['empty', 'boundary', 'invalid', 'injection']))
+    setEdgeModalOpen(true)
+  }
+
+  // Run every generated variant through the SAME replay engine as a data run:
+  // the happy-path baseline first (the reference), then each hostile variant.
+  // Nothing is saved — variants are transient (fileName null), like the env
+  // retarget. Outcomes stream into `edgeRun`; the report interprets them.
+  const handleRunEdgeCases = async (): Promise<void> => {
+    const cases = generateEdgeCases(edgeFlat, [...edgeFields], edgeGroups)
+    if (cases.length <= 1) return // nothing but the baseline
+    // A success check is what lets us tell "app rejected the bad input" (the
+    // check fails) from "app accepted it" (the check still passes). Without one,
+    // we can only report what happened, not judge it.
+    const hasAssertion = edgeFlat.some((s) => s.type === 'assert' || s.type === 'snapshot')
+    runPlanRef.current = edgeMap // per-step marks map back to the display rows
+    setEdgeModalOpen(false)
+    setEdgeRun({ total: cases.length, current: 0, currentLabel: '', running: true, hasAssertion, results: [] })
+    for (let i = 0; i < cases.length; i++) {
+      const c = cases[i]
+      const label = c.baseline ? 'Happy path' : `${c.fieldLabel}: ${c.edgeLabel}`
+      setEdgeRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: label } : prev))
+      // Resolve {{env:}} creds + retarget URLs on the OTHER fields, exactly like
+      // a normal run (the perturbed field is a literal hostile value).
+      const list = await applyEnv(c.steps, baseURL || deriveBaseURL(c.steps))
+      const res = await runOnce(list, null, false)
+      if (res.aborted) {
+        setEdgeRun(null)
+        return
+      }
+      const entry = {
+        case: c,
+        ok: res.ok,
+        failedAt: res.failedAt,
+        error: res.error,
+        screenshotPath: res.screenshotPath
+      }
+      setEdgeRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
+    }
+    setEdgeRun((prev) => (prev ? { ...prev, running: false } : prev))
+  }
+
+  // F20 verdict for one variant, given whether the happy-path baseline passed.
+  // 'accepted' = the app took the hostile input and still reached success (a bug
+  // to investigate — worst for injection). 'rejected' = the app blocked it
+  // (good). 'unknown' = the baseline itself failed, so nothing can be judged.
+  const edgeVerdict = (
+    ok: boolean,
+    baselineOk: boolean
+  ): 'accepted' | 'rejected' | 'unknown' => {
+    if (!baselineOk) return 'unknown'
+    return ok ? 'accepted' : 'rejected'
+  }
+
+  // A ready-to-paste markdown summary of an edge-case run (Copy button).
+  const buildEdgeReport = (): string => {
+    if (!edgeRun) return ''
+    const baseline = edgeRun.results.find((r) => r.case.baseline)
+    const baselineOk = !!baseline?.ok
+    const variants = edgeRun.results.filter((r) => !r.case.baseline)
+    const accepted = variants.filter((r) => edgeVerdict(r.ok, baselineOk) === 'accepted')
+    const lines: string[] = []
+    lines.push(`# Edge-case report${testName ? ` — ${testName}` : ''}`)
+    lines.push('')
+    lines.push(`- Variants run: ${variants.length}`)
+    lines.push(`- ⚠ Accepted (app took the bad input — review): ${accepted.length}`)
+    lines.push(`- ✓ Rejected (handled): ${variants.length - accepted.length}`)
+    if (!baselineOk) lines.push(`- ⚠ Baseline (happy path) FAILED — fix the test first; verdicts below are unreliable.`)
+    if (!edgeRun.hasAssertion) lines.push(`- ⚠ No success check in this test — "accepted vs rejected" is a guess. Add an assertion (e.g. URL contains …).`)
+    lines.push('')
+    for (const r of variants) {
+      const v = edgeVerdict(r.ok, baselineOk)
+      const mark = v === 'accepted' ? '⚠ ACCEPTED' : v === 'rejected' ? '✓ rejected' : '· (baseline broken)'
+      lines.push(`- ${mark} — **${r.case.fieldLabel}** = ${r.case.edgeLabel}: \`${r.case.value.slice(0, 60) || '(empty)'}\``)
+      lines.push(`  - ${r.case.hint}`)
+    }
+    return lines.join('\n')
+  }
+
+  const handleCopyEdgeReport = (): void => {
+    navigator.clipboard.writeText(buildEdgeReport())
+  }
+
+  // === F17: cross-browser replay ====================================
+  // Open the runner: check whether Playwright is installed (the runner shells
+  // out to it), then show the picker. WebKit/Firefox can't render in-app.
+  const handleOpenXbrowser = async (): Promise<void> => {
+    setXbResult(null)
+    const chk = await window.api.xbrowser.check()
+    setXbInstalled(chk.installed)
+    setXbOpen(true)
+  }
+
+  // Export the current flow to a self-contained spec and run it on the selected
+  // engines via real Playwright (main). Session/HAR/fixtures are omitted in v1 —
+  // the cross-browser run exercises the functional flow.
+  const handleRunXbrowser = async (): Promise<void> => {
+    if (xbSel.size === 0) return
+    const { flat } = await buildRunPlan(steps)
+    const code = generatePlaywrightTest(flat, {
+      name: testName || 'recorded flow',
+      baseURL: baseURL || deriveBaseURL(flat),
+      viewport
+    })
+    setXbRunning(true)
+    setXbResult(null)
+    try {
+      const res = await window.api.xbrowser.run(
+        code,
+        [...xbSel] as ('chromium' | 'firefox' | 'webkit')[]
+      )
+      setXbResult(res)
+      setXbInstalled(res.installed)
+    } catch (err) {
+      setXbResult({
+        installed: true,
+        ran: false,
+        results: [],
+        message: err instanceof Error ? err.message : String(err)
+      })
+    } finally {
+      setXbRunning(false)
+    }
+  }
+
+  // === F31: living docs =============================================
+  // Generate a plain-English document of the CURRENT test from its steps — what
+  // it does + what it verifies + preconditions. Flatten first so linked blocks
+  // are described as their real steps. Regenerated each time, so it can't drift.
+  const handleGenerateDocs = async (): Promise<void> => {
+    const { flat } = await buildRunPlan(steps)
+    const doc = generateTestDoc(testName || 'Recorded test', flat, {
+      suite: testSuite,
+      baseURL: baseURL || deriveBaseURL(flat),
+      storageState,
+      viewport,
+      dataRows
+    })
+    setDocContent(doc)
+    setDocSavedPath(null)
+    setDocOpen(true)
+  }
+
+  // F31 (scale surface): one coverage document across the WHOLE library — load
+  // each saved test, flatten it (blocks expanded), and hand them to the suite
+  // generator. Opens the same docs modal. A living map of what QA covers.
+  const handleSuiteDocs = async (): Promise<void> => {
+    const entries: { name: string; suite: string; flat: RecorderStep[]; meta: DocMeta }[] = []
+    for (const t of savedTests) {
+      const data = await window.api.library.load(t.fileName)
+      if (!data) continue
+      const { flat } = await buildRunPlan(data.steps as RecorderStep[])
+      entries.push({
+        name: data.name,
+        suite: t.suite,
+        flat,
+        meta: {
+          baseURL: data.baseURL,
+          storageState: data.storageState,
+          viewport: data.viewport,
+          dataRows: data.dataRows
+        }
+      })
+    }
+    setDocContent(generateSuiteDoc(entries))
+    setDocSavedPath(null)
+    setDocOpen(true)
+  }
+
+  const handleCopyDocs = (): void => {
+    navigator.clipboard.writeText(docContent)
+  }
+
+  const handleSaveDocs = async (): Promise<void> => {
+    const slug =
+      (testName || 'test')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 50) || 'test'
+    const path = await window.api.translator.saveReport(docContent, `${slug}-docs.md`)
+    if (path) setDocSavedPath(path)
   }
 
   // === Day 12: recovery — answer a paused replay ====================
@@ -2210,6 +2466,18 @@ function App(): React.JSX.Element {
     editSteps(steps.map((s, idx) => (idx === i ? { ...s, disabled: !s.disabled } : s)))
   }
 
+  // F26: mark a step optional / required. An OPTIONAL step runs when its element
+  // is present but is SKIPPED (not failed) when it's absent — for things that
+  // may or may not appear, like a cookie banner or a promo popup.
+  const handleToggleOptional = (i: number): void => {
+    editSteps(steps.map((s, idx) => (idx === i ? { ...s, optional: !s.optional } : s)))
+  }
+
+  // Which steps can be optional: ones that TARGET an element (so "present or
+  // not" is meaningful). Page/flow steps (navigate, wait, back) always run.
+  const canBeOptional = (step: RecorderStep): boolean =>
+    ['click', 'type', 'select', 'press', 'hover', 'assert'].includes(step.type)
+
   // The text an inline edit would change: a navigate edits its URL; a type /
   // select edits its value; a wait edits its seconds; a valued assertion edits
   // its expected text. Clicks have nothing to edit; passwords are never
@@ -2842,11 +3110,43 @@ function App(): React.JSX.Element {
     </div>
   )
 
+  // F31: the living-docs modal is opened from the workspace (📖 Docs) AND the
+  // library (📖 Suite docs), which live in two separate returns — so build it
+  // once and render {docsModal} in each (same pattern as the env manager).
+  const docsModal = docOpen && (
+    <div className="modal-backdrop" onClick={() => setDocOpen(false)}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">📖 Living docs</span>
+          <button className="modal-close" onClick={() => setDocOpen(false)} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <pre className="modal-code doc-preview">
+          <code>{docContent}</code>
+        </pre>
+        <div className="modal-footer">
+          {docSavedPath && <span className="saved-path">Saved to {docSavedPath}</span>}
+          <button className="modal-btn" onClick={handleCopyDocs}>
+            Copy
+          </button>
+          <button className="modal-btn" onClick={handleSaveDocs}>
+            Save .md
+          </button>
+          <button className="modal-btn primary" onClick={() => setDocOpen(false)}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
   // === Welcome view — shown before any navigation ===
   if (!hasNavigated) {
     return (
       <div className="welcome">
         {envManagerModal}
+        {docsModal}
         <div className="welcome-content">
           <h1 className="logo-text">QATestFlow Recorder</h1>
           <p className="tagline">No-code QA test recorder with AI-powered selectors</p>
@@ -3025,6 +3325,17 @@ function App(): React.JSX.Element {
                 >
                   Manage…
                 </button>
+                {/* F31: one plain-English coverage doc for the whole library. */}
+                {savedTests.length > 0 && (
+                  <button
+                    type="button"
+                    className="env-bar-manage"
+                    onClick={handleSuiteDocs}
+                    title="Suite docs: a plain-English coverage document across every saved test — what QA covers, with a ⚠ on tests that verify nothing"
+                  >
+                    📖 Suite docs
+                  </button>
+                )}
               </div>
 
               {/* A1 (scalable library): search + status filters, so a big library
@@ -3741,6 +4052,24 @@ function App(): React.JSX.Element {
                 >
                   🧪 Data{isDataDriven && dataRows.length > 0 ? ` (${dataRows.length})` : ''}
                 </button>
+                {/* F20: explode the happy path into empty/boundary/invalid/injection variants */}
+                <button
+                  className="data-btn"
+                  onClick={handleOpenEdgeModal}
+                  disabled={isReplaying || isRecording}
+                  title="Edge cases: auto-generate empty / boundary / invalid / injection variants of your inputs and run them — negative testing without hand-writing 20 cases"
+                >
+                  🧨 Edge cases
+                </button>
+                {/* F17: run the current test on real WebKit / Firefox / Chromium */}
+                <button
+                  className="data-btn"
+                  onClick={handleOpenXbrowser}
+                  disabled={isReplaying || isRecording}
+                  title="Cross-browser: run this test on real Chromium + Firefox + WebKit via Playwright (the embedded engine is Chromium only)"
+                >
+                  🧭 Cross-browser
+                </button>
                 {/* Pillar 4: save/insert reusable step blocks */}
                 <button
                   className="data-btn"
@@ -3764,6 +4093,15 @@ function App(): React.JSX.Element {
                     🕘 History ({testVersions.length})
                   </button>
                 )}
+                {/* F31: plain-English living docs of this test. */}
+                <button
+                  className="data-btn"
+                  onClick={handleGenerateDocs}
+                  disabled={isReplaying || isRecording}
+                  title="Living docs: a plain-English write-up of what this test does + verifies — regenerated from the steps, so it never goes stale"
+                >
+                  📖 Docs
+                </button>
                 <button
                   className="export-btn"
                   onClick={handleExport}
@@ -4973,6 +5311,8 @@ function App(): React.JSX.Element {
                   <li
                     key={i}
                     className={`step-item${step.disabled ? ' disabled' : ''}${
+                      step.optional ? ' optional' : ''
+                    }${
                       i === failedIndex
                         ? ' failed'
                         : i === replayingIndex
@@ -5003,6 +5343,15 @@ function App(): React.JSX.Element {
                         />
                       ) : (
                         <span className="step-text">{stepText(step)}</span>
+                      )}
+                      {/* F26: optional step — skipped (not failed) if absent. */}
+                      {step.optional && (
+                        <span
+                          className="optional-badge"
+                          title="Optional — replay skips this (doesn’t fail) if its element isn’t present. Export wraps it in try/catch."
+                        >
+                          ◆ optional
+                        </span>
                       )}
                       {/* F6: dead/weak assertion warning — a check that verifies
                           little or nothing, with a fix hint on hover. */}
@@ -5218,6 +5567,22 @@ function App(): React.JSX.Element {
                             aria-label="Make variable"
                           >
                             {'{}'}
+                          </button>
+                        )}
+                        {/* F26: mark this step optional — skipped (not failed)
+                            when its element isn't present (e.g. a cookie banner). */}
+                        {canBeOptional(step) && (
+                          <button
+                            className={`step-action${step.optional ? ' optional-on' : ''}`}
+                            onClick={() => handleToggleOptional(i)}
+                            title={
+                              step.optional
+                                ? 'Optional — currently skipped if not present. Click to make required.'
+                                : 'Make optional — skip this step (don’t fail) if its element isn’t present'
+                            }
+                            aria-label={step.optional ? 'Make required' : 'Make optional'}
+                          >
+                            {step.optional ? '◆' : '◇'}
                           </button>
                         )}
                         <button
@@ -5717,6 +6082,344 @@ function App(): React.JSX.Element {
           library AND this workspace), rendered here for the workspace screen. */}
       {envManagerModal}
 
+      {/* === F20: edge-case picker — choose which text fields and which families
+           (empty / boundary / invalid / injection) to explode, then run. === */}
+      {edgeModalOpen &&
+        (() => {
+          const fields = fillableFields(edgeFlat)
+          const count = countEdgeCases(edgeFlat, [...edgeFields], edgeGroups)
+          const hasAssertion = edgeFlat.some((s) => s.type === 'assert' || s.type === 'snapshot')
+          return (
+            <div className="modal-backdrop" onClick={() => setEdgeModalOpen(false)}>
+              <div className="env-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <span className="modal-title">🧨 Explode into edge cases</span>
+                  <button
+                    className="modal-close"
+                    onClick={() => setEdgeModalOpen(false)}
+                    aria-label="Close"
+                  >
+                    ✕
+                  </button>
+                </div>
+                {fields.length === 0 ? (
+                  <div className="env-list">
+                    <div className="env-empty">
+                      This test has no text input fields to explode. Record a flow that types into
+                      a form first (e.g. a login or signup).
+                    </div>
+                    <div className="modal-footer">
+                      <button className="modal-btn" onClick={() => setEdgeModalOpen(false)}>
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="env-edit">
+                    <p className="env-list-intro">
+                      Generate negative variants of your inputs and run them. Each variant is your
+                      flow with ONE field swapped for a hostile value; everything else keeps its
+                      valid value. The saved test isn&rsquo;t changed.
+                    </p>
+
+                    <div className="edge-section">
+                      <span className="env-field-label">Fields to explode</span>
+                      {fields.map((f) => (
+                        <label key={f.index} className="edge-check">
+                          <input
+                            type="checkbox"
+                            checked={edgeFields.has(f.index)}
+                            onChange={(e) => {
+                              const next = new Set(edgeFields)
+                              if (e.target.checked) next.add(f.index)
+                              else next.delete(f.index)
+                              setEdgeFields(next)
+                            }}
+                          />
+                          {f.label}
+                        </label>
+                      ))}
+                    </div>
+
+                    <div className="edge-section">
+                      <span className="env-field-label">Families</span>
+                      {(Object.keys(EDGE_GROUP_LABELS) as EdgeGroup[]).map((g) => (
+                        <label key={g} className="edge-check">
+                          <input
+                            type="checkbox"
+                            checked={edgeGroups.has(g)}
+                            onChange={(e) => {
+                              const next = new Set(edgeGroups)
+                              if (e.target.checked) next.add(g)
+                              else next.delete(g)
+                              setEdgeGroups(next)
+                            }}
+                          />
+                          {EDGE_GROUP_LABELS[g]}
+                        </label>
+                      ))}
+                    </div>
+
+                    {!hasAssertion && (
+                      <div className="edge-warn">
+                        ⚠ This test has no success check (assertion). Edge cases can still run, but
+                        &ldquo;the app accepted vs rejected the bad input&rdquo; can&rsquo;t be
+                        judged reliably — add a check (e.g. <code>URL contains …</code>) for a
+                        meaningful verdict.
+                      </div>
+                    )}
+
+                    <div className="modal-footer">
+                      <span className="edge-count">
+                        {count} variant{count === 1 ? '' : 's'} + 1 baseline
+                      </span>
+                      <button className="modal-btn" onClick={() => setEdgeModalOpen(false)}>
+                        Cancel
+                      </button>
+                      <button
+                        className="modal-btn primary"
+                        disabled={count === 0}
+                        onClick={handleRunEdgeCases}
+                      >
+                        Generate &amp; run
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )
+        })()}
+
+      {/* === F20: edge-case report — per-variant verdict (accepted / rejected),
+           computed against the happy-path baseline. === */}
+      {edgeRun &&
+        (() => {
+          const baseline = edgeRun.results.find((r) => r.case.baseline)
+          const baselineOk = !!baseline?.ok
+          const variants = edgeRun.results.filter((r) => !r.case.baseline)
+          const ranked = [...variants].sort((a, b) => {
+            const va = edgeVerdict(a.ok, baselineOk) === 'accepted' ? 0 : 1
+            const vb = edgeVerdict(b.ok, baselineOk) === 'accepted' ? 0 : 1
+            return va - vb
+          })
+          const acceptedCount = variants.filter(
+            (r) => edgeVerdict(r.ok, baselineOk) === 'accepted'
+          ).length
+          return (
+            <div className="modal-backdrop" onClick={() => !edgeRun.running && setEdgeRun(null)}>
+              <div className="modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <span className="modal-title">
+                    🧨 Edge cases
+                    {edgeRun.running
+                      ? ` — running ${edgeRun.current}/${edgeRun.total}…`
+                      : ` — ${variants.length} run`}
+                  </span>
+                  <button
+                    className="modal-close"
+                    onClick={() => setEdgeRun(null)}
+                    disabled={edgeRun.running}
+                    aria-label="Close"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {edgeRun.running && (
+                  <div className="edge-progress">
+                    Running <strong>{edgeRun.currentLabel}</strong> ({edgeRun.current}/
+                    {edgeRun.total})…
+                  </div>
+                )}
+
+                {!baselineOk && baseline && (
+                  <div className="edge-warn edge-warn-block">
+                    ⚠ The happy-path baseline FAILED — fix the test first. Verdicts below are
+                    unreliable until the valid inputs pass.
+                  </div>
+                )}
+                {!edgeRun.hasAssertion && (
+                  <div className="edge-warn edge-warn-block">
+                    ⚠ No success check in this test, so &ldquo;accepted vs rejected&rdquo; is a
+                    guess. Add an assertion (e.g. URL contains the post-login page) for a real
+                    verdict.
+                  </div>
+                )}
+
+                {!edgeRun.running && (
+                  <div className="edge-summary">
+                    <span className="edge-summary-accepted">⚠ {acceptedCount} accepted (review)</span>
+                    <span className="edge-summary-rejected">
+                      ✓ {variants.length - acceptedCount} rejected (handled)
+                    </span>
+                  </div>
+                )}
+
+                <ul className="edge-list">
+                  {ranked.map((r) => {
+                    const v = edgeVerdict(r.ok, baselineOk)
+                    return (
+                      <li key={r.case.id} className={`edge-item ${v}`}>
+                        <span className={`edge-badge ${v}`}>
+                          {v === 'accepted' ? '⚠ accepted' : v === 'rejected' ? '✓ rejected' : '·'}
+                        </span>
+                        <span className="edge-item-field">{r.case.fieldLabel}</span>
+                        {r.case.group && (
+                          <span className={`edge-group-chip ${r.case.group}`}>
+                            {r.case.edgeLabel}
+                          </span>
+                        )}
+                        <code className="edge-item-value">{r.case.value || '(empty)'}</code>
+                        {v === 'accepted' && <span className="edge-item-hint">{r.case.hint}</span>}
+                        {r.screenshotPath && (
+                          <button
+                            type="button"
+                            className="shot-link"
+                            onClick={() => window.api.library.openScreenshot(r.screenshotPath!)}
+                            title="Open the screenshot from this variant"
+                          >
+                            📷
+                          </button>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
+
+                <div className="modal-footer">
+                  <span className="edge-foot-hint">
+                    ⚠ Accepted = the app took the bad input and still succeeded — investigate.
+                    ✓ Rejected = the app blocked it.
+                  </span>
+                  <button
+                    className="modal-btn"
+                    onClick={handleCopyEdgeReport}
+                    disabled={edgeRun.running}
+                  >
+                    Copy report
+                  </button>
+                  <button
+                    className="modal-btn primary"
+                    onClick={() => setEdgeRun(null)}
+                    disabled={edgeRun.running}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        })()}
+
+      {/* === F17: cross-browser runner — pick engines, run real Playwright,
+           show per-browser pass/fail. The embedded engine is Chromium only, so
+           WebKit/Firefox run via shelled-out Playwright. === */}
+      {xbOpen && (
+        <div className="modal-backdrop" onClick={() => !xbRunning && setXbOpen(false)}>
+          <div className="env-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">🧭 Cross-browser</span>
+              <button
+                className="modal-close"
+                onClick={() => setXbOpen(false)}
+                disabled={xbRunning}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {xbInstalled === false ? (
+              <div className="env-list">
+                <div className="edge-warn">
+                  ⚠ Cross-browser needs real Playwright (the embedded engine is Chromium only).
+                  Install it once, then reopen this:
+                  <pre className="xb-install">npm i -D @playwright/test{'\n'}npx playwright install</pre>
+                  Tip: you can run these right here by typing{' '}
+                  <code>! npm i -D @playwright/test</code> then{' '}
+                  <code>! npx playwright install</code>.
+                </div>
+                <div className="modal-footer">
+                  <button className="modal-btn" onClick={() => setXbOpen(false)}>
+                    Close
+                  </button>
+                  <button
+                    className="modal-btn"
+                    onClick={async () => setXbInstalled((await window.api.xbrowser.check()).installed)}
+                  >
+                    Re-check
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="env-edit">
+                <p className="env-list-intro">
+                  Run this test on real browser engines via Playwright. Chromium is what the app
+                  already uses; Firefox &amp; WebKit catch engine-specific bugs. Session / HAR /
+                  upload assets aren&rsquo;t included in this run (v1).
+                </p>
+
+                <div className="edge-section">
+                  <span className="env-field-label">Browsers</span>
+                  {(['chromium', 'firefox', 'webkit'] as const).map((b) => (
+                    <label key={b} className="edge-check">
+                      <input
+                        type="checkbox"
+                        checked={xbSel.has(b)}
+                        onChange={(e) => {
+                          const next = new Set(xbSel)
+                          if (e.target.checked) next.add(b)
+                          else next.delete(b)
+                          setXbSel(next)
+                        }}
+                      />
+                      {b === 'chromium' ? 'Chromium' : b === 'firefox' ? 'Firefox' : 'WebKit (Safari)'}
+                    </label>
+                  ))}
+                </div>
+
+                {xbResult && (
+                  <div className="xb-results">
+                    {xbResult.message && <div className="edge-warn">{xbResult.message}</div>}
+                    {xbResult.results.map((r) => (
+                      <div key={r.browser} className={`xb-result ${r.ok ? 'pass' : 'fail'}`}>
+                        <span className="xb-result-icon">{r.ok ? '✓' : '✗'}</span>
+                        <span className="xb-result-name">{r.browser}</span>
+                        {!r.ok && r.error && <span className="xb-result-error">{r.error}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="modal-footer">
+                  {xbRunning && (
+                    <span className="edge-count">
+                      Running on {xbSel.size} engine{xbSel.size === 1 ? '' : 's'}… (first WebKit run
+                      can take a minute)
+                    </span>
+                  )}
+                  <button className="modal-btn" onClick={() => setXbOpen(false)} disabled={xbRunning}>
+                    Close
+                  </button>
+                  <button
+                    className="modal-btn primary"
+                    onClick={handleRunXbrowser}
+                    disabled={xbRunning || xbSel.size === 0}
+                  >
+                    {xbRunning ? 'Running…' : `▶ Run on ${xbSel.size}`}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* F31: living-docs modal — defined once above, rendered in both screens
+          (per-test 📖 Docs here, library 📖 Suite docs on the welcome screen). */}
+      {docsModal}
+
       {/* === F13: accessibility scan panel — WCAG A/AA violations for the
            current page, grouped by rule, each expandable to the offending
            elements + how to fix. Safe over the native pane: setOverlay hides
@@ -6207,6 +6910,7 @@ function App(): React.JSX.Element {
                 <span className="saved-path">
                   Saved to {savedPath}
                   {exportCi && ' + .github/workflows/playwright.yml (hidden folder)'}
+                  {exportXbrowser && ' + playwright.config.ts'}
                 </span>
               )}
               {/* F33: opt-in — write a GitHub Actions workflow beside the spec so
@@ -6222,11 +6926,24 @@ function App(): React.JSX.Element {
                 />
                 ⚙️ CI workflow
               </label>
+              {/* F17: opt-in — write a cross-browser playwright.config.ts beside
+                  the spec so `npx playwright test` runs on all three engines. */}
+              <label
+                className="export-ci-toggle"
+                title="Also write playwright.config.ts — runs the exported test on Chromium + Firefox + WebKit"
+              >
+                <input
+                  type="checkbox"
+                  checked={exportXbrowser}
+                  onChange={(e) => setExportXbrowser(e.target.checked)}
+                />
+                🧭 Cross-browser config
+              </label>
               <button className="modal-btn" onClick={handleCopyExport}>
                 Copy
               </button>
               <button className="modal-btn primary" onClick={handleSaveExport}>
-                {exportPage || exportCi ? 'Save files' : 'Save .ts'}
+                {exportPage || exportCi || exportXbrowser ? 'Save files' : 'Save .ts'}
               </button>
             </div>
           </div>

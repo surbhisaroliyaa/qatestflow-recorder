@@ -4261,3 +4261,299 @@ body {
 .env-add-var:hover {
   background: #303c4a;
 }
+
+/* ===================================================
+   EDGE-CASE EXPLOSION (F20)
+   =================================================== */
+
+.edge-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #2a3542;
+}
+
+.edge-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #d0d8e0;
+  cursor: pointer;
+}
+
+.edge-warn {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e8c07a;
+  background: #2f2a1b;
+  border: 1px solid #5c4a1d;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.edge-warn code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: #ffe8a3;
+}
+
+.edge-warn-block {
+  margin: 12px 16px 0;
+}
+
+.edge-count {
+  margin-right: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: #9db4d0;
+}
+
+.edge-progress {
+  padding: 12px 16px;
+  font-size: 13px;
+  color: #cce4ff;
+  background: #1a2230;
+  border-bottom: 1px solid #2a3542;
+}
+
+.edge-summary {
+  display: flex;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #2a3542;
+}
+
+.edge-summary-accepted {
+  font-size: 13px;
+  font-weight: 700;
+  color: #e8908a;
+}
+
+.edge-summary-rejected {
+  font-size: 13px;
+  font-weight: 700;
+  color: #7fd39a;
+}
+
+.edge-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 16px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.edge-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  background: #181c22;
+  border: 1px solid #2a3542;
+  border-radius: 8px;
+}
+
+.edge-item.accepted {
+  border-color: #6b3232;
+  background: #241618;
+}
+
+.edge-badge {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.edge-badge.accepted {
+  background: #4a2020;
+  color: #f0a8a2;
+}
+
+.edge-badge.rejected {
+  background: #1c3324;
+  color: #7fd39a;
+}
+
+.edge-badge.unknown {
+  background: #333;
+  color: #aaa;
+}
+
+.edge-item-field {
+  font-size: 12px;
+  font-weight: 700;
+  color: #cce4ff;
+}
+
+.edge-group-chip {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: #26303c;
+  color: #aac4e4;
+}
+
+.edge-group-chip.injection {
+  background: #3a2430;
+  color: #e6a8d0;
+}
+
+.edge-group-chip.empty {
+  background: #2a2f38;
+  color: #b0bcc8;
+}
+
+.edge-group-chip.boundary {
+  background: #2a3320;
+  color: #c0d69a;
+}
+
+.edge-group-chip.invalid {
+  background: #33301c;
+  color: #e0d29a;
+}
+
+.edge-item-value {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  color: #d8d8d8;
+  background: #10141a;
+  padding: 1px 6px;
+  border-radius: 4px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.edge-item-hint {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: #c99a94;
+  padding-left: 2px;
+}
+
+.edge-foot-hint {
+  margin-right: auto;
+  font-size: 11px;
+  color: #8a96a4;
+  max-width: 55%;
+}
+
+/* ===================================================
+   CROSS-BROWSER RUNNER (F17)
+   =================================================== */
+
+.xb-install {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  background: #10141a;
+  border: 1px solid #2a3542;
+  border-radius: 6px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  color: #cce4ff;
+  white-space: pre;
+  user-select: text;
+}
+
+.xb-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #2a3542;
+}
+
+.xb-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #181c22;
+  border: 1px solid #2a3542;
+}
+
+.xb-result.pass {
+  border-color: #2f6b43;
+  background: #16241b;
+}
+
+.xb-result.fail {
+  border-color: #6b3232;
+  background: #241618;
+}
+
+.xb-result-icon {
+  font-weight: 800;
+  font-size: 14px;
+}
+
+.xb-result.pass .xb-result-icon {
+  color: #7fd39a;
+}
+
+.xb-result.fail .xb-result-icon {
+  color: #f0a8a2;
+}
+
+.xb-result-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #e0e0e0;
+  text-transform: capitalize;
+}
+
+.xb-result-error {
+  font-size: 11px;
+  color: #c99a94;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===================================================
+   OPTIONAL / CONDITIONAL STEPS (F26)
+   =================================================== */
+
+/* The ◇/◆ toggle on a step row, lit amber when the step is optional. */
+.step-action.optional-on {
+  color: #e0b050;
+}
+
+/* An optional step reads as "conditional" — a subtle amber left edge + a badge,
+   distinct from disabled (dimmed) and skipped (run-time amber). */
+.step-item.optional {
+  box-shadow: inset 3px 0 0 #8a6d2f;
+}
+
+.optional-badge {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #e0b050;
+  background: #2f2a1b;
+  border: 1px solid #5c4a1d;
+  border-radius: 9px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+/* ===================================================
+   LIVING DOCS (F31)
+   =================================================== */
+
+/* The doc is prose, not code — let long lines wrap instead of scrolling. */
+.doc-preview {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+}

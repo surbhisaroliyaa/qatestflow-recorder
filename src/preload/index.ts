@@ -86,7 +86,8 @@ const api = {
       pageObjectCode?: string,
       pageObjectFileName?: string,
       harFile?: string,
-      ciWorkflow?: string
+      ciWorkflow?: string,
+      configFile?: string
     ): Promise<string | null> =>
       ipcRenderer.invoke(
         'recorder:export',
@@ -96,7 +97,8 @@ const api = {
         pageObjectCode,
         pageObjectFileName,
         harFile,
-        ciWorkflow
+        ciWorkflow,
+        configFile
       ),
 
     // Day 16(+): pick a different file for an upload step. Shows an OS open
@@ -218,6 +220,16 @@ const api = {
     save: (env: unknown): Promise<unknown> => ipcRenderer.invoke('env:saveEnvironment', env),
     delete: (id: string): Promise<unknown> => ipcRenderer.invoke('env:deleteEnvironment', id),
     setActive: (id: string | null): Promise<unknown> => ipcRenderer.invoke('env:setActive', id)
+  },
+
+  // === Cross-browser replay (F17) ===
+  // Run the current test on real WebKit/Firefox/Chromium via Playwright (shelled
+  // out — the embedded engine is Chromium only). `check` reports install state.
+  xbrowser: {
+    check: (): Promise<{ installed: boolean; root: string | null }> =>
+      ipcRenderer.invoke('xbrowser:check'),
+    run: (specCode: string, browsers: string[]): Promise<unknown> =>
+      ipcRenderer.invoke('xbrowser:run', specCode, browsers)
   },
 
   // === Accessibility scan (F13) ===

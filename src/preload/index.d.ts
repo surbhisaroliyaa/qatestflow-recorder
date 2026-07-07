@@ -79,7 +79,8 @@ interface RecorderAPI {
     pageObjectCode?: string,
     pageObjectFileName?: string,
     harFile?: string, // F1: copy this .har into hars/ beside the exported spec
-    ciWorkflow?: string // F33: write .github/workflows/playwright.yml beside the spec
+    ciWorkflow?: string, // F33: write .github/workflows/playwright.yml beside the spec
+    configFile?: string // F17: write playwright.config.ts (cross-browser) beside the spec
   ) => Promise<string | null>
   pickUploadFile: () => Promise<string | null>
   revealDownload: (path: string) => Promise<void>
@@ -136,6 +137,27 @@ interface EnvironmentsAPI {
   delete: (id: string) => Promise<EnvState>
   // Select the active environment (null = run against recorded URLs); new state.
   setActive: (id: string | null) => Promise<EnvState>
+}
+
+// === Cross-browser replay (F17) ===
+type BrowserName = 'chromium' | 'firefox' | 'webkit'
+interface BrowserResult {
+  browser: BrowserName
+  ok: boolean
+  failingTest?: string
+  error?: string
+}
+interface CrossBrowserResult {
+  installed: boolean // was @playwright/test resolvable?
+  ran: boolean // did the test process actually run?
+  results: BrowserResult[]
+  message?: string // install hint / spawn error / missing-browser hint
+}
+interface XBrowserAPI {
+  // Is @playwright/test installed in the project? (root = where it was found)
+  check: () => Promise<{ installed: boolean; root: string | null }>
+  // Run the exported spec across the selected browsers; resolves per-browser.
+  run: (specCode: string, browsers: BrowserName[]) => Promise<CrossBrowserResult>
 }
 
 // === Accessibility scan (F13) ===
@@ -269,6 +291,7 @@ interface API {
   perf: PerfAPI
   har: HarAPI
   environments: EnvironmentsAPI
+  xbrowser: XBrowserAPI
 }
 
 declare global {
@@ -710,6 +733,10 @@ declare global {
     attrName?: string // for `attribute` asserts — WHICH attribute to check
     secret?: boolean // password field — value masked on screen / in export
     disabled?: boolean // turned off in the editor — skipped by replay + export
+    // F26 (conditional): this step MAY be absent (e.g. an optional cookie
+    // banner / promo popup). Replay skips it instead of failing when its element
+    // isn't found (with a shorter wait); export wraps it in try/catch.
+    optional?: boolean
     url?: string
     // Day 16(+): a `download` step's saved file path (for "Show in folder" and
     // the on-replay file check). The step's `value` holds the EXPECTED filename

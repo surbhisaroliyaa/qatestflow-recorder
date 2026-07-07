@@ -94,8 +94,10 @@ import {
   deleteEnvironment,
   setActiveEnvironment,
   activeEnvVars,
+  activeEnvironment,
   type Environment
 } from './environments'
+import { checkPlaywright, runCrossBrowser, type BrowserName } from './xbrowser'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -2901,6 +2903,16 @@ function createWindow(): void {
         } catch (err) {
           onPopupOpened = null // disarm any popup hook if the step failed
           const message = err instanceof Error ? err.message : String(err)
+          // F26 (optional step): this step is allowed to be absent — an optional
+          // cookie banner / promo popup that didn't appear. A failure here is NOT
+          // a test failure: mark it skipped and continue, before any heal/pause.
+          // (It uses a shorter find timeout, so an absent element doesn't stall.)
+          if (step.optional) {
+            mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'skipped' })
+            await captureTraceStep(i, 'skipped', stepStartMs)
+            await wait(200)
+            continue
+          }
           // F4 (self-heal 2.0): a healable failure is a SELECTOR break (the
           // element wasn't found) — not an assertion mismatch or a wrong-state
           // element, where the selector is fine and re-finding wouldn't help.
@@ -3169,6 +3181,21 @@ function createWindow(): void {
   ipcMain.handle('env:saveEnvironment', (_event, env: Environment) => saveEnvironment(env))
   ipcMain.handle('env:deleteEnvironment', (_event, id: string) => deleteEnvironment(id))
   ipcMain.handle('env:setActive', (_event, id: string | null) => setActiveEnvironment(id))
+
+  // === Cross-browser replay (F17) ====================================
+  // Chromium is the embedded engine; WebKit/Firefox can only run via REAL
+  // Playwright, shelled out. `check` reports whether it's installed; `run`
+  // exports the current test to a temp spec and runs it per selected browser.
+  ipcMain.handle('xbrowser:check', () => checkPlaywright())
+  ipcMain.handle('xbrowser:run', async (_event, specCode: string, browsers: BrowserName[]) => {
+    // Bridge the active F25 environment: its vars feed process.env.* in the spec,
+    // and its base URL feeds process.env.BASE_URL (the export reads that).
+    const env = await activeEnvironment()
+    const envVars: Record<string, string> = {}
+    for (const v of env?.vars ?? []) if (v.name) envVars[v.name] = v.value
+    if (env?.baseURL) envVars.BASE_URL = env.baseURL
+    return runCrossBrowser(specCode, browsers, envVars)
+  })
   ipcMain.handle('library:list', () => listTests())
   ipcMain.handle('library:listSuites', () => listSuites())
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))
@@ -3454,7 +3481,8 @@ function createWindow(): void {
       pageObjectCode?: string,
       pageObjectFileName?: string,
       harFile?: string,
-      ciWorkflow?: string
+      ciWorkflow?: string,
+      configFile?: string
     ): Promise<string | null> => {
       const result = await dialog.showSaveDialog(mainWindow, {
         title: 'Save Playwright test',
@@ -3511,6 +3539,15 @@ function createWindow(): void {
         const wfDir = join(dirname(result.filePath), '.github', 'workflows')
         await mkdir(wfDir, { recursive: true }).catch(() => {})
         await writeFile(join(wfDir, 'playwright.yml'), ciWorkflow, 'utf-8').catch(() => {})
+      }
+      // F17: a cross-browser playwright.config.ts written beside the spec, so
+      // `npx playwright test` runs it on Chromium + Firefox + WebKit.
+      if (configFile) {
+        await writeFile(
+          join(dirname(result.filePath), 'playwright.config.ts'),
+          configFile,
+          'utf-8'
+        ).catch(() => {})
       }
       return result.filePath
     }
