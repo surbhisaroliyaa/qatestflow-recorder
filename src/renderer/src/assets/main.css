@@ -3910,3 +3910,354 @@ body {
   font-size: 11px;
   color: #8a96a4;
 }
+
+/* ===================================================
+   ENVIRONMENT / CONFIG MANAGER (F25)
+   =================================================== */
+
+/* The "Run against" bar in the library — picks the active environment for
+   Run All / Run selected. */
+.env-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  background: #171b22;
+  border: 1px solid #2a3542;
+  border-radius: 8px;
+}
+
+.env-bar-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #9db4d0;
+}
+
+.env-bar-select {
+  height: 28px;
+  padding: 0 8px;
+  background: #1e1e1e;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.env-bar-base {
+  font-size: 11px;
+  color: #6fae7a;
+  font-family: 'Consolas', 'Monaco', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-bar-manage {
+  margin-left: auto;
+  height: 28px;
+  padding: 0 12px;
+  background: #26303c;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  color: #cce4ff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.env-bar-manage:hover {
+  background: #303c4a;
+}
+
+/* The environment badge in the workspace test-bar. */
+.test-env-chip {
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  background: #26303c;
+  border: 1px solid #3a4a5e;
+  border-radius: 11px;
+  color: #8aa3c0;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.test-env-chip:hover {
+  background: #303c4a;
+  color: #cce4ff;
+}
+
+.test-env-chip.active {
+  background: #1c3324;
+  border-color: #2f6b43;
+  color: #7fd39a;
+}
+
+/* The manager modal — a touch narrower than the code modals. */
+.env-modal {
+  width: 620px;
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e1e;
+  border: 1px solid #444;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.env-list,
+.env-edit {
+  padding: 16px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.env-list-intro {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #9aa7b4;
+}
+
+.env-list-intro code,
+.env-vars-hint code,
+.env-field-help code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: #cce4ff;
+  background: #26303c;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.env-empty,
+.env-vars-empty {
+  padding: 14px;
+  text-align: center;
+  font-size: 12px;
+  color: #7a869a;
+  background: #181c22;
+  border: 1px dashed #2f3a47;
+  border-radius: 6px;
+}
+
+.env-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.env-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: #181c22;
+  border: 1px solid #2a3542;
+  border-radius: 8px;
+}
+
+.env-item.active {
+  border-color: #2f6b43;
+  background: #16241b;
+}
+
+.env-item-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.env-item-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #e0e0e0;
+}
+
+.env-item-base {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #7fae8a;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.env-item-vars {
+  font-size: 11px;
+  color: #8a96a4;
+}
+
+.env-item-btn {
+  height: 26px;
+  padding: 0 10px;
+  background: #2a2a2a;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  color: #d0d0d0;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.env-item-btn:hover {
+  background: #363636;
+}
+
+.env-item-btn.danger {
+  color: #e8908a;
+  border-color: #5a3838;
+}
+
+.env-item-btn.danger:hover {
+  background: #3a2424;
+}
+
+/* The edit form. */
+.env-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.env-field-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #9db4d0;
+}
+
+.env-field-input {
+  height: 32px;
+  padding: 0 10px;
+  background: #181c22;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.env-field-input:focus {
+  border-color: #4a6cf7;
+}
+
+.env-field-help {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #7a869a;
+  margin-top: -4px;
+}
+
+.env-vars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #2a3542;
+}
+
+.env-vars-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.env-vars-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #7a869a;
+}
+
+.env-var-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.env-var-name {
+  width: 34%;
+  height: 30px;
+  padding: 0 8px;
+  background: #181c22;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  color: #cce4ff;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  outline: none;
+}
+
+.env-var-value {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  background: #181c22;
+  border: 1px solid #3a4a5e;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+
+.env-var-name:focus,
+.env-var-value:focus {
+  border-color: #4a6cf7;
+}
+
+.env-var-secret {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #8a96a4;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.env-var-remove {
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid #4a3a3a;
+  border-radius: 6px;
+  color: #c98a8a;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.env-var-remove:hover {
+  background: #3a2424;
+}
+
+.env-add-var {
+  align-self: flex-start;
+  height: 28px;
+  padding: 0 12px;
+  background: #26303c;
+  border: 1px dashed #3a4a5e;
+  border-radius: 6px;
+  color: #aac4e4;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.env-add-var:hover {
+  background: #303c4a;
+}

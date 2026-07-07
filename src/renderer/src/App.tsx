@@ -7,6 +7,7 @@ import {
 } from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
+import { retargetSteps } from './environments'
 import { classifyRuns, type FlakyTag } from './flaky'
 import { trustScore } from './trust'
 import { findWeakAssertions } from './deadAssertions'
@@ -290,6 +291,18 @@ function App(): React.JSX.Element {
   // Inline editing of the test's base URL (the environment switch).
   const [editingBase, setEditingBase] = useState(false)
   const [baseEditValue, setBaseEditValue] = useState('')
+  // F25 (environment manager): named { baseURL + credentials } environments, one
+  // active at a time — so the WHOLE suite can run against dev / staging / prod
+  // without editing (or duplicating) a single test. The active env re-points
+  // navigations at run time AND supplies the {{env:NAME}} credential values.
+  const [envState, setEnvState] = useState<EnvState>({
+    version: 1,
+    activeId: null,
+    environments: []
+  })
+  const [envManagerOpen, setEnvManagerOpen] = useState(false)
+  // The environment being edited in the manager (null = the list view).
+  const [envDraft, setEnvDraft] = useState<Environment | null>(null)
   // Day 11.5 — sections (suites). The section list, the current test's
   // section, and the save panel's chosen/typed section.
   const [suites, setSuites] = useState<string[]>([])
@@ -576,6 +589,41 @@ function App(): React.JSX.Element {
     }
   }, [hasNavigated])
 
+  // F25: load the saved environments once (they persist in userData, app-wide).
+  useEffect(() => {
+    window.api.environments.list().then(setEnvState)
+  }, [])
+
+  // The active environment (null = run against each test's recorded URLs +
+  // process.env — the pre-F25 behavior).
+  const activeEnv = envState.environments.find((e) => e.id === envState.activeId) ?? null
+
+  // F25 mutations — each resolves the whole new state, so the UI stays in sync.
+  const setActiveEnv = async (id: string | null): Promise<void> =>
+    setEnvState(await window.api.environments.setActive(id))
+  const saveEnv = async (env: Environment): Promise<void> =>
+    setEnvState(await window.api.environments.save(env))
+  const deleteEnv = async (id: string): Promise<void> =>
+    setEnvState(await window.api.environments.delete(id))
+
+  // F25: apply the active environment to a run, on a COPY of the steps —
+  // (1) resolve {{env:NAME}} credential tokens (main merges the env's vars over
+  // process.env), and (2) re-point navigations from `fromBase` to the env's base
+  // URL. The saved test is never rewritten. A no-op when there's nothing to do
+  // (no env tokens AND no active base URL), so plain tests are unaffected.
+  const applyEnv = async (flat: RecorderStep[], fromBase: string): Promise<RecorderStep[]> => {
+    let list = flat
+    const names = envVarNames(flat, [])
+    if (names.length) {
+      const envMap = await window.api.recorder.resolveEnv(names)
+      list = substituteSteps(list, {}, envMap)
+    }
+    if (activeEnv?.baseURL) {
+      list = retargetSteps(list, fromBase || deriveBaseURL(flat), activeEnv.baseURL)
+    }
+    return list
+  }
+
   // Day 18: auto-save the current UNSAVED recording as a draft (debounced), so
   // a forgotten Save never loses work. Saved tests persist via the library, so
   // they're skipped here. Once steps exist, a draft id is minted and reused.
@@ -816,7 +864,8 @@ function App(): React.JSX.Element {
         traceView !== null ||
         a11yPanelOpen ||
         perfPanelOpen ||
-        historyOpen
+        historyOpen ||
+        envManagerOpen
     )
   }, [
     exportCode,
@@ -826,7 +875,8 @@ function App(): React.JSX.Element {
     traceView,
     a11yPanelOpen,
     perfPanelOpen,
-    historyOpen
+    historyOpen,
+    envManagerOpen
   ])
 
   // Day 18: remember the trace policy across sessions.
@@ -1341,12 +1391,15 @@ function App(): React.JSX.Element {
     if (isDataDriven) {
       const row = dataRows[0] ?? {}
       const envMap = await window.api.recorder.resolveEnv(envVarNames(flat, [row]))
-      const list = substituteSteps(flat, resolveRow(row, envMap), envMap)
+      let list = substituteSteps(flat, resolveRow(row, envMap), envMap)
+      if (activeEnv?.baseURL) list = retargetSteps(list, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
       await runOnce(list, testFileName, false)
       return
     }
     setDataRun(null) // a plain single replay clears any stale matrix banner
-    await runOnce(flat, testFileName, true)
+    // F25: resolve {{env:}} creds + re-point navigations at the active env (if any).
+    const list = await applyEnv(flat, baseURL || deriveBaseURL(flat))
+    await runOnce(list, testFileName, true)
   }
 
   // === Day 20: data-driven runs ======================================
@@ -1404,7 +1457,10 @@ function App(): React.JSX.Element {
     for (let i = 0; i < dataRows.length; i++) {
       const label = rowLabel(dataRows[i], i)
       setDataRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: label } : prev))
-      const list = substituteSteps(flat, resolveRow(dataRows[i], envMap), envMap)
+      let list = substituteSteps(flat, resolveRow(dataRows[i], envMap), envMap)
+      // F25: re-point navigations at the active environment (creds already
+      // resolved above via envMap, which main sourced from the active env).
+      if (activeEnv?.baseURL) list = retargetSteps(list, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
       // fileName null: don't stamp a run per row — record ONE aggregate below.
       const result = await runOnce(list, null, false)
       if (result.aborted) {
@@ -1863,8 +1919,13 @@ function App(): React.JSX.Element {
         // never reach the replay engine — it only understands real steps).
         const { flat: flatSuite, map: suiteMap } = await buildRunPlan(data.steps as RecorderStep[])
         runPlanRef.current = suiteMap
+        // F25: run this test against the active environment — resolve its
+        // {{env:}} creds + re-point its navigations (its OWN recorded base is the
+        // anchor). No active env → unchanged. This is the scale win: one Run All,
+        // every test against staging/prod in one click.
+        const listSuite = await applyEnv(flatSuite, data.baseURL || deriveBaseURL(flatSuite))
         // F1: each test in the suite replays against its own saved HAR, if any.
-        const result = await runOnce(flatSuite, t.fileName, false, data.storageState, data.har)
+        const result = await runOnce(listSuite, t.fileName, false, data.storageState, data.har)
         entry = {
           fileName: t.fileName,
           name: data.name,
@@ -2695,6 +2756,36 @@ function App(): React.JSX.Element {
                 </span>
               </div>
 
+              {/* F25 (environment manager): pick which environment the whole
+                  library runs against — Run All / Run selected honor it. */}
+              <div className="env-bar">
+                <span className="env-bar-label">🌐 Run against</span>
+                <select
+                  className="env-bar-select"
+                  value={envState.activeId ?? ''}
+                  onChange={(e) => setActiveEnv(e.target.value || null)}
+                  title="The environment every test runs against — its base URL re-points navigations and its variables fill {{env:NAME}} credentials. The saved tests are never changed."
+                >
+                  <option value="">Recorded URLs (default)</option>
+                  {envState.environments.map((env) => (
+                    <option key={env.id} value={env.id}>
+                      {env.name}
+                    </option>
+                  ))}
+                </select>
+                {activeEnv?.baseURL && <span className="env-bar-base">{activeEnv.baseURL}</span>}
+                <button
+                  type="button"
+                  className="env-bar-manage"
+                  onClick={() => {
+                    setEnvDraft(null)
+                    setEnvManagerOpen(true)
+                  }}
+                >
+                  Manage…
+                </button>
+              </div>
+
               {/* A1 (scalable library): search + status filters, so a big library
                   stays navigable. Only shown once there are a few tests. */}
               {savedTests.length > 3 && (
@@ -3321,6 +3412,24 @@ function App(): React.JSX.Element {
                   {baseURL || 'no base URL'}
                 </button>
               )}
+              {/* F25: a live badge of the environment this test will run against.
+                  Click to switch or manage. Green when an env is active so it's
+                  obvious you're NOT running the recorded URLs. */}
+              <button
+                type="button"
+                className={`test-env-chip${activeEnv ? ' active' : ''}`}
+                onClick={() => {
+                  setEnvDraft(null)
+                  setEnvManagerOpen(true)
+                }}
+                title={
+                  activeEnv
+                    ? `Running against "${activeEnv.name}" (${activeEnv.baseURL || 'no base URL'}). Click to switch or manage environments.`
+                    : 'Running against the recorded URLs. Click to set up dev / staging / prod environments.'
+                }
+              >
+                🌐 {activeEnv ? activeEnv.name : 'recorded URLs'}
+              </button>
             </div>
           )}
           <div className="steps-header">
@@ -5359,6 +5468,248 @@ function App(): React.JSX.Element {
                 ↩ Restore this version
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* === F25: environment / config manager. List of environments (base URL +
+           credentials); pick one active, or open one to edit. Safe over the
+           native pane — setOverlay hides it while this is open (the F30 lesson:
+           a modal behind the WebContentsView is invisible). === */}
+      {envManagerOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            setEnvManagerOpen(false)
+            setEnvDraft(null)
+          }}
+        >
+          <div className="env-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">
+                🌐 Environments
+                {envDraft && ` · ${envDraft.name || 'new environment'}`}
+              </span>
+              <button
+                className="modal-close"
+                onClick={() => {
+                  setEnvManagerOpen(false)
+                  setEnvDraft(null)
+                }}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {envDraft ? (
+              // --- Edit one environment ---
+              <div className="env-edit">
+                <label className="env-field">
+                  <span className="env-field-label">Name</span>
+                  <input
+                    className="env-field-input"
+                    value={envDraft.name}
+                    placeholder="e.g. Staging"
+                    onChange={(e) => setEnvDraft({ ...envDraft, name: e.target.value })}
+                    autoFocus
+                    spellCheck={false}
+                  />
+                </label>
+                <label className="env-field">
+                  <span className="env-field-label">Base URL</span>
+                  <input
+                    className="env-field-input"
+                    value={envDraft.baseURL}
+                    placeholder="https://staging.example.com"
+                    onChange={(e) => setEnvDraft({ ...envDraft, baseURL: e.target.value })}
+                    spellCheck={false}
+                  />
+                </label>
+                <div className="env-field-help">
+                  At run time, every navigation recorded under a test’s own base URL
+                  is re-pointed here — the saved test is never changed.
+                </div>
+
+                <div className="env-vars">
+                  <div className="env-vars-head">
+                    <span className="env-field-label">Variables</span>
+                    <span className="env-vars-hint">
+                      Referenced in steps as <code>{'{{env:NAME}}'}</code> — e.g. a login
+                      field. Each environment supplies its own values.
+                    </span>
+                  </div>
+                  {envDraft.vars.length === 0 && (
+                    <div className="env-vars-empty">No variables yet.</div>
+                  )}
+                  {envDraft.vars.map((v, vi) => (
+                    <div key={vi} className="env-var-row">
+                      <input
+                        className="env-var-name"
+                        value={v.name}
+                        placeholder="NAME"
+                        onChange={(e) =>
+                          setEnvDraft({
+                            ...envDraft,
+                            vars: envDraft.vars.map((x, i) =>
+                              i === vi ? { ...x, name: e.target.value } : x
+                            )
+                          })
+                        }
+                        spellCheck={false}
+                      />
+                      <input
+                        className="env-var-value"
+                        type={v.secret ? 'password' : 'text'}
+                        value={v.value}
+                        placeholder="value"
+                        onChange={(e) =>
+                          setEnvDraft({
+                            ...envDraft,
+                            vars: envDraft.vars.map((x, i) =>
+                              i === vi ? { ...x, value: e.target.value } : x
+                            )
+                          })
+                        }
+                        spellCheck={false}
+                      />
+                      <label className="env-var-secret" title="Mask this value on screen (a password)">
+                        <input
+                          type="checkbox"
+                          checked={!!v.secret}
+                          onChange={(e) =>
+                            setEnvDraft({
+                              ...envDraft,
+                              vars: envDraft.vars.map((x, i) =>
+                                i === vi ? { ...x, secret: e.target.checked } : x
+                              )
+                            })
+                          }
+                        />
+                        secret
+                      </label>
+                      <button
+                        type="button"
+                        className="env-var-remove"
+                        aria-label="Remove variable"
+                        onClick={() =>
+                          setEnvDraft({
+                            ...envDraft,
+                            vars: envDraft.vars.filter((_, i) => i !== vi)
+                          })
+                        }
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="env-add-var"
+                    onClick={() =>
+                      setEnvDraft({
+                        ...envDraft,
+                        vars: [...envDraft.vars, { name: '', value: '' }]
+                      })
+                    }
+                  >
+                    + Add variable
+                  </button>
+                </div>
+
+                <div className="modal-footer">
+                  <button className="modal-btn" onClick={() => setEnvDraft(null)}>
+                    Cancel
+                  </button>
+                  <button
+                    className="modal-btn primary"
+                    disabled={!envDraft.name.trim()}
+                    onClick={async () => {
+                      // Drop half-typed variable rows (no name) before saving.
+                      const clean: Environment = {
+                        ...envDraft,
+                        name: envDraft.name.trim(),
+                        baseURL: envDraft.baseURL.trim().replace(/\/+$/, ''),
+                        vars: envDraft.vars.filter((v) => v.name.trim())
+                      }
+                      await saveEnv(clean)
+                      setEnvDraft(null)
+                    }}
+                  >
+                    Save environment
+                  </button>
+                </div>
+              </div>
+            ) : (
+              // --- List of environments ---
+              <div className="env-list">
+                <p className="env-list-intro">
+                  Define your dev / staging / prod environments once, then run any test —
+                  or the whole suite — against any of them. The active environment
+                  re-points navigations and fills <code>{'{{env:NAME}}'}</code> credentials.
+                </p>
+                {envState.environments.length === 0 ? (
+                  <div className="env-empty">No environments yet — add your first.</div>
+                ) : (
+                  <ul className="env-items">
+                    {envState.environments.map((env) => (
+                      <li
+                        key={env.id}
+                        className={`env-item${env.id === envState.activeId ? ' active' : ''}`}
+                      >
+                        <label className="env-item-pick" title="Make this the active environment">
+                          <input
+                            type="radio"
+                            name="active-env"
+                            checked={env.id === envState.activeId}
+                            onChange={() => setActiveEnv(env.id)}
+                          />
+                          <span className="env-item-name">{env.name}</span>
+                        </label>
+                        <span className="env-item-base">{env.baseURL || 'no base URL'}</span>
+                        <span className="env-item-vars">
+                          {env.vars.length} var{env.vars.length === 1 ? '' : 's'}
+                        </span>
+                        <button
+                          type="button"
+                          className="env-item-btn"
+                          onClick={() => setEnvDraft(env)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="env-item-btn danger"
+                          onClick={() => {
+                            if (window.confirm(`Delete environment "${env.name}"?`)) deleteEnv(env.id)
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="modal-footer">
+                  <button
+                    className="modal-btn"
+                    onClick={() => setActiveEnv(null)}
+                    disabled={!envState.activeId}
+                    title="Run against each test's own recorded URLs"
+                  >
+                    Use recorded URLs
+                  </button>
+                  <button
+                    className="modal-btn primary"
+                    onClick={() =>
+                      setEnvDraft({ id: `env-${Date.now()}`, name: '', baseURL: '', vars: [] })
+                    }
+                  >
+                    + Add environment
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

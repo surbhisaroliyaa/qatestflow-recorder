@@ -88,6 +88,14 @@ import {
   type TraceManifest,
   type TraceStepRecord
 } from './trace'
+import {
+  getEnvState,
+  saveEnvironment,
+  deleteEnvironment,
+  setActiveEnvironment,
+  activeEnvVars,
+  type Environment
+} from './environments'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -3137,17 +3145,30 @@ function createWindow(): void {
     ) => saveTest({ ...input, harLog: input.captureHar ? lastCapturedHar : undefined })
   )
 
-  // === Data-driven (Day 20) ==========================================
-  // Resolve {{env:NAME}} tokens against this process's environment, so a real
-  // secret stays out of the saved test + the export. Missing var → '' (the
-  // step then runs with an empty value, which fails honestly).
-  ipcMain.handle('env:get', (_event, names: string[]): Record<string, string> => {
+  // === Data-driven (Day 20) + Environments (F25) =====================
+  // Resolve {{env:NAME}} tokens for a run. The ACTIVE environment's vars (F25)
+  // win, then the real process environment fills the rest — so `{{env:PASSWORD}}`
+  // is this environment's password when one is selected, and the shell's
+  // otherwise. Missing everywhere → '' (the step runs empty and fails honestly),
+  // keeping a secret out of the saved test + the export.
+  ipcMain.handle('env:get', async (_event, names: string[]): Promise<Record<string, string>> => {
+    const envVars = await activeEnvVars()
     const out: Record<string, string> = {}
     for (const name of Array.isArray(names) ? names : []) {
-      out[name] = process.env[name] ?? ''
+      out[name] = envVars[name] ?? process.env[name] ?? ''
     }
     return out
   })
+
+  // === Environment / config manager (F25) ============================
+  // CRUD + active selection for named { baseURL + credentials } environments,
+  // persisted in userData (they hold secrets — kept out of the shared Tests
+  // folder). Each mutation returns the whole new state so the renderer stays in
+  // sync in one round-trip.
+  ipcMain.handle('env:listEnvironments', () => getEnvState())
+  ipcMain.handle('env:saveEnvironment', (_event, env: Environment) => saveEnvironment(env))
+  ipcMain.handle('env:deleteEnvironment', (_event, id: string) => deleteEnvironment(id))
+  ipcMain.handle('env:setActive', (_event, id: string | null) => setActiveEnvironment(id))
   ipcMain.handle('library:list', () => listTests())
   ipcMain.handle('library:listSuites', () => listSuites())
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))

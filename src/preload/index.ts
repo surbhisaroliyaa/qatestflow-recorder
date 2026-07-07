@@ -202,10 +202,22 @@ const api = {
     // Day 19: capture the current page as a visual baseline + add a snapshot step.
     snapshot: (): Promise<void> => ipcRenderer.invoke('recorder:snapshot'),
 
-    // Day 20 (data-driven): resolve {{env:NAME}} tokens from the real process
-    // environment for a run (renderer can't read arbitrary env vars itself).
+    // Day 20 (data-driven): resolve {{env:NAME}} tokens for a run — the active
+    // F25 environment's vars first, then the real process environment (renderer
+    // can't read arbitrary env vars itself).
     resolveEnv: (names: string[]): Promise<Record<string, string>> =>
       ipcRenderer.invoke('env:get', names)
+  },
+
+  // === Environment / config manager (F25) ===
+  // Named { baseURL + credentials } environments; pick one active to run the
+  // whole suite against dev / staging / prod. Every mutation resolves to the
+  // full new state.
+  environments: {
+    list: (): Promise<unknown> => ipcRenderer.invoke('env:listEnvironments'),
+    save: (env: unknown): Promise<unknown> => ipcRenderer.invoke('env:saveEnvironment', env),
+    delete: (id: string): Promise<unknown> => ipcRenderer.invoke('env:deleteEnvironment', id),
+    setActive: (id: string | null): Promise<unknown> => ipcRenderer.invoke('env:setActive', id)
   },
 
   // === Accessibility scan (F13) ===

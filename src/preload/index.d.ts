@@ -126,6 +126,18 @@ interface RecorderAPI {
   resolveEnv: (names: string[]) => Promise<Record<string, string>>
 }
 
+// === Environment / config manager (F25) ===
+interface EnvironmentsAPI {
+  // The full store: environments + which is active.
+  list: () => Promise<EnvState>
+  // Create/update one environment (matched by id); resolves the new state.
+  save: (env: Environment) => Promise<EnvState>
+  // Remove an environment; resolves the new state (active cleared if it was it).
+  delete: (id: string) => Promise<EnvState>
+  // Select the active environment (null = run against recorded URLs); new state.
+  setActive: (id: string | null) => Promise<EnvState>
+}
+
 // === Accessibility scan (F13) ===
 interface A11yAPI {
   // Inject axe-core + run WCAG A/AA on the active tab. Never rejects — a page
@@ -256,9 +268,30 @@ interface API {
   a11y: A11yAPI
   perf: PerfAPI
   har: HarAPI
+  environments: EnvironmentsAPI
 }
 
 declare global {
+  // === Environment / config manager (F25) ===
+  // MIRROR: same shapes as EnvVar / Environment / EnvState in
+  // src/main/environments.ts.
+  interface EnvVar {
+    name: string
+    value: string
+    secret?: boolean
+  }
+  interface Environment {
+    id: string
+    name: string
+    baseURL: string
+    vars: EnvVar[]
+  }
+  interface EnvState {
+    version: 1
+    activeId: string | null
+    environments: Environment[]
+  }
+
   // F8: what changed on the page vs the last green run (MIRROR of src/main/domDiff.ts).
   interface ElementChange {
     desc: string
