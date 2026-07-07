@@ -24,6 +24,13 @@ export function generateCiWorkflow(secretNames: string[] = []): string {
 # Assumes a Playwright project (package.json + a playwright config). If the
 # exported spec uses {{env:NAME}} values, add each NAME under repo Settings →
 # Secrets and variables → Actions.
+# To run against a specific environment (F25), give the "Run Playwright tests"
+# step a BASE_URL — the exported spec reads process.env.BASE_URL and otherwise
+# falls back to the recorded URL. Example:
+#   - name: Run Playwright tests
+#     run: npx playwright test
+#     env:
+#       BASE_URL: https://staging.example.com
 name: Playwright Tests
 on:
   push:
@@ -308,8 +315,9 @@ function dialogHandler(step: RecorderStep, pageVar: string): string {
 
 // The actual Playwright action for one step (without the leading comment).
 // `baseURL`: when a navigate's URL lives under it, emit just the PATH —
-// `test.use({ baseURL })` (added by the generator) resolves it at runtime, so
-// retargeting the suite at another environment means editing ONE line.
+// `test.use({ baseURL })` (added by the generator, itself reading
+// process.env.BASE_URL — F25) resolves it at runtime, so retargeting the whole
+// suite at another environment is one BASE_URL env var, no file edit.
 function actionFor(
   step: RecorderStep,
   baseURL: string | undefined,
@@ -506,7 +514,7 @@ function actionFor(
 
 // Build the whole test file from the recorded steps. Day 11: a saved test
 // contributes its NAME (the test title) and its BASE URL (emitted once as
-// test.use — the single line to edit when pointing at another environment).
+// test.use, reading process.env.BASE_URL so CI can point it at any environment).
 export function generatePlaywrightTest(
   steps: RecorderStep[],
   options?: {
@@ -622,8 +630,13 @@ export function generatePlaywrightTest(
     (hasDownload ? "import fs from 'fs'\n" : '')
   // Day 17: test.use carries baseURL and (when a session is attached) the
   // storageState path, so the exported test starts logged in.
+  // F25: the baseURL reads process.env.BASE_URL first, defaulting to the recorded
+  // base — so CI can point the SAME spec at dev/staging/prod with
+  // `BASE_URL=https://staging… npx playwright test`, no file edit (the export
+  // twin of the in-app "Run against" environment switch). Navigations are already
+  // emitted relative to the base, so overriding this one value retargets them all.
   const useProps: string[] = []
-  if (baseURL) useProps.push(`baseURL: ${quote(baseURL)}`)
+  if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
   if (options?.storageState) {
     useProps.push(`storageState: ${quote(`sessions/${options.storageState}`)}`)
   }
@@ -632,7 +645,10 @@ export function generatePlaywrightTest(
       `viewport: { width: ${options.viewport.width}, height: ${options.viewport.height} }`
     )
   }
-  const use = useProps.length ? `\ntest.use({ ${useProps.join(', ')} })\n` : ''
+  const useComment = baseURL
+    ? '// Base URL — override per environment in CI with the BASE_URL env var.\n'
+    : ''
+  const use = useProps.length ? `\n${useComment}test.use({ ${useProps.join(', ')} })\n` : ''
 
   // Day 20 (data-driven): emit a `dataset` array and run the same body once per
   // row inside a for-loop, giving each row its own test (named by the first
@@ -877,7 +893,7 @@ export function generatePageObjectTest(
   const hasAssert = enabled.some((s) => s.type === 'assert') || hasA11y || hasPerf
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const useProps: string[] = []
-  if (baseURL) useProps.push(`baseURL: ${quote(baseURL)}`)
+  if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
   if (options?.storageState) {
     useProps.push(`storageState: ${quote(`sessions/${options.storageState}`)}`)
   }
@@ -886,7 +902,11 @@ export function generatePageObjectTest(
       `viewport: { width: ${options.viewport.width}, height: ${options.viewport.height} }`
     )
   }
-  const use = useProps.length ? `\ntest.use({ ${useProps.join(', ')} })\n` : ''
+  // F25: same env-overridable baseURL as the inline export (see there).
+  const useComment = baseURL
+    ? '// Base URL — override per environment in CI with the BASE_URL env var.\n'
+    : ''
+  const use = useProps.length ? `\n${useComment}test.use({ ${useProps.join(', ')} })\n` : ''
   const importLines =
     (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
     `import ${imports} from '@playwright/test'\n` +
