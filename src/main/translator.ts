@@ -199,8 +199,10 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
     )
   }
 
-  // Found, but never actionable — classic slow-page territory.
-  if (err.includes('never became visible/enabled')) {
+  // Found, but never actionable — classic slow-page territory. replay.ts splits
+  // this into two messages ("never became visible" / "stayed disabled") so an
+  // optional step can skip the hidden case; both land here for triage.
+  if (err.includes('never became visible') || err.includes('stayed disabled')) {
     if (hasJsErrors || serverErrors.length) {
       return finish(
         'app-bug',

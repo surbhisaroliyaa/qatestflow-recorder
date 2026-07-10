@@ -2912,20 +2912,36 @@ function createWindow(): void {
         } catch (err) {
           onPopupOpened = null // disarm any popup hook if the step failed
           const message = err instanceof Error ? err.message : String(err)
-          // F26 (optional step): this step is allowed to be absent — an optional
-          // cookie banner / promo popup that didn't appear. A failure here is NOT
-          // a test failure: mark it skipped and continue, before any heal/pause.
-          // (It uses a shorter find timeout, so an absent element doesn't stall.)
-          if (step.optional) {
+          // F4 (self-heal 2.0): a healable failure is a SELECTOR break (the
+          // element wasn't found) — not an assertion mismatch or a wrong-state
+          // element, where the selector is fine and re-finding wouldn't help.
+          const selectorBroke = /element not found|no reliable selector/i.test(message)
+          // F26 (optional step): the step is allowed to be UNREACHABLE — a cookie
+          // banner or promo modal that never appeared, or that a previous step
+          // already dismissed. Mark it skipped and continue, before any
+          // heal/pause. (Optional steps use a shorter find timeout, so an absent
+          // element doesn't stall the run.)
+          //
+          // "Unreachable" is drawn where a USER would draw it: not in the DOM, or
+          // in the DOM but invisible. Real banners do both — some unmount, some
+          // just set display:none. A VISIBLE-but-disabled control is deliberately
+          // excluded: the user can see it and cannot use it, which is a genuine
+          // defect. Skipping that would turn an optional step into something that
+          // can never fail — the dead-check disease F6 exists to catch. Likewise
+          // an assertion mismatch (the element was found and read wrong) fails.
+          //
+          // Kept separate from `selectorBroke`, which gates SELF-HEAL: re-finding
+          // helps when a selector is stale, not when an element is merely hidden.
+          const unreachable = selectorBroke || /never became visible/i.test(message)
+          //
+          // Runs BEFORE computeHeal: healing an element that is legitimately
+          // absent is wasted capture work, and risks healing onto the wrong one.
+          if (step.optional && unreachable) {
             mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'skipped' })
             await captureTraceStep(i, 'skipped', stepStartMs)
             await wait(200)
             continue
           }
-          // F4 (self-heal 2.0): a healable failure is a SELECTOR break (the
-          // element wasn't found) — not an assertion mismatch or a wrong-state
-          // element, where the selector is fine and re-finding wouldn't help.
-          const selectorBroke = /element not found|no reliable selector/i.test(message)
           // Run the multi-signal heal ONCE (it does capture work) and reuse the
           // result for both the auto-heal decision and the manual-pick panel.
           const heal = selectorBroke ? await computeHeal(step, i) : undefined

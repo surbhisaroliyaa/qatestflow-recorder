@@ -395,6 +395,24 @@ export function testIdPolicy(steps: RecorderStep[]): {
   return { portable: true } // unknown (legacy) or mixed → no single attribute works
 }
 
+// F26: an optional step (a cookie banner that may not appear) is wrapped in
+// try/catch so its ABSENCE is skipped rather than failing the test — matching
+// how replay treats it. Shared by the inline and page-object exports so the
+// same test exported two ways behaves the same way.
+//
+// Caveat, same as in-app: this catch swallows any error from the action, not
+// only "element not found". Playwright has no "fail only if present" primitive
+// short of an explicit count()/isVisible() guard, so a wrapped optional ASSERT
+// is weaker in the export than it is in the app (where the run loop gates the
+// skip on a selector break). Optional is meant for dismissal steps.
+function wrapOptional(line: string, pad: string): string {
+  return (
+    `${pad}try {\n` +
+    `${pad}  ${line}\n` +
+    `${pad}} catch { /* optional step: element not present, skipped */ }`
+  )
+}
+
 // The actual Playwright action for one step (without the leading comment).
 // `baseURL`: when a navigate's URL lives under it, emit just the PATH —
 // `test.use({ baseURL })` (added by the generator, itself reading
@@ -688,14 +706,13 @@ export function generatePlaywrightTest(
     const healNote = step.healedByAi
       ? `  // ⚠ selector auto-healed by QATestFlow AI (matched on ${step.healedByAi.signals.join(' + ')}) — verify it still targets the intended element\n`
       : ''
-    // F26: an optional step (e.g. a cookie banner that may not appear) is wrapped
-    // in try/catch so its absence is skipped, not a test failure — matching how
-    // replay treats it. The action is indented one level deeper inside the try.
+    // F26: an optional step is wrapped so its absence is skipped, not a failure.
+    // The action can be multi-line, so indent its continuations into the try.
     if (step.optional) {
       const indented = action.replace(/\n/g, '\n  ')
       lines.push(
         `${healNote}  // ${stepText(step)} (optional — skipped if not present)\n` +
-          `  try {\n    ${indented}\n  } catch { /* optional step: element not present, skipped */ }`
+          wrapOptional(indented, '  ')
       )
       continue
     }
@@ -1038,7 +1055,7 @@ export function generatePageObjectTest(
         columns,
         idPolicy.portable
       )
-      if (line) specBody.push(`  ${line}`)
+      if (line) specBody.push(step.optional ? wrapOptional(line, '  ') : `  ${line}`)
       continue
     }
     // F13/F14: a page-level accessibility or performance check — like an
@@ -1062,7 +1079,7 @@ export function generatePageObjectTest(
     if (!step.selector) continue
     const name = nameForElement(step, step.type === 'click')
     const line = actionFor(step, baseURL, 'this.page', `this.${name}`, columns, idPolicy.portable)
-    if (line) buffer.push(`    ${line}`)
+    if (line) buffer.push(step.optional ? wrapOptional(line, '    ') : `    ${line}`)
     if (stepUsesData(step)) bufferUsesData = true
     if (step.type === 'click' || step.type === 'press') lastActionLabel = step.label || ''
   }

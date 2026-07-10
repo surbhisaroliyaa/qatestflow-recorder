@@ -216,12 +216,29 @@ function findPrelude(candidates: ReplayCandidate[], allowHidden = false, timeout
       if (ALLOW_HIDDEN && hidden && Date.now() - hiddenAt > 600) { el = hidden; break; }
       await new Promise((r) => setTimeout(r, 100));
     }
-    if (!el) return {
-      ok: false,
-      error: everFound
-        ? 'Element found but never became visible/enabled'
-        : 'Element not found (may have changed or not be on this page)'
-    };
+    if (!el) {
+      // Three distinct failures, kept distinct because F26 (optional steps)
+      // must tell "the user couldn't reach this" apart from "the app is
+      // broken":
+      //   not found        — never in the DOM        → absent
+      //   never visible    — in the DOM, display:none / zero-size → absent
+      //   stayed disabled  — visible on screen, but not interactive → A BUG
+      // An optional step skips on the first two and FAILS on the third: a
+      // visible-but-disabled control is something the user can see and can't
+      // use, and silently skipping it would hide a real defect.
+      //
+      // Visibility is tested FIRST: an element that is both hidden and
+      // disabled counts as hidden, because the user can't reach it either way.
+      let error;
+      if (!everFound) {
+        error = 'Element not found (may have changed or not be on this page)';
+      } else if (hidden && !isVisible(hidden)) {
+        error = 'Element found but never became visible';
+      } else {
+        error = 'Element found but stayed disabled';
+      }
+      return { ok: false, error };
+    }
     el.scrollIntoView({ block: 'center' });`
   )
 }
