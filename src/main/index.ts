@@ -98,6 +98,14 @@ import {
   type Environment
 } from './environments'
 import { checkPlaywright, runCrossBrowser, type BrowserName } from './xbrowser'
+import {
+  saveEdgeRun,
+  listEdgeRuns,
+  loadEdgeRun,
+  deleteEdgeRun,
+  protectedEdgeTraceIds,
+  type EdgeRunRecord
+} from './edgeRuns'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -2117,7 +2125,8 @@ function createWindow(): void {
             await persistTrace(outcome.ok, outcome.failedAt) // overwrite final state
             if (tracePersisted) {
               outcome.traceId = traceRunId
-              await pruneTraces()
+              // F20 (Option 2): never prune a recording a saved edge run owns.
+              await pruneTraces(40, await protectedEdgeTraceIds())
             }
           } else if (tracePersisted) {
             // Policy is on-failure but the run RECOVERED to a pass (retry/skip) —
@@ -3203,6 +3212,16 @@ function createWindow(): void {
   ipcMain.handle('library:recordRun', (_event, fileName: string, run: RunInfo) =>
     recordRun(fileName, run)
   )
+  // F20 (Option 2): persist / list / re-open edge-case batches (negative-testing
+  // evidence), kept separate from the pass/fail run history above.
+  ipcMain.handle(
+    'library:saveEdgeRun',
+    (_event, input: Omit<EdgeRunRecord, 'id' | 'at' | 'variantCount' | 'acceptedCount'>) =>
+      saveEdgeRun(input)
+  )
+  ipcMain.handle('library:listEdgeRuns', (_event, testFile: string) => listEdgeRuns(testFile))
+  ipcMain.handle('library:loadEdgeRun', (_event, id: string) => loadEdgeRun(id))
+  ipcMain.handle('library:deleteEdgeRun', (_event, id: string) => deleteEdgeRun(id))
 
   // === Drafts (Day 18) — auto-saved in-progress recordings ===========
   ipcMain.handle('drafts:save', (_event, input: DraftFile) => saveDraft(input))

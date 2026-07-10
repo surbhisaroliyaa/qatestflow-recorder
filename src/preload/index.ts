@@ -302,7 +302,15 @@ const api = {
     recordRun: (fileName: string, run: unknown): Promise<void> =>
       ipcRenderer.invoke('library:recordRun', fileName, run),
     openScreenshot: (path: string): Promise<void> =>
-      ipcRenderer.invoke('library:openScreenshot', path)
+      ipcRenderer.invoke('library:openScreenshot', path),
+    // F20 (Option 2): persist / list / re-open edge-case batches per test.
+    saveEdgeRun: (input: unknown): Promise<unknown> =>
+      ipcRenderer.invoke('library:saveEdgeRun', input),
+    listEdgeRuns: (testFile: string): Promise<unknown[]> =>
+      ipcRenderer.invoke('library:listEdgeRuns', testFile),
+    loadEdgeRun: (id: string): Promise<unknown> => ipcRenderer.invoke('library:loadEdgeRun', id),
+    deleteEdgeRun: (id: string): Promise<void> =>
+      ipcRenderer.invoke('library:deleteEdgeRun', id)
   },
 
   // === Saved sessions (Day 17) — cookies + localStorage as storageState. ===

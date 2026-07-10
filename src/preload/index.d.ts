@@ -211,6 +211,11 @@ interface LibraryAPI {
   remove: (fileName: string) => Promise<void>
   recordRun: (fileName: string, run: RunInfo) => Promise<void>
   openScreenshot: (path: string) => Promise<void>
+  // F20 (Option 2): persisted edge-case batches (negative-testing evidence).
+  saveEdgeRun: (input: Omit<EdgeRunRecord, 'id' | 'at' | 'variantCount' | 'acceptedCount'>) => Promise<EdgeRunSummary>
+  listEdgeRuns: (testFile: string) => Promise<EdgeRunSummary[]>
+  loadEdgeRun: (id: string) => Promise<EdgeRunRecord | null>
+  deleteEdgeRun: (id: string) => Promise<void>
 }
 
 // Day 17 — saved browser sessions (storageState: cookies + localStorage) so a
@@ -489,6 +494,41 @@ declare global {
     selectorHealth?: number // F5: avg selector stability (0–100)
     lastRun?: RunInfo
     runs?: RunInfo[] // history, newest first, capped at 10
+  }
+
+  // F20 (Option 2) — a persisted edge-case batch (negative-testing evidence),
+  // kept separate from the pass/fail run history above.
+  interface EdgeRunVariant {
+    baseline: boolean
+    fieldLabel: string
+    edgeLabel: string
+    group: string | null
+    value: string
+    hint: string
+    ok: boolean
+    screenshotPath?: string
+    traceId?: string
+    steps?: RecorderStep[] // persisted so a re-opened run can still export
+  }
+  interface EdgeRunRecord {
+    id: string
+    testFile: string
+    testName: string
+    at: string
+    hasAssertion: boolean
+    baselineOk: boolean
+    variantCount: number
+    acceptedCount: number
+    results: EdgeRunVariant[]
+  }
+  interface EdgeRunSummary {
+    id: string
+    testFile: string
+    at: string
+    hasAssertion: boolean
+    baselineOk: boolean
+    variantCount: number
+    acceptedCount: number
   }
 
   // F12: one past edit of a test — its steps as they were, and when it was

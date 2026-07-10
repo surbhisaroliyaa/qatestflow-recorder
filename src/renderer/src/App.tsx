@@ -4,6 +4,7 @@ import {
   generatePageObjectTest,
   generateCiWorkflow,
   generatePlaywrightConfig,
+  generateEdgeSuite,
   stepText
 } from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
@@ -326,6 +327,17 @@ function App(): React.JSX.Element {
   const [edgeGroups, setEdgeGroups] = useState<Set<EdgeGroup>>(
     new Set<EdgeGroup>(['empty', 'boundary', 'invalid', 'injection'])
   )
+  // F20 export: path of the last saved negative-suite .spec.ts (for the "saved
+  // to…" note in the report), null until exported.
+  const [edgeSuiteSaved, setEdgeSuiteSaved] = useState<string | null>(null)
+  // F20 (Option 2): the report is a modal you can CLOSE without discarding the
+  // run — `edgeReportOpen` gates the modal (and the browser-hide) separately
+  // from `edgeRun` (the data), so closing keeps the run re-openable. Persisted
+  // batches for the loaded test are listed in `edgeRunHistory`; `edgeViewingHistory`
+  // is true when the open report came from history (no steps → hide Export).
+  const [edgeReportOpen, setEdgeReportOpen] = useState(false)
+  const [edgeViewingHistory, setEdgeViewingHistory] = useState(false)
+  const [edgeRunHistory, setEdgeRunHistory] = useState<EdgeRunSummary[]>([])
   // F17 (cross-browser): the runner modal — pick engines, run real Playwright,
   // show per-browser pass/fail. `xbInstalled` null = not checked yet.
   const [xbOpen, setXbOpen] = useState(false)
@@ -354,6 +366,7 @@ function App(): React.JSX.Element {
       failedAt?: number
       error?: string
       screenshotPath?: string
+      traceId?: string // F20: each variant keeps its OWN run recording
     }[]
   } | null>(null)
   // Day 11.5 — sections (suites). The section list, the current test's
@@ -920,7 +933,12 @@ function App(): React.JSX.Element {
         historyOpen ||
         envManagerOpen ||
         edgeModalOpen ||
-        edgeRun !== null ||
+        // F20: hide the browser only while the finished report modal is OPEN.
+        // While the batch RUNS, keep the browser visible (like a data-driven run)
+        // so you can watch each variant AND so capturePage() works — a hidden view
+        // is zero-sized and its failure screenshots come back empty. And once you
+        // close the report (report closed, run kept), the browser comes back.
+        (edgeRun !== null && !edgeRun.running && edgeReportOpen) ||
         xbOpen ||
         docOpen
     )
@@ -936,6 +954,7 @@ function App(): React.JSX.Element {
     envManagerOpen,
     edgeModalOpen,
     edgeRun,
+    edgeReportOpen,
     xbOpen,
     docOpen
   ])
@@ -1094,6 +1113,10 @@ function App(): React.JSX.Element {
     setLastHarUsage(null)
     setTestVersions([]) // F12: no history for a brand-new recording
     setHistoryOpen(false)
+    // F20 (Option 2): a fresh start has no test, so no edge-run history/run.
+    setEdgeRun(null)
+    setEdgeReportOpen(false)
+    setEdgeRunHistory([])
     applyViewport(undefined)
     setTestSuite('')
     setSavePanelOpen(false)
@@ -1226,7 +1249,15 @@ function App(): React.JSX.Element {
     // F1: replay against a HAR — the loaded test's saved one, or the fresh
     // just-captured one ('__last') when capture is on and not yet saved.
     harFile: string | undefined = harField ??
-      (captureNetwork && harCount > 0 ? '__last' : undefined)
+      (captureNetwork && harCount > 0 ? '__last' : undefined),
+    // F20: a batch run (edge cases) sets `silent` so it does NOT write the
+    // workspace single-run panels — no failure banner, screenshot, What-changed
+    // or recording pointer left behind for the LAST variant (it isn't "the test
+    // failing", it's a hostile variant). The per-variant outcome is returned and
+    // shown in the report modal instead. `traceOverride` forces a retain policy
+    // (edge cases keep a recording for EVERY variant regardless of the setting).
+    silent = false,
+    traceOverride?: 'always' | 'failure' | 'off'
   ): Promise<{
     ok: boolean
     failedAt?: number
@@ -1273,7 +1304,7 @@ function App(): React.JSX.Element {
         interactive,
         sessionFile,
         {
-          mode: traceMode,
+          mode: traceOverride ?? traceMode,
           stepTexts: list.map((s) => stepText(s)),
           testName: testName || undefined
         },
@@ -1290,23 +1321,28 @@ function App(): React.JSX.Element {
     // Aborted = Home was pressed mid-recovery. The run is moot — no failure
     // banner, no run recorded.
     if (result.aborted) return result
-    setLastTraceId(result.traceId ?? null)
-    // F1: surface how the HAR was used this run (absent when no HAR was in play).
-    setLastHarUsage(
-      result.harServed !== undefined
-        ? { served: result.harServed, passthrough: result.harPassthrough ?? 0 }
-        : null
-    )
-    if (!result.ok) {
-      // Map expanded run indices back onto display rows (linked blocks) so the
-      // red marks + failure banner point at the right rows. Identity otherwise.
-      setFailedIndex(result.failedAt != null ? toDisplayIdx(result.failedAt) : null)
-      setReplayError(result.error ?? 'Replay failed')
-      setLastScreenshotPath(result.screenshotPath ?? null)
-      setLastConsoleErrors(result.consoleErrors ?? [])
-      setLastNetworkErrors(result.networkErrors ?? [])
-      setLastFailures((result.failures ?? []).map((f) => ({ ...f, index: toDisplayIdx(f.index) })))
-      setWhatChanged(result.whatChanged ?? null) // F8
+    // A silent (batch) run returns its outcome but leaves the workspace panels
+    // untouched — the caller (F20) collects result.traceId/screenshotPath per
+    // variant and renders them in its own report.
+    if (!silent) {
+      setLastTraceId(result.traceId ?? null)
+      // F1: surface how the HAR was used this run (absent when no HAR was in play).
+      setLastHarUsage(
+        result.harServed !== undefined
+          ? { served: result.harServed, passthrough: result.harPassthrough ?? 0 }
+          : null
+      )
+      if (!result.ok) {
+        // Map expanded run indices back onto display rows (linked blocks) so the
+        // red marks + failure banner point at the right rows. Identity otherwise.
+        setFailedIndex(result.failedAt != null ? toDisplayIdx(result.failedAt) : null)
+        setReplayError(result.error ?? 'Replay failed')
+        setLastScreenshotPath(result.screenshotPath ?? null)
+        setLastConsoleErrors(result.consoleErrors ?? [])
+        setLastNetworkErrors(result.networkErrors ?? [])
+        setLastFailures((result.failures ?? []).map((f) => ({ ...f, index: toDisplayIdx(f.index) })))
+        setWhatChanged(result.whatChanged ?? null) // F8
+      }
     }
     // A SAVED test remembers its outcomes — the library shows the latest as
     // a green/red dot and the last 10 as a history row (mini CI dashboard).
@@ -1588,8 +1624,20 @@ function App(): React.JSX.Element {
     // we can only report what happened, not judge it.
     const hasAssertion = edgeFlat.some((s) => s.type === 'assert' || s.type === 'snapshot')
     runPlanRef.current = edgeMap // per-step marks map back to the display rows
+    setEdgeSuiteSaved(null) // clear any stale "saved to…" note from a prior run
+    setEdgeViewingHistory(false) // this is a fresh, live run (steps present)
+    setEdgeReportOpen(false) // report opens only when the batch finishes
     setEdgeModalOpen(false)
     setEdgeRun({ total: cases.length, current: 0, currentLabel: '', running: true, hasAssertion, results: [] })
+    // Collect outcomes locally too (state is async) so we can persist the batch.
+    const collected: {
+      case: EdgeCase
+      ok: boolean
+      failedAt?: number
+      error?: string
+      screenshotPath?: string
+      traceId?: string
+    }[] = []
     for (let i = 0; i < cases.length; i++) {
       const c = cases[i]
       const label = c.baseline ? 'Happy path' : `${c.fieldLabel}: ${c.edgeLabel}`
@@ -1597,7 +1645,10 @@ function App(): React.JSX.Element {
       // Resolve {{env:}} creds + retarget URLs on the OTHER fields, exactly like
       // a normal run (the perturbed field is a literal hostile value).
       const list = await applyEnv(c.steps, baseURL || deriveBaseURL(c.steps))
-      const res = await runOnce(list, null, false)
+      // silent=true: don't pollute the workspace single-run panels with each
+      // variant. traceOverride='always': keep a FULL recording for every variant
+      // so each report row can open its own run.
+      const res = await runOnce(list, null, false, undefined, undefined, true, 'always')
       if (res.aborted) {
         setEdgeRun(null)
         return
@@ -1607,11 +1658,101 @@ function App(): React.JSX.Element {
         ok: res.ok,
         failedAt: res.failedAt,
         error: res.error,
-        screenshotPath: res.screenshotPath
+        screenshotPath: res.screenshotPath,
+        traceId: res.traceId
       }
+      collected.push(entry)
       setEdgeRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
     }
+    // The live step-progress listener marks each variant's steps as it runs —
+    // including the LAST variant's rejected failure at the check step. Those are
+    // transient batch marks, not a real result for the displayed test, so clear
+    // them; otherwise the workspace shows a stray "✗ Failed at step N" banner
+    // after the batch even though your saved test never failed.
+    setFailedIndex(null)
+    setReplayingIndex(null)
+    setDoneIndices(new Set())
+    setSkippedIndices(new Set())
     setEdgeRun((prev) => (prev ? { ...prev, running: false } : prev))
+    setEdgeReportOpen(true) // now that it's done, show the report
+
+    // Option 2: persist this batch as re-openable evidence — but ONLY for a
+    // saved test (it's keyed per test file). An unsaved run stays re-openable in
+    // memory for the session via the "current run" row.
+    if (testFileName) {
+      const baselineOk = !!collected.find((r) => r.case.baseline)?.ok
+      await window.api.library.saveEdgeRun({
+        testFile: testFileName,
+        testName: testName || 'recorded flow',
+        hasAssertion,
+        baselineOk,
+        results: collected.map((r) => ({
+          baseline: r.case.baseline,
+          fieldLabel: r.case.fieldLabel,
+          edgeLabel: r.case.edgeLabel,
+          group: r.case.group,
+          value: r.case.value,
+          hint: r.case.hint,
+          ok: r.ok,
+          screenshotPath: r.screenshotPath,
+          traceId: r.traceId,
+          steps: r.case.steps // persist so a re-opened run can export its suite
+        }))
+      })
+      await refreshEdgeHistory(testFileName)
+    }
+  }
+
+  // Option 2: (re)load the persisted edge-run list for a test — for the
+  // "🧨 Edge runs" list in the steps panel.
+  const refreshEdgeHistory = async (fileName: string | null): Promise<void> => {
+    setEdgeRunHistory(fileName ? ((await window.api.library.listEdgeRuns(fileName)) ?? []) : [])
+  }
+
+  // Option 2: re-open a PERSISTED batch from disk into the report modal. Its
+  // variants' screenshots + recordings live on (protected from pruning), so the
+  // 📷 / 🎬 buttons work. Steps aren't persisted, so Export is hidden for these
+  // (edgeViewingHistory) — the verdicts, evidence and Copy report are all here.
+  const handleOpenEdgeRun = async (id: string): Promise<void> => {
+    const rec = await window.api.library.loadEdgeRun(id)
+    if (!rec) return
+    setEdgeRun({
+      total: rec.results.length,
+      current: rec.results.length,
+      currentLabel: '',
+      running: false,
+      hasAssertion: rec.hasAssertion,
+      results: rec.results.map((v, i) => ({
+        case: {
+          id: `${i}`,
+          baseline: v.baseline,
+          fieldIndex: -1,
+          fieldLabel: v.fieldLabel,
+          group: v.group as EdgeGroup | null,
+          edgeLabel: v.edgeLabel,
+          value: v.value,
+          hint: v.hint,
+          steps: v.steps ?? [] // persisted steps → Export works on saved runs too
+        },
+        ok: v.ok,
+        screenshotPath: v.screenshotPath,
+        traceId: v.traceId
+      }))
+    })
+    setEdgeSuiteSaved(null)
+    setEdgeViewingHistory(true)
+    setEdgeReportOpen(true)
+  }
+
+  // Option 2: delete a persisted edge run (its record + recordings + screenshots)
+  // and refresh the list. If it's the one currently open in the report, close it.
+  const handleDeleteEdgeRun = async (id: string): Promise<void> => {
+    await window.api.library.deleteEdgeRun(id)
+    if (edgeViewingHistory) {
+      setEdgeReportOpen(false)
+      setEdgeRun(null)
+    }
+    await refreshEdgeHistory(testFileName)
   }
 
   // F20 verdict for one variant, given whether the happy-path baseline passed.
@@ -1653,6 +1794,24 @@ function App(): React.JSX.Element {
 
   const handleCopyEdgeReport = (): void => {
     navigator.clipboard.writeText(buildEdgeReport())
+  }
+
+  // F20 export: turn the variants into a runnable Playwright negative suite —
+  // one test per variant that asserts the app REJECTED the hostile input. Saved
+  // as a .spec.ts (own save dialog) so the validation/security checks run in CI.
+  const handleExportEdgeSuite = async (): Promise<void> => {
+    if (!edgeRun) return
+    const cases = edgeRun.results.map((r) => r.case)
+    // Derive the base from the run's OWN steps (works for a re-opened saved run,
+    // where edgeFlat belongs to a different/no run).
+    const withSteps = cases.find((c) => c.steps && c.steps.length > 0)
+    const code = generateEdgeSuite(cases, {
+      name: testName || 'recorded flow',
+      baseURL: baseURL || deriveBaseURL(withSteps?.steps ?? edgeFlat),
+      viewport
+    })
+    const path = await window.api.recorder.exportTest(code)
+    if (path) setEdgeSuiteSaved(path)
   }
 
   // === F17: cross-browser replay ====================================
@@ -2081,6 +2240,11 @@ function App(): React.JSX.Element {
     setLastHarUsage(null)
     setTestVersions(test.versions ?? []) // F12: this test's edit history
     setHistoryOpen(false)
+    // F20 (Option 2): drop any in-memory edge run from the previous test and load
+    // THIS test's persisted edge-run history for the "🧨 Edge runs" list.
+    setEdgeRun(null)
+    setEdgeReportOpen(false)
+    refreshEdgeHistory(fileName)
     applyViewport(test.viewport)
     setDataRows(test.dataRows ?? []) // Day 20: data-driven table
     setDataPanelOpen(false)
@@ -4144,6 +4308,74 @@ function App(): React.JSX.Element {
               {dataRun.currentLabel ? `: ${dataRun.currentLabel}` : ''}
             </div>
           )}
+          {/* F20: edge-case batch progress — shown inline (not a modal) so the
+              browser stays visible and you watch each variant run. The full
+              report modal opens once the batch finishes. */}
+          {edgeRun?.running && (
+            <div className="replay-status running">
+              🧨 Edge case {edgeRun.current} of {edgeRun.total}
+              {edgeRun.currentLabel ? `: ${edgeRun.currentLabel}` : ''}
+            </div>
+          )}
+          {/* F20 (Option 2): past edge-case batches for this test — re-open the
+              report (verdicts + 📷 + 🎬) any time, even after restarting the app.
+              A just-finished run on an UNSAVED test shows as a session-only row. */}
+          {!edgeRun?.running &&
+            (edgeRunHistory.length > 0 ||
+              (!!edgeRun && !edgeViewingHistory && !testFileName)) && (
+              <div className="edge-history">
+                <span className="edge-history-label">🧨 Edge runs</span>
+                {!!edgeRun && !edgeViewingHistory && !testFileName && (
+                  <div className="edge-history-row">
+                    <button
+                      className="edge-history-open"
+                      onClick={() => setEdgeReportOpen(true)}
+                      title="Re-open this session's edge-case report (save the test to keep it across restarts)"
+                    >
+                      <span className="edge-hist-when">current run · unsaved</span>
+                      <span className="edge-hist-ok">
+                        {edgeRun.results.filter((r) => !r.case.baseline).length} variants
+                      </span>
+                    </button>
+                    <button
+                      className="edge-hist-del"
+                      onClick={() => {
+                        setEdgeReportOpen(false)
+                        setEdgeRun(null)
+                      }}
+                      title="Discard this unsaved run"
+                      aria-label="Discard edge run"
+                    >
+                      🗑
+                    </button>
+                  </div>
+                )}
+                {edgeRunHistory.map((h) => (
+                  <div key={h.id} className="edge-history-row">
+                    <button
+                      className="edge-history-open"
+                      onClick={() => handleOpenEdgeRun(h.id)}
+                      title="Re-open this edge-case report — verdicts, screenshots and recordings"
+                    >
+                      <span className="edge-hist-when">{new Date(h.at).toLocaleString()}</span>
+                      <span className={h.acceptedCount ? 'edge-hist-warn' : 'edge-hist-ok'}>
+                        {h.acceptedCount
+                          ? `⚠ ${h.acceptedCount} accepted`
+                          : `✓ ${h.variantCount} rejected`}
+                      </span>
+                    </button>
+                    <button
+                      className="edge-hist-del"
+                      onClick={() => handleDeleteEdgeRun(h.id)}
+                      title="Delete this edge run and its recordings"
+                      aria-label="Delete edge run"
+                    >
+                      🗑
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           {/* Day 20: after a data run, the banner summarizes the whole MATRIX
               (all rows) and reopens the per-row summary — not just the last
               row, which the single-run banner would otherwise show. */}
@@ -6192,8 +6424,12 @@ function App(): React.JSX.Element {
         })()}
 
       {/* === F20: edge-case report — per-variant verdict (accepted / rejected),
-           computed against the happy-path baseline. === */}
+           computed against the happy-path baseline. Only shown once the batch
+           is DONE; while running, progress is an inline strip in the steps panel
+           (above) so the browser stays visible. === */}
       {edgeRun &&
+        !edgeRun.running &&
+        edgeReportOpen &&
         (() => {
           const baseline = edgeRun.results.find((r) => r.case.baseline)
           const baselineOk = !!baseline?.ok
@@ -6207,19 +6443,16 @@ function App(): React.JSX.Element {
             (r) => edgeVerdict(r.ok, baselineOk) === 'accepted'
           ).length
           return (
-            <div className="modal-backdrop" onClick={() => !edgeRun.running && setEdgeRun(null)}>
+            <div className="modal-backdrop" onClick={() => setEdgeReportOpen(false)}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-header">
                   <span className="modal-title">
-                    🧨 Edge cases
-                    {edgeRun.running
-                      ? ` — running ${edgeRun.current}/${edgeRun.total}…`
-                      : ` — ${variants.length} run`}
+                    🧨 Edge cases — {variants.length} run
+                    {edgeViewingHistory ? ' (saved)' : ''}
                   </span>
                   <button
                     className="modal-close"
-                    onClick={() => setEdgeRun(null)}
-                    disabled={edgeRun.running}
+                    onClick={() => setEdgeReportOpen(false)}
                     aria-label="Close"
                   >
                     ✕
@@ -6282,27 +6515,51 @@ function App(): React.JSX.Element {
                             📷
                           </button>
                         )}
+                        {r.traceId && (
+                          <button
+                            type="button"
+                            className="shot-link"
+                            onClick={() => openTrace(r.traceId!)}
+                            title="Open this variant's full run recording (every step's screenshot, console & network)"
+                          >
+                            🎬
+                          </button>
+                        )}
                       </li>
                     )
                   })}
                 </ul>
+
+                {edgeSuiteSaved && (
+                  <div className="edge-saved-note">
+                    ✓ Negative suite saved to <code>{edgeSuiteSaved}</code> — run it with{' '}
+                    <code>npx playwright test</code>. A green suite = your validation holds.
+                  </div>
+                )}
 
                 <div className="modal-footer">
                   <span className="edge-foot-hint">
                     ⚠ Accepted = the app took the bad input and still succeeded — investigate.
                     ✓ Rejected = the app blocked it.
                   </span>
-                  <button
-                    className="modal-btn"
-                    onClick={handleCopyEdgeReport}
-                    disabled={edgeRun.running}
-                  >
+                  {/* Export needs the flow's steps. Live runs always have them;
+                      saved runs now persist them too, so it shows on both. (Only
+                      a legacy run saved before steps were persisted lacks them.) */}
+                  {edgeRun.results.some((r) => r.case.steps && r.case.steps.length > 0) && (
+                    <button
+                      className="modal-btn"
+                      onClick={handleExportEdgeSuite}
+                      title="Export every variant as a runnable Playwright test that asserts the app rejects it — so these negative/security checks run in CI"
+                    >
+                      ⤓ Export negative suite
+                    </button>
+                  )}
+                  <button className="modal-btn" onClick={handleCopyEdgeReport}>
                     Copy report
                   </button>
                   <button
                     className="modal-btn primary"
-                    onClick={() => setEdgeRun(null)}
-                    disabled={edgeRun.running}
+                    onClick={() => setEdgeReportOpen(false)}
                   >
                     Close
                   </button>

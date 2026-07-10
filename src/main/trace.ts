@@ -513,10 +513,15 @@ export function generateReportHtml(
 // Keep the traces folder from growing forever — drop the oldest beyond a cap.
 // Folder names sort lexicographically by their trace-<timestamp> id, so the
 // smallest names are the oldest.
-export async function pruneTraces(keep = 40): Promise<void> {
+// F20 (Option 2): `protectedIds` are traces a saved edge-case run references —
+// they must survive pruning (that's the point of persisting the run) and they
+// don't count against `keep`, so protecting old evidence never evicts fresh
+// run traces.
+export async function pruneTraces(keep = 40, protectedIds?: Set<string>): Promise<void> {
   try {
     const entries = (await readdir(tracesDir())).filter(isSafeTraceId).sort()
-    const excess = entries.slice(0, Math.max(0, entries.length - keep))
+    const prunable = protectedIds ? entries.filter((id) => !protectedIds.has(id)) : entries
+    const excess = prunable.slice(0, Math.max(0, prunable.length - keep))
     for (const id of excess) {
       await rm(traceDir(id), { recursive: true, force: true })
     }

@@ -4302,6 +4302,103 @@ body {
   margin: 12px 16px 0;
 }
 
+/* F20 (Option 2): the re-openable list of past edge-case batches for a test. */
+.edge-history {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  background: #1c1c24;
+  border: 1px solid #33333f;
+  border-radius: 8px;
+}
+
+.edge-history-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: #b9a1e0;
+  text-transform: uppercase;
+}
+
+.edge-history-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.edge-history-open {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #d6d6de;
+  background: #24242e;
+  border: 1px solid #34343f;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.edge-history-open:hover {
+  background: #2c2c38;
+  border-color: #4a4a5a;
+}
+
+.edge-hist-del {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  font-size: 12px;
+  color: #c98a8a;
+  background: #24242e;
+  border: 1px solid #34343f;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.edge-hist-del:hover {
+  background: #3a2626;
+  border-color: #6b3838;
+  color: #f0a0a0;
+}
+
+.edge-hist-when {
+  color: #a8a8b4;
+}
+
+.edge-hist-warn {
+  color: #f0a35e;
+  font-weight: 600;
+}
+
+.edge-hist-ok {
+  color: #7fc98a;
+  font-weight: 600;
+}
+
+/* F20 export: confirmation that the negative suite .spec.ts was written. */
+.edge-saved-note {
+  margin: 12px 16px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #9ad3a0;
+  background: #1c2a1e;
+  border: 1px solid #2f5c37;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.edge-saved-note code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: #d6f5da;
+  word-break: break-all;
+}
+
 .edge-count {
   margin-right: auto;
   font-size: 12px;
