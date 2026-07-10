@@ -14,6 +14,7 @@
 
 import { stepText } from './playwrightExport'
 import { envVarNames } from './dataDriven'
+import { findWeakAssertions, type WeakAssertion } from './deadAssertions'
 
 // The step types that VERIFY something (vs perform an action) — they populate
 // the "Checks" section, which is the part a reviewer cares about most.
@@ -26,6 +27,8 @@ export interface DocMeta {
   viewport?: { width: number; height: number }
   dataRows?: Record<string, string>[]
 }
+
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
 
 function hostOf(url?: string): string {
   if (!url) return ''
@@ -58,26 +61,68 @@ function preconditions(steps: RecorderStep[], meta: DocMeta): string[] {
   return out
 }
 
-// Split a flow into its actions and its checks (both as human sentences).
-function partition(flat: RecorderStep[]): { actions: RecorderStep[]; checks: RecorderStep[] } {
-  const steps = flat.filter((s) => !s.disabled)
-  return {
-    actions: steps.filter((s) => !CHECK_TYPES.has(s.type)),
-    checks: steps.filter((s) => CHECK_TYPES.has(s.type))
-  }
+// A check plus F6's verdict on whether it can actually fail.
+export interface DocCheck {
+  step: RecorderStep
+  weak?: WeakAssertion
+}
+
+// Split a flow into its actions and its checks. Each check carries F6's
+// dead/weak verdict, so the doc can say not just "there is a check here" but
+// "this check can never fail" — counting a dead assertion as coverage is the
+// exact lie F6 exists to catch (see deadAssertions.ts header).
+//
+// findWeakAssertions indexes into the array it's given, so it must run on the
+// FULL flat array — resolving its indices against the disabled-filtered list
+// would silently point at the wrong steps.
+function partition(flat: RecorderStep[]): { actions: RecorderStep[]; checks: DocCheck[] } {
+  const weakByIndex = new Map(findWeakAssertions(flat).map((w) => [w.index, w]))
+  const actions: RecorderStep[] = []
+  const checks: DocCheck[] = []
+  flat.forEach((s, i) => {
+    if (s.disabled) return
+    if (CHECK_TYPES.has(s.type)) checks.push({ step: s, weak: weakByIndex.get(i) })
+    else actions.push(s)
+  })
+  return { actions, checks }
+}
+
+// A dead check always passes, so it proves nothing and is not counted as
+// coverage. A weak check is low-value but can still fail — it counts.
+const isDead = (c: DocCheck): boolean => c.weak?.severity === 'dead'
+const realChecks = (checks: DocCheck[]): DocCheck[] => checks.filter((c) => !isDead(c))
+
+// One check → its markdown bullet, struck through and explained when dead.
+function checkLine(c: DocCheck): string {
+  const text = stepText(c.step)
+  if (!c.weak) return `- ${text}`
+  if (c.weak.severity === 'dead') return `- ⚠ ~~${text}~~ — dead: ${c.weak.reason}`
+  return `- ${text} — ⚠ weak: ${c.weak.reason}`
 }
 
 // One test → a markdown document. `flat` should be the FLATTENED steps (linked
 // blocks already expanded) so the doc describes what actually runs.
+//
+// NOT WIRED TO A BUTTON. The per-test "📖 Docs" surface was removed: for a
+// single test the bug report already prints the steps as its repro recipe, so
+// this mostly duplicated it. Kept because it's the only surface that describes
+// a test WITHOUT needing a run (a report needs a failure to exist at all) —
+// wire it up if a per-test spec is ever wanted again. The suite doc below is
+// the live surface and shares this file's partition/dead-check logic.
 export function generateTestDoc(name: string, flat: RecorderStep[], meta: DocMeta = {}): string {
   const { actions, checks } = partition(flat)
   const host = hostOf(meta.baseURL || flat.find((s) => s.type === 'navigate')?.url)
   const lines: string[] = []
   lines.push(`# ${name || 'Recorded test'}`)
   lines.push('')
+  const real = realChecks(checks)
+  const dead = checks.length - real.length
   lines.push(
     `**What it does:** a ${actions.length}-step flow${host ? ` on ${host}` : ''} that verifies ` +
-      `${checks.length} outcome${checks.length === 1 ? '' : 's'}.`
+      `${plural(real.length, 'outcome')}.` +
+      (dead > 0
+        ? ` _(${plural(dead, real.length > 0 ? 'further check' : 'check')} always ${dead === 1 ? 'passes' : 'pass'} — see below.)_`
+        : '')
   )
   lines.push('')
 
@@ -100,13 +145,17 @@ export function generateTestDoc(name: string, flat: RecorderStep[], meta: DocMet
 
   lines.push('## Checks (what it verifies)')
   lines.push('')
-  if (checks.length === 0) {
+  if (real.length === 0) {
     lines.push(
-      '- ⚠ **No checks** — this test performs actions but verifies nothing. A green run here ' +
-        'only proves the steps ran, not that the app behaved correctly. Consider adding an assertion.'
+      `- ⚠ **No checks that can fail** — this test performs actions but verifies nothing. ${
+        dead > 0
+          ? `It has ${plural(dead, 'check')}, but ${dead === 1 ? 'it always passes' : 'they all always pass'} regardless of how the app behaves. `
+          : ''
+      }A green run here only proves the steps ran, not that the app behaved correctly. Consider adding an assertion.`
     )
+    checks.forEach((c) => lines.push(checkLine(c)))
   } else {
-    checks.forEach((s) => lines.push(`- ${stepText(s)}`))
+    checks.forEach((c) => lines.push(checkLine(c)))
   }
   lines.push('')
 
@@ -131,22 +180,36 @@ export function generateSuiteDoc(
     bySuite.get(key)!.push(e)
   }
   let noCheckTotal = 0
+  let deadTestTotal = 0
   for (const [suite, tests] of bySuite) {
     lines.push(`## ${suite}`)
     lines.push('')
     for (const t of tests) {
       const { actions, checks } = partition(t.flat)
-      if (checks.length === 0) noCheckTotal++
+      const real = realChecks(checks)
+      const dead = checks.length - real.length
+      if (real.length === 0) noCheckTotal++
+      if (dead > 0) deadTestTotal++
       lines.push(
-        `- **${t.name}** — ${actions.length} actions, ${checks.length} checks` +
-          (checks.length === 0 ? ' ⚠ _(verifies nothing)_' : '')
+        `- **${t.name}** — ${plural(actions.length, 'action')}, ${plural(real.length, 'check')}` +
+          (dead > 0 ? ` _(${dead} dead)_` : '') +
+          (real.length === 0 ? ' ⚠ _(verifies nothing)_' : '')
       )
+      // The counts alone can't answer "is this outcome covered?" — listing each
+      // check under its test turns the index into a coverage map you can scan.
+      for (const c of checks) lines.push(`    ${checkLine(c)}`)
     }
     lines.push('')
   }
   if (noCheckTotal > 0) {
     lines.push(
-      `> ⚠ ${noCheckTotal} test${noCheckTotal === 1 ? ' has' : 's have'} no checks — passing but verifying nothing.`
+      `> ⚠ ${noCheckTotal} test${noCheckTotal === 1 ? ' has' : 's have'} no checks that can fail — passing but verifying nothing.`
+    )
+    lines.push('')
+  }
+  if (deadTestTotal > 0) {
+    lines.push(
+      `> ⚠ ${deadTestTotal} test${deadTestTotal === 1 ? ' has' : 's have'} dead checks that always pass regardless of the app.`
     )
     lines.push('')
   }

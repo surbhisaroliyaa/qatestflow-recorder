@@ -18,7 +18,7 @@ import {
   type EdgeGroup,
   type EdgeCase
 } from './edgeCases'
-import { generateTestDoc, generateSuiteDoc, type DocMeta } from './livingDocs'
+import { generateSuiteDoc, type DocMeta } from './livingDocs'
 import { classifyRuns, type FlakyTag } from './flaky'
 import { trustScore } from './trust'
 import { findWeakAssertions } from './deadAssertions'
@@ -1860,20 +1860,6 @@ function App(): React.JSX.Element {
   // Generate a plain-English document of the CURRENT test from its steps — what
   // it does + what it verifies + preconditions. Flatten first so linked blocks
   // are described as their real steps. Regenerated each time, so it can't drift.
-  const handleGenerateDocs = async (): Promise<void> => {
-    const { flat } = await buildRunPlan(steps)
-    const doc = generateTestDoc(testName || 'Recorded test', flat, {
-      suite: testSuite,
-      baseURL: baseURL || deriveBaseURL(flat),
-      storageState,
-      viewport,
-      dataRows
-    })
-    setDocContent(doc)
-    setDocSavedPath(null)
-    setDocOpen(true)
-  }
-
   // F31 (scale surface): one coverage document across the WHOLE library — load
   // each saved test, flatten it (blocks expanded), and hand them to the suite
   // generator. Opens the same docs modal. A living map of what QA covers.
@@ -3274,9 +3260,9 @@ function App(): React.JSX.Element {
     </div>
   )
 
-  // F31: the living-docs modal is opened from the workspace (📖 Docs) AND the
-  // library (📖 Suite docs), which live in two separate returns — so build it
-  // once and render {docsModal} in each (same pattern as the env manager).
+  // F31: the living-docs modal, opened by 📖 Suite docs on the library screen.
+  // It's declared here (above both returns) but only rendered in the welcome
+  // branch, which is the sole screen that can open it.
   const docsModal = docOpen && (
     <div className="modal-backdrop" onClick={() => setDocOpen(false)}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -4257,15 +4243,6 @@ function App(): React.JSX.Element {
                     🕘 History ({testVersions.length})
                   </button>
                 )}
-                {/* F31: plain-English living docs of this test. */}
-                <button
-                  className="data-btn"
-                  onClick={handleGenerateDocs}
-                  disabled={isReplaying || isRecording}
-                  title="Living docs: a plain-English write-up of what this test does + verifies — regenerated from the steps, so it never goes stale"
-                >
-                  📖 Docs
-                </button>
                 <button
                   className="export-btn"
                   onClick={handleExport}
@@ -6672,10 +6649,6 @@ function App(): React.JSX.Element {
           </div>
         </div>
       )}
-
-      {/* F31: living-docs modal — defined once above, rendered in both screens
-          (per-test 📖 Docs here, library 📖 Suite docs on the welcome screen). */}
-      {docsModal}
 
       {/* === F13: accessibility scan panel — WCAG A/AA violations for the
            current page, grouped by rule, each expandable to the offending
