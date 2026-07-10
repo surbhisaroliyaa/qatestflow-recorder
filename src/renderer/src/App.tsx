@@ -362,6 +362,20 @@ function App(): React.JSX.Element {
   } | null>(null)
   const [envWarnRemember, setEnvWarnRemember] = useState(false)
   const [warnsReset, setWarnsReset] = useState(false)
+  // F24 (API test step): the step index being edited + a working draft. The
+  // editor commits on Save, so an abandoned edit doesn't mutate the step.
+  const [apiEditIndex, setApiEditIndex] = useState<number | null>(null)
+  const [apiDraft, setApiDraft] = useState<RecorderStep | null>(null)
+  // F15 (smarter visual diffing): snapshot step being edited + its draft, plus a
+  // transient status for the "re-capture baseline" action.
+  const [snapEditIndex, setSnapEditIndex] = useState<number | null>(null)
+  const [snapDraft, setSnapDraft] = useState<RecorderStep | null>(null)
+  const [snapStatus, setSnapStatus] = useState<string>('')
+  // F18 (plain-English AI Prompt step): the intent prompt, busy state, and any note.
+  const [aiPromptOpen, setAiPromptOpen] = useState(false)
+  const [aiPromptText, setAiPromptText] = useState('')
+  const [aiPromptBusy, setAiPromptBusy] = useState(false)
+  const [aiPromptNote, setAiPromptNote] = useState('')
   // F31 (living docs): a generated plain-English doc of the current test.
   const [docOpen, setDocOpen] = useState(false)
   const [docContent, setDocContent] = useState('')
@@ -3058,6 +3072,98 @@ function App(): React.JSX.Element {
     else insertStep({ type: 'wait', waitKind: 'time', value: '2' }, at)
   }
 
+  // F24: insert an API-request step and immediately open its editor (an api step
+  // has several fields — endpoint, method, headers, body, expected response — so
+  // it needs a form, not an inline value like a wait).
+  const handleAddApiStep = (at: number | null): void => {
+    setInsertMenuIndex(null)
+    const idx = at ?? steps.length
+    const step: RecorderStep = { type: 'api', apiMethod: 'GET', url: '', apiExpectStatus: '' }
+    insertStep(step, at)
+    setApiDraft({ ...step })
+    setApiEditIndex(idx)
+  }
+
+  // Open the editor on an existing api step (clicking its row).
+  const openApiEditor = (i: number): void => {
+    setApiDraft({ ...steps[i] })
+    setApiEditIndex(i)
+  }
+
+  const patchApiDraft = (patch: Partial<RecorderStep>): void => {
+    setApiDraft((prev) => (prev ? { ...prev, ...patch } : prev))
+  }
+
+  const closeApiEditor = (): void => {
+    setApiEditIndex(null)
+    setApiDraft(null)
+  }
+
+  const saveApiEditor = (): void => {
+    if (apiEditIndex === null || !apiDraft) return
+    editSteps(steps.map((s, idx) => (idx === apiEditIndex ? apiDraft : s)))
+    closeApiEditor()
+  }
+
+  // F18: turn the typed intent into draft steps grounded to the current page,
+  // then APPEND them for review (the user verifies by replaying / re-picking).
+  const handleGenerateAiSteps = async (): Promise<void> => {
+    const intent = aiPromptText.trim()
+    if (!intent) return
+    setAiPromptBusy(true)
+    setAiPromptNote('')
+    try {
+      const res = await window.api.ai.generateSteps(intent)
+      if (res === null) {
+        setAiPromptNote('⚠ The AI is unavailable (needs the Claude CLI). Try again, or add steps manually.')
+        return
+      }
+      if (res.steps.length) {
+        editSteps([...steps, ...(res.steps as RecorderStep[])])
+        setAiPromptNote(
+          `✓ Added ${res.steps.length} step${res.steps.length === 1 ? '' : 's'}. Review them below and Replay to verify.${res.note ? ' ' + res.note : ''}`
+        )
+        setAiPromptText('')
+      } else {
+        setAiPromptNote(res.note || 'The AI produced no steps for this page.')
+      }
+    } finally {
+      setAiPromptBusy(false)
+    }
+  }
+
+  // F15: open the visual-snapshot editor (mask regions + freeze animations).
+  const openSnapEditor = (i: number): void => {
+    setSnapDraft({ ...steps[i] })
+    setSnapEditIndex(i)
+    setSnapStatus('')
+  }
+  const patchSnapDraft = (patch: Partial<RecorderStep>): void => {
+    setSnapDraft((prev) => (prev ? { ...prev, ...patch } : prev))
+  }
+  const closeSnapEditor = (): void => {
+    setSnapEditIndex(null)
+    setSnapDraft(null)
+    setSnapStatus('')
+  }
+  // Commit the mask/freeze/threshold to the step AND re-capture the baseline with
+  // those settings — otherwise a masked compare would differ against an unmasked
+  // baseline. Re-capture uses the CURRENT page, so the user must be on it.
+  const saveSnapEditor = async (): Promise<void> => {
+    if (snapEditIndex === null || !snapDraft) return
+    editSteps(steps.map((s, idx) => (idx === snapEditIndex ? snapDraft : s)))
+    setSnapStatus('Re-capturing baseline…')
+    const ok = snapDraft.baselineId
+      ? await window.api.visual.recaptureBaseline(
+          snapDraft.baselineId,
+          snapDraft.maskSelectors,
+          snapDraft.freezeAnimations
+        )
+      : false
+    setSnapStatus(ok ? '✓ Baseline re-captured with these settings' : '⚠ Could not re-capture baseline (is the page loaded?)')
+    if (ok) window.setTimeout(closeSnapEditor, 1100)
+  }
+
   const handleStartEdit = async (i: number): Promise<void> => {
     // Day 16(+): an upload step isn't text-editable — its "value" is a file
     // path. The ✎ instead opens an OS file picker; the chosen file is copied
@@ -3443,6 +3549,221 @@ function App(): React.JSX.Element {
           </button>
           <button className="modal-btn primary" onClick={() => settleEnvWarn('noenv')}>
             Run without environment
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // F24: the API-request step editor. `request` runs in the main process, so it
+  // reaches any endpoint regardless of what page the browser is on.
+  const apiMethod = (apiDraft?.apiMethod ?? 'GET') as string
+  const apiSendsBody = apiMethod !== 'GET' && apiMethod !== 'DELETE'
+  const apiEditorModal = apiDraft && apiEditIndex !== null && (
+    <div className="modal-backdrop" onClick={closeApiEditor}>
+      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">🔌 API request</span>
+          <button className="modal-close" onClick={closeApiEditor} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="api-editor-body">
+          <div className="api-row api-req-line">
+            <select
+              className="api-method"
+              value={apiMethod}
+              onChange={(e) => patchApiDraft({ apiMethod: e.target.value as RecorderStep['apiMethod'] })}
+            >
+              {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <input
+              className="api-url"
+              type="text"
+              placeholder="https://api.example.com/users/1"
+              value={apiDraft.url ?? ''}
+              onChange={(e) => patchApiDraft({ url: e.target.value })}
+            />
+          </div>
+          <label className="api-field">
+            <span>Headers — one per line, e.g. Authorization: Bearer {'{{env:TOKEN}}'}</span>
+            <textarea
+              className="api-headers"
+              rows={3}
+              placeholder={'Content-Type: application/json\nAuthorization: Bearer …'}
+              value={apiDraft.apiHeaders ?? ''}
+              onChange={(e) => patchApiDraft({ apiHeaders: e.target.value })}
+            />
+          </label>
+          {apiSendsBody && (
+            <label className="api-field">
+              <span>Request body</span>
+              <textarea
+                className="api-body"
+                rows={4}
+                placeholder={'{ "name": "morpheus" }'}
+                value={apiDraft.apiBody ?? ''}
+                onChange={(e) => patchApiDraft({ apiBody: e.target.value })}
+              />
+            </label>
+          )}
+          <div className="api-row api-expect">
+            <label className="api-field api-field-inline">
+              <span>Expect status</span>
+              <input
+                type="text"
+                placeholder="2xx (or 200, 404…)"
+                value={apiDraft.apiExpectStatus ?? ''}
+                onChange={(e) => patchApiDraft({ apiExpectStatus: e.target.value })}
+              />
+            </label>
+            <label className="api-field api-field-inline">
+              <span>Response body contains (optional)</span>
+              <input
+                type="text"
+                placeholder='e.g. "success" or an id'
+                value={apiDraft.apiExpectBody ?? ''}
+                onChange={(e) => patchApiDraft({ apiExpectBody: e.target.value })}
+              />
+            </label>
+          </div>
+          <p className="api-hint">
+            The request runs from the app itself (not the browser tab), so it works on any page.
+            A failed status or missing body text fails the step like any check.
+          </p>
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={closeApiEditor}>
+            Cancel
+          </button>
+          <button
+            className="modal-btn primary"
+            onClick={saveApiEditor}
+            disabled={!(apiDraft.url ?? '').trim()}
+          >
+            Save step
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // F15: the visual-snapshot editor — mask dynamic regions + freeze animations.
+  const snapEditorModal = snapDraft && snapEditIndex !== null && (
+    <div className="modal-backdrop" onClick={closeSnapEditor}>
+      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">📸 Visual snapshot settings</span>
+          <button className="modal-close" onClick={closeSnapEditor} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="api-editor-body">
+          <label className="api-field">
+            <span>Ignore these regions (mask) — CSS selectors, one per line</span>
+            <textarea
+              className="api-headers"
+              rows={3}
+              placeholder={'.timestamp\n#carousel\n.ad-banner'}
+              value={snapDraft.maskSelectors ?? ''}
+              onChange={(e) => patchSnapDraft({ maskSelectors: e.target.value })}
+            />
+            <span className="api-hint">
+              A clock, ad, or carousel that changes every run would otherwise fail the diff. Masked
+              areas are painted over identically on both baseline and current, so they’re excluded.
+            </span>
+          </label>
+          <label className="api-field api-field-inline" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={snapDraft.freezeAnimations !== false}
+              onChange={(e) => patchSnapDraft({ freezeAnimations: e.target.checked })}
+            />
+            <span>Freeze animations &amp; transitions before capture (recommended)</span>
+          </label>
+          <label className="api-field api-field-inline">
+            <span>Allowed difference (%)</span>
+            <input
+              type="text"
+              placeholder="1"
+              value={snapDraft.value ?? '1'}
+              onChange={(e) => patchSnapDraft({ value: e.target.value })}
+            />
+          </label>
+          {snapStatus && <p className="api-hint" style={{ color: '#8ab4f8' }}>{snapStatus}</p>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={closeSnapEditor}>
+            Cancel
+          </button>
+          <button
+            className="modal-btn primary"
+            onClick={saveSnapEditor}
+            title="Save these settings AND re-capture the baseline from the current page with them applied"
+          >
+            Save &amp; re-capture baseline
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // F18: the AI-prompt step composer. Grounded to the CURRENT page's elements,
+  // so it's a per-page authoring aid — the produced steps are a draft to verify.
+  const aiPromptModal = aiPromptOpen && (
+    <div className="modal-backdrop" onClick={() => !aiPromptBusy && setAiPromptOpen(false)}>
+      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">🪄 AI step — describe what to do</span>
+          <button
+            className="modal-close"
+            onClick={() => setAiPromptOpen(false)}
+            disabled={aiPromptBusy}
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="api-editor-body">
+          <label className="api-field">
+            <span>Plain English — what should happen on THIS page?</span>
+            <textarea
+              className="api-body"
+              rows={3}
+              placeholder={'e.g. log in as standard_user with password secret_sauce'}
+              value={aiPromptText}
+              onChange={(e) => setAiPromptText(e.target.value)}
+              autoFocus
+            />
+          </label>
+          <p className="api-hint">
+            The AI reads the elements on the page you’re viewing and turns your intent into steps —
+            grounded to real elements, so it can’t invent selectors. It sees one page at a time, so
+            for a multi-page flow, generate on each page. Always review + Replay the result.
+          </p>
+          {aiPromptNote && (
+            <p
+              className="api-hint"
+              style={{ color: aiPromptNote.startsWith('✓') ? '#7ee787' : '#f0b232' }}
+            >
+              {aiPromptNote}
+            </p>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={() => setAiPromptOpen(false)} disabled={aiPromptBusy}>
+            Close
+          </button>
+          <button
+            className="modal-btn primary"
+            onClick={handleGenerateAiSteps}
+            disabled={aiPromptBusy || !aiPromptText.trim()}
+          >
+            {aiPromptBusy ? 'Thinking…' : '🪄 Generate steps'}
           </button>
         </div>
       </div>
@@ -4160,6 +4481,19 @@ function App(): React.JSX.Element {
           }
         >
           ✓ {isPicking ? 'Picking…' : 'Check'}
+        </button>
+        {/* F18: type an intent, get draft steps grounded to the current page. */}
+        <button
+          className="snapshot-btn"
+          onClick={() => {
+            setAiPromptText('')
+            setAiPromptNote('')
+            setAiPromptOpen(true)
+          }}
+          disabled={isReplaying || isPicking}
+          title="AI step: describe what to do in plain English (e.g. 'log in as standard_user') and get draft steps for the current page"
+        >
+          🪄 AI step
         </button>
         {/* Day 19: capture the current page as a visual baseline. */}
         <button
@@ -5742,6 +6076,28 @@ function App(): React.JSX.Element {
                           autoFocus
                           spellCheck={false}
                         />
+                      ) : step.type === 'api' ? (
+                        <span
+                          className="step-text step-text-api"
+                          onClick={() => canEdit && openApiEditor(i)}
+                          title="Edit this API request"
+                        >
+                          {stepText(step)}
+                        </span>
+                      ) : step.type === 'snapshot' ? (
+                        <span
+                          className="step-text step-text-api"
+                          onClick={() => canEdit && openSnapEditor(i)}
+                          title="Mask dynamic regions / freeze animations for this snapshot"
+                        >
+                          {stepText(step)}
+                          {(step.maskSelectors ?? '').trim() && (
+                            <span className="mask-badge" title="Has masked regions">
+                              {' '}
+                              🎭
+                            </span>
+                          )}
+                        </span>
                       ) : (
                         <span className="step-text">{stepText(step)}</span>
                       )}
@@ -5888,6 +6244,13 @@ function App(): React.JSX.Element {
                             title="Pause replay for a human step (2FA / CAPTCHA / manual check), then continue when you're done"
                           >
                             🙋 Wait for me (manual)…
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddApiStep(i + 1)}
+                            title="Fire an HTTP request and assert on the response (status / body), inline with the UI flow — API setup/teardown or contract checks"
+                          >
+                            🔌 API request…
                           </button>
                           <button type="button" onClick={() => openBlocksPanel(i + 1)}>
                             🧩 Insert block here
@@ -6844,6 +7207,15 @@ function App(): React.JSX.Element {
 
       {/* F25 guard: host-mismatch warning, blocks the run until answered. */}
       {envWarnModal}
+
+      {/* F24: the API-request step editor. */}
+      {apiEditorModal}
+
+      {/* F15: the visual-snapshot settings editor. */}
+      {snapEditorModal}
+
+      {/* F18: the AI-prompt step composer. */}
+      {aiPromptModal}
 
       {/* === F13: accessibility scan panel — WCAG A/AA violations for the
            current page, grouped by rule, each expandable to the offending

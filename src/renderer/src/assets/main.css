@@ -4744,3 +4744,71 @@ body {
   white-space: nowrap;
   cursor: default;
 }
+
+/* F24: API-request step editor + clickable api step row. */
+.step-text-api {
+  cursor: pointer;
+  border-bottom: 1px dotted #6a6a6a;
+}
+.step-text-api:hover {
+  color: #8ab4f8;
+}
+.modal.api-editor {
+  max-width: 560px;
+  width: 92%;
+}
+.api-editor-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.api-row {
+  display: flex;
+  gap: 8px;
+}
+.api-req-line .api-method {
+  flex: 0 0 92px;
+  background: #232323;
+  color: #eee;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  padding: 8px;
+  font-weight: 600;
+}
+.api-req-line .api-url {
+  flex: 1;
+  background: #232323;
+  color: #eee;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+}
+.api-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: #bbb;
+}
+.api-field-inline {
+  flex: 1;
+}
+.api-field textarea,
+.api-field input {
+  background: #232323;
+  color: #eee;
+  border: 1px solid #4a4a4a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  resize: vertical;
+}
+.api-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: #888;
+  line-height: 1.5;
+}

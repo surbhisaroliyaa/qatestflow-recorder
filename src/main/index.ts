@@ -38,6 +38,7 @@ import {
   evaluateNlAssertion,
   categorizeFailure,
   deepRcaFailure,
+  generateAiSteps,
   type FailureEvidence,
   type FailureCategory
 } from './translator'
@@ -100,6 +101,7 @@ import {
   type Environment
 } from './environments'
 import { checkPlaywright, runCrossBrowser, type BrowserName } from './xbrowser'
+import { runApiStep } from './apiStep'
 import {
   saveEdgeRun,
   listEdgeRuns,
@@ -134,6 +136,133 @@ async function waitForVisualStable(wc: Electron.WebContents): Promise<void> {
     // best-effort — capture anyway
   }
 }
+
+// F15: mask selectors text (one per line / comma-separated) → a clean list.
+function parseMaskSelectors(text?: string): string[] {
+  if (!text) return []
+  return text
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+// F15 (smarter visual diffing): capture the page for a visual snapshot with two
+// stabilizers applied identically to BOTH the baseline and the compared image,
+// so neither can cause a false diff:
+//   • freeze — disable CSS animations/transitions (default on) so a mid-flight
+//     frame doesn't differ from the baseline.
+//   • mask — paint an opaque box over each masked selector's rect (same colour
+//     on both sides), excluding dynamic regions (clock/ad/carousel) from the diff.
+// The injected nodes are removed after the shot, so the page is left untouched.
+async function captureStabilized(
+  wc: Electron.WebContents,
+  maskSelectors?: string,
+  freezeAnimations?: boolean
+): Promise<Electron.NativeImage> {
+  const selectors = parseMaskSelectors(maskSelectors)
+  const freeze = freezeAnimations !== false // default ON (undefined = on)
+  const injected = freeze || selectors.length > 0
+  if (injected) {
+    await wc
+      .executeJavaScript(
+        `(() => {
+          const D = (window.__qaflowVisual = { freeze: null, masks: [] });
+          if (${freeze ? 'true' : 'false'}) {
+            const s = document.createElement('style');
+            s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;}html{scroll-behavior:auto!important;}';
+            document.head.appendChild(s);
+            D.freeze = s;
+          }
+          for (const sel of ${JSON.stringify(selectors)}) {
+            let els; try { els = document.querySelectorAll(sel); } catch { continue; }
+            for (const el of els) {
+              const r = el.getBoundingClientRect();
+              if (r.width === 0 || r.height === 0) continue;
+              const o = document.createElement('div');
+              o.setAttribute('data-qaflow-mask', '1');
+              o.style.cssText = 'position:fixed;z-index:2147483647;background:#FF00FF;pointer-events:none;left:'+r.left+'px;top:'+r.top+'px;width:'+r.width+'px;height:'+r.height+'px;';
+              document.body.appendChild(o);
+              D.masks.push(o);
+            }
+          }
+        })()`,
+        true
+      )
+      .catch(() => {})
+    await wait(120) // let the freeze + overlays paint
+  }
+  const image = await wc.capturePage()
+  if (injected) {
+    await wc
+      .executeJavaScript(
+        `(() => {
+          const D = window.__qaflowVisual; if (!D) return;
+          if (D.freeze) D.freeze.remove();
+          for (const m of D.masks) m.remove();
+          window.__qaflowVisual = null;
+        })()`,
+        true
+      )
+      .catch(() => {})
+  }
+  return image
+}
+
+// F18: injected into the current page to list its INTERACTIVE elements, each
+// with real selector candidates (test-id / id / name / role+name / text), so the
+// AI-prompt step can map an intent onto elements WE can locate — the model picks
+// which element by index, never invents a selector. Visible + enabled only,
+// capped at 60. `index` mirrors array position so the caller can look each up.
+const AI_CAPTURE_JS = `(() => {
+  const q = (s) => JSON.stringify(String(s));
+  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  const accName = (el) => {
+    const al = el.getAttribute('aria-label'); if (al) return norm(al);
+    if (el.id) { const lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (lab) { const t = norm(lab.textContent); if (t) return t; } }
+    const cl = el.closest && el.closest('label'); if (cl) { const t = norm(cl.textContent); if (t) return t; }
+    const ph = el.getAttribute('placeholder'); if (ph) return norm(ph);
+    const tc = norm(el.textContent); if (tc) return tc.slice(0, 60);
+    const v = el.getAttribute('value'); if (v) return norm(v);
+    const nm = el.getAttribute('name'); if (nm) return nm;
+    return el.tagName.toLowerCase();
+  };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role'); if (r) return r;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'button') return 'button';
+    if (tag === 'a' && el.hasAttribute('href')) return 'link';
+    if (tag === 'select') return 'combobox';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'input') { const t = (el.getAttribute('type') || 'text').toLowerCase(); if (t === 'submit' || t === 'button') return 'button'; if (t === 'checkbox') return 'checkbox'; if (t === 'radio') return 'radio'; return 'textbox'; }
+    return '';
+  };
+  const randomId = (id) => id.length > 40 || id.includes(' ') || id.includes(':') || /[0-9]{4,}/.test(id);
+  const SEL = 'a[href],button,input,select,textarea,[role="button"],[role="link"],[role="checkbox"],[role="tab"],[contenteditable="true"]';
+  const els = Array.from(document.querySelectorAll(SEL)).filter((el) => {
+    if (el.disabled) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    const st = getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none') return false;
+    if ((el.getAttribute('type') || '').toLowerCase() === 'hidden') return false;
+    return true;
+  }).slice(0, 60);
+  const out = [];
+  els.forEach((el) => {
+    const tag = el.tagName.toLowerCase();
+    const type = tag === 'input' ? (el.getAttribute('type') || 'text') : '';
+    const label = accName(el);
+    const cands = [];
+    const dt = el.getAttribute('data-test'); if (dt) cands.push({ kind: 'testId', score: 95, css: '[data-test=' + q(dt) + ']', locator: 'getByTestId(' + q(dt) + ')' });
+    const dti = el.getAttribute('data-testid'); if (dti) cands.push({ kind: 'testId', score: 95, css: '[data-testid=' + q(dti) + ']', locator: 'getByTestId(' + q(dti) + ')' });
+    if (el.id && !randomId(el.id)) cands.push({ kind: 'id', score: 88, css: '#' + CSS.escape(el.id), locator: 'locator(' + q('#' + el.id) + ')' });
+    const nm = el.getAttribute('name'); if (nm) cands.push({ kind: 'name', score: 82, css: '[name=' + q(nm) + ']', locator: 'locator(' + q('[name=' + nm + ']') + ')' });
+    const role = roleOf(el); if (role && label) cands.push({ kind: 'role', score: 74, css: null, role: role, name: label, locator: 'getByRole(' + q(role) + ', { name: ' + q(label) + ' })' });
+    if ((tag === 'button' || tag === 'a' || role === 'button' || role === 'link') && label) cands.push({ kind: 'text', score: 64, css: null, text: label, locator: 'getByText(' + q(label) + ')' });
+    if (cands.length) out.push({ index: out.length, tag: tag, type: type, label: label, candidates: cands });
+  });
+  return out;
+})()`
 
 // Height in pixels reserved at the top of the window for our React chrome
 // (URL bar + back/forward/reload buttons). Everything below this is the
@@ -2566,7 +2695,14 @@ function createWindow(): void {
             // Wait for the page to settle first so we don't compare a still-
             // loading page (images arriving) against the fully-rendered baseline.
             await waitForVisualStable(currentWC)
-            const image = await currentWC.capturePage()
+            // F15: capture with the step's mask + freeze applied — identical to
+            // how its baseline was captured, so dynamic regions / animations
+            // can't cause a false diff.
+            const image = await captureStabilized(
+              currentWC,
+              step.maskSelectors,
+              step.freezeAnimations
+            )
             const baseline = step.baselineId ? await loadBaseline(step.baselineId) : null
             if (!baseline) {
               // No baseline on disk (e.g. first run / deleted) — adopt the
@@ -2818,6 +2954,21 @@ function createWindow(): void {
             )
             if (shotPath) await rm(shotPath, { force: true }).catch(() => {})
             if (!nl.pass) throw new Error(nl.error)
+          } else if (step.type === 'api') {
+            // F24: fire an HTTP request from the main process (not the embedded
+            // browser) and assert on the response. Env tokens in the URL / headers
+            // / body were already substituted by applyEnv before the run, so
+            // {{env:APIKEY}} is a concrete value here. A failed assertion throws
+            // like any step, flowing into the normal failure path.
+            const api = await runApiStep({
+              method: step.apiMethod,
+              url: step.url,
+              headers: step.apiHeaders,
+              body: step.apiBody,
+              expectStatus: step.apiExpectStatus,
+              expectBody: step.apiExpectBody
+            })
+            if (!api.ok) throw new Error(api.error)
           } else {
             // Day 15: route the action into the frame it was recorded in (or
             // the top frame for a normal step). The injected script is entirely
@@ -3267,7 +3418,11 @@ function createWindow(): void {
   ipcMain.handle('recorder:snapshot', async (): Promise<void> => {
     try {
       await waitForVisualStable(activeWC())
-      const image = await activeWC().capturePage()
+      // F15: freeze animations on the first baseline too (default on), so it
+      // matches how the compare path captures — otherwise a fresh snapshot on an
+      // animated page could diff against its own baseline. No mask yet (the user
+      // adds selectors via the editor, which re-captures).
+      const image = await captureStabilized(activeWC())
       const id = `snap-${Date.now()}`
       await saveBaseline(id, image.toPNG())
       // `value` = allowed diff threshold (percent). 1% tolerates anti-aliasing
@@ -3277,6 +3432,30 @@ function createWindow(): void {
       // capture can fail if the page is gone — silently no-op
     }
   })
+  // F15: re-capture the baseline from the CURRENT page WITH the given mask +
+  // freeze settings, so baseline and future comparisons are stabilized the same
+  // way. Called when the snapshot editor's mask/freeze change (a plain
+  // updateBaseline would save an un-masked PNG and every masked compare would
+  // then differ in the masked region).
+  ipcMain.handle(
+    'visual:recaptureBaseline',
+    async (
+      _event,
+      baselineId: string,
+      maskSelectors: string | undefined,
+      freeze: boolean | undefined
+    ): Promise<boolean> => {
+      if (!isSafeBaselineId(baselineId)) return false
+      try {
+        await waitForVisualStable(activeWC())
+        const image = await captureStabilized(activeWC(), maskSelectors, freeze)
+        await saveBaseline(baselineId, image.toPNG())
+        return true
+      } catch {
+        return false
+      }
+    }
+  )
   // Adopt the CURRENT look as the new baseline (a page legitimately changed).
   ipcMain.handle(
     'visual:updateBaseline',
@@ -3491,6 +3670,55 @@ function createWindow(): void {
     }))
     return deepRcaFailure(manifest.testName, steps, traceDir(traceId))
   })
+
+  // F18: plain-English "AI Prompt" step. Capture the CURRENT page's interactive
+  // elements (each with real selector candidates), let the LLM map the tester's
+  // intent onto those elements by index, then build replayable steps from the
+  // candidates WE own — so the model never invents a selector. Returns the draft
+  // steps for the renderer to insert + review, or null if Claude is unavailable.
+  ipcMain.handle(
+    'ai:generateSteps',
+    async (_event, intent: string): Promise<{ steps: unknown[]; note: string } | null> => {
+      let captured: Array<{
+        index: number
+        tag: string
+        type: string
+        label: string
+        candidates: Array<Record<string, unknown>>
+      }>
+      try {
+        captured = (await activeWC().executeJavaScript(AI_CAPTURE_JS, true)) as typeof captured
+      } catch {
+        captured = []
+      }
+      const slim = captured.map((e) => ({
+        index: e.index,
+        tag: e.tag,
+        type: e.type,
+        label: e.label
+      }))
+      const result = await generateAiSteps(intent, slim, libraryDir())
+      if (result == null) return null
+      const steps = result.actions
+        .map((a) => {
+          const el = captured[a.element]
+          if (!el || !el.candidates.length) return null
+          const primary = (el.candidates.find((c) => c.css) ?? el.candidates[0]) as {
+            css?: string | null
+          }
+          const base = {
+            label: el.label,
+            selector: primary.css ?? undefined,
+            candidates: el.candidates
+          }
+          if (a.action === 'type') return { type: 'type', ...base, value: a.value ?? '' }
+          if (a.action === 'select') return { type: 'select', ...base, value: a.value ?? '' }
+          return { type: 'click', ...base }
+        })
+        .filter(Boolean)
+      return { steps, note: result.note }
+    }
+  )
 
   // Save a generated bug report as a .md file the user picks a place for.
   // Same pattern as recorder:export — main owns the disk.

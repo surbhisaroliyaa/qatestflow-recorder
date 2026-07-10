@@ -192,9 +192,22 @@ interface HarAPI {
 }
 
 // === Visual regression (Day 19) ===
+// F18: plain-English "AI Prompt" step — intent → draft steps grounded to the page.
+interface AiAPI {
+  generateSteps: (
+    intent: string
+  ) => Promise<{ steps: RecorderStep[]; note: string } | null>
+}
+
 interface VisualAPI {
   // Adopt a current capture as the new baseline (a page legitimately changed).
   updateBaseline: (baselineId: string, currentPath: string) => Promise<boolean>
+  // F15: re-capture the baseline from the current page with mask + freeze applied.
+  recaptureBaseline: (
+    baselineId: string,
+    maskSelectors: string | undefined,
+    freeze: boolean | undefined
+  ) => Promise<boolean>
   // A baseline image as a data: URL (for the diff view).
   getBaseline: (id: string) => Promise<string | null>
 }
@@ -297,6 +310,7 @@ interface API {
   drafts: DraftAPI
   blocks: BlocksAPI
   visual: VisualAPI
+  ai: AiAPI
   a11y: A11yAPI
   perf: PerfAPI
   har: HarAPI
@@ -752,6 +766,7 @@ declare global {
       | 'a11y'
       | 'perf'
       | 'block'
+      | 'api'
     label?: string
     // Pillar 4 (live-link blocks, v2): a 'block' step is a LIVE REFERENCE to a
     // saved block (its file name). It's one step in the array (moves/deletes as a
@@ -795,6 +810,15 @@ declare global {
     // Day 19 (visual regression): a `snapshot` step's baseline image id (file
     // in _baselines). `value` holds the allowed diff threshold as a percent.
     baselineId?: string
+    // F15 (smarter visual diffing): dynamic regions to EXCLUDE from the diff —
+    // CSS selectors (one per line / comma-separated). Their rects are painted
+    // over with the same colour on BOTH baseline and current before diffing, so
+    // a clock/ad/carousel can't fail the snapshot. Maps to Playwright's `mask`.
+    maskSelectors?: string
+    // F15: freeze CSS animations/transitions before capture so a mid-animation
+    // frame doesn't cause diff noise. Maps to `animations: 'disabled'`. Default
+    // on (undefined = on) to match Playwright.
+    freezeAnimations?: boolean
     selector?: string
     candidates?: SelectorCandidate[]
     // Day 15: set when the element lives inside an <iframe> — tells replay
@@ -818,6 +842,14 @@ declare global {
     // name/position/visual and validated by re-running. Persists with the test
     // (a saved audit trail: "this selector was AI-repaired, on these signals").
     healedByAi?: { at: string; signals: string[]; score: number }
+    // F24 (API test step): an `api` step fires an HTTP request and asserts on the
+    // response, inline with the UI flow — the setup/teardown and API-contract
+    // checks a real suite needs around its clicks. `url` holds the endpoint.
+    apiMethod?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+    apiHeaders?: string // raw text, one "Name: value" per line
+    apiBody?: string // request body (POST/PUT/PATCH); sent as-is
+    apiExpectStatus?: string // "200", or "2xx"/"4xx" families; blank = any 2xx
+    apiExpectBody?: string // substring the response body must contain; blank = skip
   }
 
   // Day 17: one open browser tab, as the renderer's tab strip sees it.

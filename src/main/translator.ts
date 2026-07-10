@@ -701,3 +701,96 @@ export async function evaluateNlAssertion(
   if (parsed.pass) return { pass: true, error: '' }
   return { pass: false, error: `AI check failed: "${c}" — ${parsed.reason || 'the page did not satisfy it.'}` }
 }
+
+// === F18: plain-English "AI Prompt" step ==============================
+// Turn a tester's intent ("log in as standard_user with secret_sauce") into
+// concrete UI actions, GROUNDED to the elements actually on the current page.
+// The LLM never invents selectors — it only chooses WHICH listed element to act
+// on (by index) and WHAT to type; the caller owns the real selector for each
+// index. That keeps authoring intelligent while replay stays deterministic.
+// Single-page by design: it can only see the current page's elements, so a
+// multi-page flow is generated one page at a time (honest, and demoable).
+export interface AiElement {
+  index: number
+  tag: string
+  type: string
+  label: string
+}
+export interface AiAction {
+  action: 'type' | 'click' | 'select'
+  element: number
+  value?: string
+}
+export interface AiStepsResult {
+  actions: AiAction[]
+  note: string // '' on success; a human note when nothing/only-part could be mapped
+}
+
+function buildAiStepsPrompt(intent: string, elements: AiElement[]): string {
+  const list = elements
+    .map((e) => `${e.index} — <${e.tag}${e.type ? ` type=${e.type}` : ''}> "${e.label}"`)
+    .join('\n')
+  return [
+    'You convert a QA tester\'s plain-English intent into concrete UI steps, using',
+    'ONLY the interactive elements present on the CURRENT page (listed below).',
+    'Never invent an element or a selector. If the intent needs something not in',
+    'the list (e.g. a element that only appears on the NEXT page), stop there.',
+    '',
+    `INTENT: "${intent}"`,
+    '',
+    'ELEMENTS on the current page (index — element — label):',
+    list || '(none found)',
+    '',
+    'Return ONLY a JSON array — no prose, no markdown fences. Each item is:',
+    '{ "action": "type" | "click" | "select", "element": <index number>, "value": "<text to type, or option to select; omit for click>" }',
+    'Order them exactly as the tester would perform them. Use the value the intent',
+    'specifies (e.g. a username/password). For a login, type each field then click',
+    'the submit button. If you can map nothing, return [].'
+  ].join('\n')
+}
+
+// Extract the first top-level JSON array from the model output (tolerant of a
+// stray sentence or a ```json fence around it).
+function parseAiActions(text: string, elementCount: number): AiAction[] {
+  const start = text.indexOf('[')
+  const end = text.lastIndexOf(']')
+  if (start < 0 || end <= start) return []
+  let arr: unknown
+  try {
+    arr = JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return []
+  }
+  if (!Array.isArray(arr)) return []
+  const out: AiAction[] = []
+  for (const raw of arr) {
+    if (!raw || typeof raw !== 'object') continue
+    const o = raw as Record<string, unknown>
+    const action = String(o.action ?? '')
+    const element = Number(o.element)
+    if (!['type', 'click', 'select'].includes(action)) continue
+    if (!Number.isInteger(element) || element < 0 || element >= elementCount) continue
+    const value = typeof o.value === 'string' ? o.value : undefined
+    out.push({ action: action as AiAction['action'], element, value })
+  }
+  return out
+}
+
+export async function generateAiSteps(
+  intent: string,
+  elements: AiElement[],
+  cwd: string
+): Promise<AiStepsResult | null> {
+  const i = (intent || '').trim()
+  if (!i) return { actions: [], note: 'Describe what you want to do — the prompt was empty.' }
+  if (!elements.length) {
+    return { actions: [], note: 'No interactive elements found on this page to act on.' }
+  }
+  const out = await runClaude(buildAiStepsPrompt(i, elements), cwd).catch(() => null)
+  if (out == null) return null // Claude unavailable — caller surfaces it
+  const actions = parseAiActions(out, elements.length)
+  const note = actions.length
+    ? ''
+    : 'The AI couldn’t turn that into steps from the elements on this page. Try being more specific, or make sure the right page is loaded.'
+  return { actions, note }
+}

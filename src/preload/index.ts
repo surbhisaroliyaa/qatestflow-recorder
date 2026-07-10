@@ -265,9 +265,21 @@ const api = {
   },
 
   // === Visual regression (Day 19) ===
+  // F18: turn a plain-English intent into draft steps grounded to the current page.
+  ai: {
+    generateSteps: (intent: string): Promise<{ steps: unknown[]; note: string } | null> =>
+      ipcRenderer.invoke('ai:generateSteps', intent)
+  },
   visual: {
     updateBaseline: (baselineId: string, currentPath: string): Promise<boolean> =>
       ipcRenderer.invoke('visual:updateBaseline', baselineId, currentPath),
+    // F15: re-capture the baseline from the current page with mask + freeze applied.
+    recaptureBaseline: (
+      baselineId: string,
+      maskSelectors: string | undefined,
+      freeze: boolean | undefined
+    ): Promise<boolean> =>
+      ipcRenderer.invoke('visual:recaptureBaseline', baselineId, maskSelectors, freeze),
     getBaseline: (id: string): Promise<string | null> =>
       ipcRenderer.invoke('visual:getBaseline', id)
   },

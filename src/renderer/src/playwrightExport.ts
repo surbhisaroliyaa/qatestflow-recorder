@@ -98,6 +98,37 @@ function quote(value: string): string {
   return JSON.stringify(value)
 }
 
+// F24: "Name: value" header lines → [name, value] pairs (mirrors main/apiStep
+// parseHeaders, kept renderer-local since the export is renderer-side).
+function parseHeaderLines(text?: string): Array<[string, string]> {
+  const out: Array<[string, string]> = []
+  for (const line of (text ?? '').split('\n')) {
+    const t = line.trim()
+    const i = t.indexOf(':')
+    if (i <= 0) continue
+    out.push([t.slice(0, i).trim(), t.slice(i + 1).trim()])
+  }
+  return out
+}
+
+// F24: the status assertion for an exported API step, given the response var.
+//   blank         → res.ok() (any 2xx)
+//   "Nxx" family  → a range check
+//   exact number  → toBe
+function apiStatusAssertion(expect: string | undefined, resVar: string): string {
+  const e = (expect ?? '').trim().toLowerCase()
+  if (!e) return `expect(${resVar}.ok(), 'status is 2xx').toBeTruthy()`
+  const fam = /^([1-5])xx$/.exec(e)
+  if (fam) {
+    const lo = Number(fam[1]) * 100
+    return (
+      `expect(${resVar}.status(), 'status ${e}').toBeGreaterThanOrEqual(${lo})\n` +
+      `    expect(${resVar}.status()).toBeLessThan(${lo + 100})`
+    )
+  }
+  return `expect(${resVar}.status(), 'status').toBe(${Number(e)})`
+}
+
 // F13 (a11y assertion step): severities worst→least. The step's `value` is the
 // budget — the least severe impact that still fails; unknown/absent → 'serious'.
 const A11Y_LEVELS = ['critical', 'serious', 'moderate', 'minor']
@@ -249,6 +280,12 @@ export function stepText(step: RecorderStep): string {
       return `Check accessibility — no ${a11yThreshold(step.value)}+ violations`
     case 'perf':
       return `Check performance — Core Web Vitals within "${perfBudget(step.value).label}"`
+    case 'api': {
+      const method = step.apiMethod ?? 'GET'
+      const status = (step.apiExpectStatus ?? '').trim() || '2xx'
+      const body = (step.apiExpectBody ?? '').trim() ? `, body contains "${step.apiExpectBody!.trim()}"` : ''
+      return `API ${method} ${step.url ?? ''} → expect ${status}${body}`
+    }
     case 'click':
       return `Click ${step.label}`
     case 'type':
@@ -451,7 +488,20 @@ function actionFor(
   if (step.type === 'snapshot') {
     // Day 19: Playwright manages its own baseline (created on first run, then
     // compared) — a clean 1:1 mapping for our visual snapshot.
-    return `await expect(${pageVar}).toHaveScreenshot()`
+    // F15: mask dynamic regions + control animations, mapping to Playwright's
+    // own toHaveScreenshot options.
+    const opts: string[] = []
+    const masks = (step.maskSelectors ?? '')
+      .split(/[\n,]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (masks.length) {
+      opts.push(`mask: [${masks.map((s) => `${pageVar}.locator(${quote(s)})`).join(', ')}]`)
+    }
+    // Playwright disables animations by default; only emit when the user turned
+    // freeze OFF (wants animations to render).
+    if (step.freezeAnimations === false) opts.push(`animations: 'allow'`)
+    return `await expect(${pageVar}).toHaveScreenshot(${opts.length ? `{ ${opts.join(', ')} }` : ''})`
   }
 
   if (step.type === 'a11y') {
@@ -484,6 +534,33 @@ function actionFor(
     expect(vitals.lcp, \`LCP \${Math.round(vitals.lcp)}ms\`).toBeLessThanOrEqual(${b.lcp});
     expect(vitals.cls, \`CLS \${vitals.cls.toFixed(3)}\`).toBeLessThanOrEqual(${b.cls});
   }`
+  }
+
+  if (step.type === 'api') {
+    // F24: uses Playwright's `request` fixture (added to the test signature when
+    // any api step exists), NOT the page — so it runs independent of the browser.
+    // Wrapped in a block so `res` can be reused across repeated api steps.
+    const method = (step.apiMethod ?? 'GET').toLowerCase()
+    const hasBody =
+      method !== 'get' && method !== 'delete' && !!(step.apiBody && step.apiBody.length)
+    const headers = parseHeaderLines(step.apiHeaders)
+    const optParts: string[] = []
+    if (headers.length) {
+      optParts.push(
+        `headers: { ${headers.map(([k, v]) => `${quote(k)}: ${valueExpr(v, columns)}`).join(', ')} }`
+      )
+    }
+    if (hasBody) optParts.push(`data: ${valueExpr(step.apiBody!, columns)}`)
+    const opts = optParts.length ? `, { ${optParts.join(', ')} }` : ''
+    const bodyCheck = (step.apiExpectBody ?? '').trim()
+      ? `\n    expect(await res.text()).toContain(${valueExpr(step.apiExpectBody!.trim(), columns)})`
+      : ''
+    return (
+      `{\n` +
+      `    const res = await request.${method}(${valueExpr(step.url ?? '', columns)}${opts})\n` +
+      `    ${apiStatusAssertion(step.apiExpectStatus, 'res')}${bodyCheck}\n` +
+      `  }`
+    )
   }
 
   if (step.type === 'wait') {
@@ -735,11 +812,16 @@ export function generatePlaywrightTest(
   const hasDownload = enabled.some((step) => step.type === 'download')
   const hasA11y = enabled.some((step) => step.type === 'a11y')
   const hasPerf = enabled.some((step) => step.type === 'perf')
+  // F24: an api step needs the `request` fixture in the signature and `expect`
+  // for its status/body assertions.
+  const needsRequest = enabled.some((step) => step.type === 'api')
+  const fixtures = needsRequest ? '{ page, request }' : '{ page }'
   const hasAssert =
     enabled.some((step) => step.type === 'assert' || step.type === 'snapshot') ||
     hasDownload ||
     hasA11y ||
-    hasPerf
+    hasPerf ||
+    needsRequest
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const header =
     (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
@@ -793,7 +875,7 @@ ${dataset}
 ]
 
 for (const data of dataset) {
-  test(${title}, async ({ page }) => {
+  test(${title}, async (${fixtures}) => {
 ${inner}
   })
 }
@@ -801,7 +883,7 @@ ${inner}
   }
 
   return `${header}${use}
-test(${quote(options?.name || 'recorded flow')}, async ({ page }) => {
+test(${quote(options?.name || 'recorded flow')}, async (${fixtures}) => {
 ${body}
 })
 `
@@ -1067,6 +1149,14 @@ export function generatePageObjectTest(
       if (line) specBody.push(`  ${line}`)
       continue
     }
+    // F24: an api step uses the `request` fixture (in the spec's test signature),
+    // not the page object — so it lives in the spec body, like an assert.
+    if (step.type === 'api') {
+      flush()
+      const line = actionFor(step, baseURL, 'app.page', undefined, columns, idPolicy.portable)
+      if (line) specBody.push(`  ${line}`)
+      continue
+    }
     // An action step → into the current method buffer. wait + back have no
     // element of their own (page-level actions), so handle them before the
     // no-selector skip below.
@@ -1130,7 +1220,9 @@ export function generatePageObjectTest(
   // === Build the spec file ===
   const hasA11y = enabled.some((s) => s.type === 'a11y')
   const hasPerf = enabled.some((s) => s.type === 'perf')
-  const hasAssert = enabled.some((s) => s.type === 'assert') || hasA11y || hasPerf
+  const needsRequest = enabled.some((s) => s.type === 'api')
+  const specFixtures = needsRequest ? '{ page, request }' : '{ page }'
+  const hasAssert = enabled.some((s) => s.type === 'assert') || hasA11y || hasPerf || needsRequest
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const useProps: string[] = []
   if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
@@ -1174,7 +1266,7 @@ export function generatePageObjectTest(
       `${importLines}${use}\n` +
       `const dataset = [\n${dataset}\n]\n\n` +
       `for (const data of dataset) {\n` +
-      `  test(${title}, async ({ page }) => {\n` +
+      `  test(${title}, async (${specFixtures}) => {\n` +
       `${inner}\n` +
       `  })\n` +
       `}\n`
@@ -1184,7 +1276,7 @@ export function generatePageObjectTest(
   const spec =
     `${importLines}` +
     `${use}\n` +
-    `test(${quote(options?.name || 'recorded flow')}, async ({ page }) => {\n` +
+    `test(${quote(options?.name || 'recorded flow')}, async (${specFixtures}) => {\n` +
     `  const app = new ${className}(page)\n` +
     `${specBody.join('\n')}\n` +
     `})\n`

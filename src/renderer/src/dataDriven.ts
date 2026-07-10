@@ -40,6 +40,10 @@ function tokenFields(step: RecorderStep): string[] {
   const fields: string[] = []
   if (typeof step.value === 'string') fields.push(step.value)
   if (typeof step.url === 'string') fields.push(step.url)
+  // F24: an API step's headers/body commonly carry an {{env:APIKEY}} or a
+  // {{env:BASE}} token, so they participate in token resolution too.
+  if (typeof step.apiHeaders === 'string') fields.push(step.apiHeaders)
+  if (typeof step.apiBody === 'string') fields.push(step.apiBody)
   return fields
 }
 
@@ -107,6 +111,9 @@ export function substituteSteps(
     const next: RecorderStep = { ...s }
     if (typeof s.value === 'string') next.value = substituteText(s.value, row, envMap)
     if (typeof s.url === 'string') next.url = substituteText(s.url, row, envMap)
+    // F24: resolve env/data tokens inside an API step's headers + body too.
+    if (typeof s.apiHeaders === 'string') next.apiHeaders = substituteText(s.apiHeaders, row, envMap)
+    if (typeof s.apiBody === 'string') next.apiBody = substituteText(s.apiBody, row, envMap)
     return next
   })
 }
