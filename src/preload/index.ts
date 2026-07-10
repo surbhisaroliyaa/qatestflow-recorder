@@ -219,7 +219,12 @@ const api = {
     list: (): Promise<unknown> => ipcRenderer.invoke('env:listEnvironments'),
     save: (env: unknown): Promise<unknown> => ipcRenderer.invoke('env:saveEnvironment', env),
     delete: (id: string): Promise<unknown> => ipcRenderer.invoke('env:deleteEnvironment', id),
-    setActive: (id: string | null): Promise<unknown> => ipcRenderer.invoke('env:setActive', id)
+    setActive: (id: string | null): Promise<unknown> => ipcRenderer.invoke('env:setActive', id),
+    // F25 guard "don't ask again" — persisted in userData, not renderer
+    // localStorage (which the test-isolation storage clear wipes each run).
+    rememberRetarget: (keys: string[], choice: 'run' | 'noenv'): Promise<unknown> =>
+      ipcRenderer.invoke('env:rememberRetarget', keys, choice),
+    forgetRetarget: (): Promise<unknown> => ipcRenderer.invoke('env:forgetRetarget')
   },
 
   // === Cross-browser replay (F17) ===

@@ -137,6 +137,11 @@ interface EnvironmentsAPI {
   delete: (id: string) => Promise<EnvState>
   // Select the active environment (null = run against recorded URLs); new state.
   setActive: (id: string | null) => Promise<EnvState>
+  // F25 guard "don't ask again": persist the choice for one or more host-pair
+  // keys (`envId|from|to`); resolves the new state so the cache refreshes.
+  rememberRetarget: (keys: string[], choice: 'run' | 'noenv') => Promise<EnvState>
+  // Re-enable every host-mismatch warning; resolves the new state.
+  forgetRetarget: () => Promise<EnvState>
 }
 
 // === Cross-browser replay (F17) ===
@@ -318,6 +323,7 @@ declare global {
     version: 1
     activeId: string | null
     environments: Environment[]
+    retargetSuppress: Record<string, 'run' | 'noenv'>
   }
 
   // F8: what changed on the page vs the last green run (MIRROR of src/main/domDiff.ts).

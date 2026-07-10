@@ -46,9 +46,15 @@ export interface EnvState {
   version: 1
   activeId: string | null
   environments: Environment[]
+  // F25 guard "don't ask again": host-mismatch warnings the user has silenced,
+  // keyed `envId|recordedHost|targetHost` → the choice to replay ('run' | 'noenv').
+  // Lives HERE (userData) rather than renderer localStorage on purpose: the
+  // test-isolation clearStorageData() wipes the shared session's localStorage on
+  // every run, which would erase a renderer-side suppression after one run.
+  retargetSuppress: Record<string, 'run' | 'noenv'>
 }
 
-const EMPTY: EnvState = { version: 1, activeId: null, environments: [] }
+const EMPTY: EnvState = { version: 1, activeId: null, environments: [], retargetSuppress: {} }
 
 function storePath(): string {
   return join(app.getPath('userData'), 'environments.json')
@@ -66,7 +72,12 @@ async function load(): Promise<EnvState> {
       cache = {
         version: 1,
         activeId: typeof parsed.activeId === 'string' ? parsed.activeId : null,
-        environments: parsed.environments
+        environments: parsed.environments,
+        // Absent in files written before the guard shipped — default to empty.
+        retargetSuppress:
+          parsed.retargetSuppress && typeof parsed.retargetSuppress === 'object'
+            ? parsed.retargetSuppress
+            : {}
       }
     } else {
       cache = { ...EMPTY }
@@ -119,6 +130,29 @@ export async function setActiveEnvironment(id: string | null): Promise<EnvState>
   const state = await load()
   const activeId = id && state.environments.some((e) => e.id === id) ? id : null
   const next: EnvState = { ...state, activeId }
+  await persist(next)
+  return next
+}
+
+// F25 guard: remember the user's "don't ask again" choice for one or more host
+// pairs (a suite that spans several sites silences them together). Returns the
+// full new state so the renderer's cached envState refreshes in one round-trip.
+export async function rememberRetargetChoice(
+  keys: string[],
+  choice: 'run' | 'noenv'
+): Promise<EnvState> {
+  const state = await load()
+  const retargetSuppress = { ...state.retargetSuppress }
+  for (const k of keys) retargetSuppress[k] = choice
+  const next: EnvState = { ...state, retargetSuppress }
+  await persist(next)
+  return next
+}
+
+// Re-enable every host-mismatch warning ("Reset run warnings").
+export async function forgetRetargetChoices(): Promise<EnvState> {
+  const state = await load()
+  const next: EnvState = { ...state, retargetSuppress: {} }
   await persist(next)
   return next
 }

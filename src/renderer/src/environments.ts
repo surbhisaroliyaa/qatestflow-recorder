@@ -34,6 +34,60 @@ export function retargetUrl(url: string, fromBase: string, toBase: string): stri
   return url
 }
 
+// The HOST of a base URL ("https://www.saucedemo.com" → "www.saucedemo.com"),
+// or '' when it isn't a parseable URL.
+export function hostOfBase(base: string): string {
+  try {
+    return new URL(base).host
+  } catch {
+    return ''
+  }
+}
+
+// Would an active environment send this test to a DIFFERENT SITE than the one
+// it was recorded on? Retargeting across hosts is the whole point of F25 —
+// dev/staging/prod live on different hosts — so this can't be an error. But a
+// library spanning several sites (saucedemo, the-internet, expandtesting) has a
+// trap: one active env silently re-points every test at its own host, and the
+// steps panel still shows the RECORDED url. Returns the two hosts so a caller
+// can warn, or null when there's nothing to warn about.
+export function retargetHostMismatch(
+  fromBase: string,
+  toBase: string
+): { from: string; to: string } | null {
+  const from = hostOfBase(fromBase)
+  const to = hostOfBase(toBase)
+  if (!from || !to || from === to) return null
+  return { from, to }
+}
+
+// === Host-mismatch warning suppression ("don't ask again") ==============
+// Keyed on the ENVIRONMENT *and* the host pair, never the environment alone.
+// Silencing per-environment would mean one "don't ask again" on a herokuapp
+// test also silences the warning for every other site in the library — the
+// exact trap the warning exists to catch. Per-pair, a staging env asks once for
+// the app's host and then stays quiet, while a NEW host still asks.
+//
+// The stored value is the CHOICE, so the next run can replay the decision. The
+// map itself lives in the main-process EnvState (userData) — NOT renderer
+// localStorage, which the per-run test-isolation clearStorageData() wipes. It
+// arrives via window.api.environments.* and is read here from that map.
+export type RetargetChoice = 'run' | 'noenv'
+
+export function retargetWarnKey(envId: string, from: string, to: string): string {
+  return `${envId}|${from}|${to}`
+}
+
+// Look up a remembered choice in the suppression map from EnvState.
+export function suppressedChoice(
+  suppress: Record<string, RetargetChoice> | undefined,
+  envId: string,
+  from: string,
+  to: string
+): RetargetChoice | null {
+  return suppress?.[retargetWarnKey(envId, from, to)] ?? null
+}
+
 // A COPY of the steps with every navigation re-pointed to `toBase`. No-op when
 // there's no target (no active env) or no source base to anchor the swap.
 export function retargetSteps(

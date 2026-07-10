@@ -9,7 +9,12 @@ import {
 } from './playwrightExport'
 import { generateBugReport, bugReportFileName } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
-import { retargetSteps } from './environments'
+import {
+  retargetSteps,
+  retargetHostMismatch,
+  suppressedChoice,
+  retargetWarnKey
+} from './environments'
 import {
   fillableFields,
   generateEdgeCases,
@@ -312,7 +317,8 @@ function App(): React.JSX.Element {
   const [envState, setEnvState] = useState<EnvState>({
     version: 1,
     activeId: null,
-    environments: []
+    environments: [],
+    retargetSuppress: {}
   })
   const [envManagerOpen, setEnvManagerOpen] = useState(false)
   // The environment being edited in the manager (null = the list view).
@@ -346,6 +352,16 @@ function App(): React.JSX.Element {
   )
   const [xbRunning, setXbRunning] = useState(false)
   const [xbInstalled, setXbInstalled] = useState<boolean | null>(null)
+  // F25 guard: pending host-mismatch warning. `resolve` settles the promise the
+  // run is awaiting, so the modal's buttons drive the run's next move.
+  // One entry per DISTINCT recorded host the active env would retarget. A single
+  // replay yields one; a suite spanning several sites yields several.
+  const [envWarn, setEnvWarn] = useState<{
+    mismatches: { from: string; to: string; tests: string[] }[]
+    resolve: (choice: 'run' | 'noenv' | 'cancel') => void
+  } | null>(null)
+  const [envWarnRemember, setEnvWarnRemember] = useState(false)
+  const [warnsReset, setWarnsReset] = useState(false)
   // F31 (living docs): a generated plain-English doc of the current test.
   const [docOpen, setDocOpen] = useState(false)
   const [docContent, setDocContent] = useState('')
@@ -677,18 +693,62 @@ function App(): React.JSX.Element {
   // process.env), and (2) re-point navigations from `fromBase` to the env's base
   // URL. The saved test is never rewritten. A no-op when there's nothing to do
   // (no env tokens AND no active base URL), so plain tests are unaffected.
-  const applyEnv = async (flat: RecorderStep[], fromBase: string): Promise<RecorderStep[]> => {
+  // `skipRetarget`: resolve {{env:}} vars as usual, but leave navigations on the
+  // host they were recorded against. Used when the host-mismatch warning offers
+  // "run without environment" — the creds are still wanted, the retarget isn't.
+  const applyEnv = async (
+    flat: RecorderStep[],
+    fromBase: string,
+    skipRetarget = false
+  ): Promise<RecorderStep[]> => {
     let list = flat
     const names = envVarNames(flat, [])
     if (names.length) {
       const envMap = await window.api.recorder.resolveEnv(names)
       list = substituteSteps(list, {}, envMap)
     }
-    if (activeEnv?.baseURL) {
+    if (activeEnv?.baseURL && !skipRetarget) {
       list = retargetSteps(list, fromBase || deriveBaseURL(flat), activeEnv.baseURL)
     }
     return list
   }
+
+  // F25 guard: an active environment re-points every navigation at its own host.
+  // When that host differs from the one this test was recorded on, ask first —
+  // otherwise the run silently hits 404s while the steps panel still displays
+  // the recorded URL. Resolves to the user's choice; null = no warning needed.
+  // `entries`: every test about to run, with the base URL it was RECORDED on.
+  // A single replay passes one; Run All passes all 33. Tests are grouped by
+  // recorded host, so a suite spanning three sites asks once, listing all three
+  // — not once per test.
+  const confirmRetargetFor = (
+    entries: { name: string; fromBase: string }[]
+  ): Promise<'run' | 'noenv' | 'cancel'> => {
+    const to = activeEnv?.baseURL
+    if (!to || !activeEnv) return Promise.resolve('run')
+    const byHost = new Map<string, { from: string; to: string; tests: string[] }>()
+    for (const e of entries) {
+      const m = retargetHostMismatch(e.fromBase, to)
+      if (!m) continue
+      const hit = byHost.get(m.from) ?? { ...m, tests: [] }
+      hit.tests.push(e.name)
+      byHost.set(m.from, hit)
+    }
+    const mismatches = [...byHost.values()]
+    if (mismatches.length === 0) return Promise.resolve('run')
+    // Auto-resolve ONLY when every host pair was remembered AND they all agree.
+    // A suite where one host says "run anyway" and another says "run without
+    // environment" has no single answer — ask, rather than silently pick one.
+    const suppress = envState.retargetSuppress
+    const choices = mismatches.map((m) => suppressedChoice(suppress, activeEnv.id, m.from, m.to))
+    if (choices.every((c) => c !== null) && new Set(choices).size === 1) {
+      return Promise.resolve(choices[0]!)
+    }
+    return new Promise((resolve) => setEnvWarn({ mismatches, resolve }))
+  }
+
+  const confirmRetarget = (fromBase: string): Promise<'run' | 'noenv' | 'cancel'> =>
+    confirmRetargetFor([{ name: testName || 'this test', fromBase }])
 
   // Day 18: auto-save the current UNSAVED recording as a draft (debounced), so
   // a forgotten Save never loses work. Saved tests persist via the library, so
@@ -940,7 +1000,11 @@ function App(): React.JSX.Element {
         // close the report (report closed, run kept), the browser comes back.
         (edgeRun !== null && !edgeRun.running && edgeReportOpen) ||
         xbOpen ||
-        docOpen
+        docOpen ||
+        // F25 guard: the run is BLOCKED awaiting this modal's answer, so the
+        // browser view must come down or the dialog is invisible underneath it
+        // and the replay hangs forever.
+        envWarn !== null
     )
   }, [
     exportCode,
@@ -956,7 +1020,8 @@ function App(): React.JSX.Element {
     edgeRun,
     edgeReportOpen,
     xbOpen,
-    docOpen
+    docOpen,
+    envWarn
   ])
 
   // Day 18: remember the trace policy across sessions.
@@ -1488,17 +1553,22 @@ function App(): React.JSX.Element {
     // and record the expanded→display index map so marks land on the right rows.
     const { flat, map } = await buildRunPlan(steps)
     runPlanRef.current = map
+    const fromBase = baseURL || deriveBaseURL(flat)
+    // F25 guard: the active env would send this test to another host — ask.
+    const choice = await confirmRetarget(fromBase)
+    if (choice === 'cancel') return
+    const noEnv = choice === 'noenv'
     if (isDataDriven) {
       const row = dataRows[0] ?? {}
       const envMap = await window.api.recorder.resolveEnv(envVarNames(flat, [row]))
       let list = substituteSteps(flat, resolveRow(row, envMap), envMap)
-      if (activeEnv?.baseURL) list = retargetSteps(list, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
+      if (activeEnv?.baseURL && !noEnv) list = retargetSteps(list, fromBase, activeEnv.baseURL)
       await runOnce(list, testFileName, false)
       return
     }
     setDataRun(null) // a plain single replay clears any stale matrix banner
     // F25: resolve {{env:}} creds + re-point navigations at the active env (if any).
-    const list = await applyEnv(flat, baseURL || deriveBaseURL(flat))
+    const list = await applyEnv(flat, fromBase, noEnv)
     await runOnce(list, testFileName, true)
   }
 
@@ -1619,6 +1689,11 @@ function App(): React.JSX.Element {
   const handleRunEdgeCases = async (): Promise<void> => {
     const cases = generateEdgeCases(edgeFlat, [...edgeFields], edgeGroups)
     if (cases.length <= 1) return // nothing but the baseline
+    // F25 guard: ask ONCE before the batch, not once per variant — every variant
+    // of this one test shares the same recorded host.
+    const edgeChoice = await confirmRetarget(baseURL || deriveBaseURL(edgeFlat))
+    if (edgeChoice === 'cancel') return
+    const edgeNoEnv = edgeChoice === 'noenv'
     // A success check is what lets us tell "app rejected the bad input" (the
     // check fails) from "app accepted it" (the check still passes). Without one,
     // we can only report what happened, not judge it.
@@ -1644,7 +1719,7 @@ function App(): React.JSX.Element {
       setEdgeRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: label } : prev))
       // Resolve {{env:}} creds + retarget URLs on the OTHER fields, exactly like
       // a normal run (the perturbed field is a literal hostile value).
-      const list = await applyEnv(c.steps, baseURL || deriveBaseURL(c.steps))
+      const list = await applyEnv(c.steps, baseURL || deriveBaseURL(c.steps), edgeNoEnv)
       // silent=true: don't pollute the workspace single-run panels with each
       // variant. traceOverride='always': keep a FULL recording for every variant
       // so each report row can open its own run.
@@ -2293,6 +2368,22 @@ function App(): React.JSX.Element {
   // next) — then show the full picture, like a CI run.
   const handleRunSuite = async (suite: string, tests: SavedTestSummary[]): Promise<void> => {
     if (tests.length === 0) return
+    // F25 guard, BEFORE we navigate away from the library: a suite spans several
+    // sites, so read each test's RECORDED base URL and warn once with the full
+    // picture. This is where the trap bites hardest — one active env silently
+    // retargets every test in the suite.
+    const bases = await Promise.all(
+      tests.map(async (t) => {
+        const d = await window.api.library.load(t.fileName)
+        return {
+          name: t.name,
+          fromBase: d ? d.baseURL || deriveBaseURL(d.steps as RecorderStep[]) : ''
+        }
+      })
+    )
+    const suiteChoice = await confirmRetargetFor(bases)
+    if (suiteChoice === 'cancel') return
+    const suiteNoEnv = suiteChoice === 'noenv'
     setHasNavigated(true)
     setSuiteRun({
       suite,
@@ -2329,7 +2420,11 @@ function App(): React.JSX.Element {
         // {{env:}} creds + re-point its navigations (its OWN recorded base is the
         // anchor). No active env → unchanged. This is the scale win: one Run All,
         // every test against staging/prod in one click.
-        const listSuite = await applyEnv(flatSuite, data.baseURL || deriveBaseURL(flatSuite))
+        const listSuite = await applyEnv(
+          flatSuite,
+          data.baseURL || deriveBaseURL(flatSuite),
+          suiteNoEnv
+        )
         // F1: each test in the suite replays against its own saved HAR, if any.
         const result = await runOnce(listSuite, t.fileName, false, data.storageState, data.har)
         entry = {
@@ -3237,6 +3332,18 @@ function App(): React.JSX.Element {
               </ul>
             )}
             <div className="modal-footer">
+              {/* "Don't ask again" is never a one-way door. */}
+              <button
+                className="modal-btn"
+                onClick={() => {
+                  window.api.environments.forgetRetarget().then(setEnvState)
+                  setWarnsReset(true)
+                  window.setTimeout(() => setWarnsReset(false), 2000)
+                }}
+                title="Show the host-mismatch warning again for every environment you dismissed"
+              >
+                {warnsReset ? '✓ Warnings reset' : 'Reset run warnings'}
+              </button>
               <button
                 className="modal-btn"
                 onClick={() => setActiveEnv(null)}
@@ -3256,6 +3363,88 @@ function App(): React.JSX.Element {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  )
+
+  // F25 guard: the active environment points at a different site than the one
+  // this test was recorded on. Every button settles the promise handleReplay is
+  // awaiting, so the run can't proceed until a choice is made. No backdrop
+  // click-to-close: dismissing without a choice would hang the run.
+  // Cancel is never remembered: a stored "cancel" would make the test silently
+  // unrunnable under this env, with no modal left to explain why.
+  const settleEnvWarn = (choice: 'run' | 'noenv' | 'cancel'): void => {
+    if (envWarn && activeEnv && envWarnRemember && choice !== 'cancel') {
+      // Persist for every host pair shown — the checkbox names them all. Goes to
+      // the main-process store (userData), which the per-run storage clear can't
+      // touch; refresh the cached envState so the next run sees it.
+      const keys = envWarn.mismatches.map((m) => retargetWarnKey(activeEnv.id, m.from, m.to))
+      window.api.environments.rememberRetarget(keys, choice).then(setEnvState)
+    }
+    envWarn?.resolve(choice)
+    setEnvWarn(null)
+    setEnvWarnRemember(false)
+  }
+  const envWarnModal = envWarn && (
+    <div className="modal-backdrop">
+      <div className="modal env-warn" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">⚠ Environment retargets this run</span>
+        </div>
+        <div className="env-warn-body">
+          <p>
+            The active environment <strong>{activeEnv?.name}</strong> re-points every navigation at{' '}
+            <code className="env-warn-to">{envWarn.mismatches[0].to}</code>.{' '}
+            {envWarn.mismatches.length === 1 && envWarn.mismatches[0].tests.length === 1
+              ? 'This test was recorded somewhere else.'
+              : `${envWarn.mismatches.reduce((n, m) => n + m.tests.length, 0)} test(s) in this run were recorded on ${envWarn.mismatches.length} other host(s).`}
+          </p>
+          <div className="env-warn-hosts">
+            {envWarn.mismatches.map((m) => (
+              <div key={m.from} className="env-warn-row">
+                <code>{m.from}</code>
+                <span className="env-warn-arrow">→</span>
+                <code className="env-warn-to">{m.to}</code>
+                <span className="env-warn-count" title={m.tests.join('\n')}>
+                  {m.tests.length === 1 ? m.tests[0] : `${m.tests.length} tests`}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="env-warn-hint">
+            If those aren’t the same app, the run will hit pages that don’t exist.
+          </p>
+          <label className="env-warn-remember">
+            <input
+              type="checkbox"
+              checked={envWarnRemember}
+              onChange={(e) => setEnvWarnRemember(e.target.checked)}
+            />
+            <span>
+              Don’t ask again for{' '}
+              {envWarn.mismatches.length === 1 ? (
+                <>
+                  <code>{envWarn.mismatches[0].from}</code> →{' '}
+                  <code>{envWarn.mismatches[0].to}</code>
+                </>
+              ) : (
+                <>these {envWarn.mismatches.length} host pairs</>
+              )}
+              <em> (these host pairs only — a new site still asks)</em>
+            </span>
+          </label>
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={() => settleEnvWarn('cancel')}>
+            Cancel
+          </button>
+          <button className="modal-btn" onClick={() => settleEnvWarn('run')}>
+            Run anyway
+          </button>
+          <button className="modal-btn primary" onClick={() => settleEnvWarn('noenv')}>
+            Run without environment
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -3297,6 +3486,9 @@ function App(): React.JSX.Element {
       <div className="welcome">
         {envManagerModal}
         {docsModal}
+        {/* Run All is launched from here; its host-mismatch warning must render
+            on this screen too, before the suite navigates to the workspace. */}
+        {envWarnModal}
         <div className="welcome-content">
           <h1 className="logo-text">QATestFlow Recorder</h1>
           <p className="tagline">No-code QA test recorder with AI-powered selectors</p>
@@ -6649,6 +6841,9 @@ function App(): React.JSX.Element {
           </div>
         </div>
       )}
+
+      {/* F25 guard: host-mismatch warning, blocks the run until answered. */}
+      {envWarnModal}
 
       {/* === F13: accessibility scan panel — WCAG A/AA violations for the
            current page, grouped by rule, each expandable to the offending

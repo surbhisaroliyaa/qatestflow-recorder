@@ -93,6 +93,8 @@ import {
   saveEnvironment,
   deleteEnvironment,
   setActiveEnvironment,
+  rememberRetargetChoice,
+  forgetRetargetChoices,
   activeEnvVars,
   activeEnvironment,
   type Environment
@@ -3206,6 +3208,10 @@ function createWindow(): void {
   ipcMain.handle('env:saveEnvironment', (_event, env: Environment) => saveEnvironment(env))
   ipcMain.handle('env:deleteEnvironment', (_event, id: string) => deleteEnvironment(id))
   ipcMain.handle('env:setActive', (_event, id: string | null) => setActiveEnvironment(id))
+  ipcMain.handle('env:rememberRetarget', (_event, keys: string[], choice: 'run' | 'noenv') =>
+    rememberRetargetChoice(keys, choice)
+  )
+  ipcMain.handle('env:forgetRetarget', () => forgetRetargetChoices())
 
   // === Cross-browser replay (F17) ====================================
   // Chromium is the embedded engine; WebKit/Firefox can only run via REAL
