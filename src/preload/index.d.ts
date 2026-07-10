@@ -717,6 +717,10 @@ declare global {
     text?: string // for kind 'text' — visible text
     nth?: number // Day 10(b) — which of several matches is ours (0-based)
     pinned?: boolean // Day 10(c) — hand-picked in the ladder UI; replay tries it first
+    // for kind 'testId' — the attribute the id came from ('data-test' vs
+    // 'data-testid'). Absent on tests recorded before this was captured, in
+    // which case the export falls back to a both-attribute CSS locator.
+    testIdAttr?: 'data-test' | 'data-testid'
   }
 
   // One recorded action (the canonical step model). `navigate` carries `url`;

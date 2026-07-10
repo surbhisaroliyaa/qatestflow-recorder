@@ -345,6 +345,56 @@ function dialogHandler(step: RecorderStep, pageVar: string): string {
   return `${pageVar}.once('dialog', (dialog) => dialog.accept())`
 }
 
+// =====================================================================
+// TEST-ID PORTABILITY
+// The recorder reads a test id from EITHER `data-test` or `data-testid`, but
+// real Playwright's `getByTestId()` resolves exactly ONE attribute (default
+// `data-testid`). So an exported `getByTestId('username')` silently matches
+// nothing on a site using `data-test` — the locator just times out.
+//
+// Fix: when every test-id step agrees on the attribute (recorded as
+// `testIdAttr`), the file declares it once via `test.use({ testIdAttribute })`
+// and keeps the idiomatic `getByTestId(...)`. When the attribute is UNKNOWN
+// (tests recorded before we captured it) or MIXED across steps, we fall back to
+// a both-attribute CSS locator, which is correct without any config.
+// =====================================================================
+
+// Does this step's primary selector use getByTestId? Returns the trailing
+// modifiers (e.g. `.nth(1)`) so a rewrite can preserve them.
+function testIdParts(step: RecorderStep): { value: string; suffix: string } | null {
+  const m = /^getByTestId\((['"])([\s\S]*?)\1\)([\s\S]*)$/.exec(step.selector ?? '')
+  return m ? { value: m[2], suffix: m[3] ?? '' } : null
+}
+
+function testIdAttrOf(step: RecorderStep): 'data-test' | 'data-testid' | undefined {
+  return step.candidates?.find((c) => c.kind === 'testId')?.testIdAttr
+}
+
+// A both-attribute locator for a getByTestId step (the portable fallback).
+function portableTestIdSelector(step: RecorderStep): string | null {
+  const parts = testIdParts(step)
+  if (!parts) return null
+  const cand = step.candidates?.find((c) => c.kind === 'testId')
+  const css = cand?.css ?? `[data-test="${parts.value}"], [data-testid="${parts.value}"]`
+  return `locator(${quote(css)})${parts.suffix}`
+}
+
+// Decide, for a whole file: keep getByTestId (+ declare the attribute), or emit
+// portable locators. `attr` is undefined when there are no test-id steps.
+export function testIdPolicy(steps: RecorderStep[]): {
+  portable: boolean
+  attr?: 'data-test' | 'data-testid'
+} {
+  const idSteps = steps.filter((s) => testIdParts(s) !== null)
+  if (idSteps.length === 0) return { portable: false }
+  const attrs = new Set(idSteps.map((s) => testIdAttrOf(s)).filter(Boolean))
+  const allKnown = idSteps.every((s) => !!testIdAttrOf(s))
+  if (allKnown && attrs.size === 1) {
+    return { portable: false, attr: [...attrs][0] as 'data-test' | 'data-testid' }
+  }
+  return { portable: true } // unknown (legacy) or mixed → no single attribute works
+}
+
 // The actual Playwright action for one step (without the leading comment).
 // `baseURL`: when a navigate's URL lives under it, emit just the PATH —
 // `test.use({ baseURL })` (added by the generator, itself reading
@@ -360,7 +410,9 @@ function actionFor(
   // Day 20 (data-driven): the data columns in play. A value containing a
   // {{column}} or {{env:…}} token is emitted as an expression (data.x /
   // process.env.X) instead of a quoted literal. Empty = no data → quote().
-  columns: string[] = []
+  columns: string[] = [],
+  // When true, rewrite getByTestId(…) to a both-attribute CSS locator (see above).
+  portableTestId = false
 ): string | null {
   if (step.type === 'navigate') {
     let url = step.url ?? ''
@@ -458,7 +510,10 @@ function actionFor(
 
   if (!step.selector) return null
   const base = pageBase(pageVar, step.frame)
-  const locator = elementLocator ?? `${base}.${step.selector}`
+  // In portable mode a getByTestId(…) selector becomes a both-attribute CSS
+  // locator, so the exported test resolves without a testIdAttribute setting.
+  const sel = (portableTestId && portableTestIdSelector(step)) || step.selector
+  const locator = elementLocator ?? `${base}.${sel}`
 
   // Assertions translate 1:1 to Playwright's expect() matchers.
   if (step.type === 'assert') {
@@ -497,7 +552,7 @@ function actionFor(
       case 'count': {
         // The recorded selector pinpoints ONE element (maybe via .nth) — a
         // count check is about the GROUP, so assert on the selector minus nth.
-        const group = (step.selector ?? '').replace(/\.nth\(\d+\)$/, '')
+        const group = sel.replace(/\.nth\(\d+\)$/, '')
         const v = step.value ?? '0'
         // A tokenized count comes through as a string → coerce with Number().
         const n = hasRefs(v, columns)
@@ -578,6 +633,9 @@ export function generatePlaywrightTest(
   )
   const pv = (windowId?: number): string => (multiWindow ? `page${windowId ?? 0}` : 'page')
 
+  // Test-id portability: declare the attribute, or fall back to CSS locators.
+  const idPolicy = testIdPolicy(enabled)
+
   const lines: string[] = []
   for (let i = 0; i < enabled.length; i++) {
     const step = enabled[i]
@@ -609,7 +667,7 @@ export function generatePlaywrightTest(
     if (next && next.type === 'download') {
       lines.push(`  const download${i + 1}Promise = ${pageVar}.waitForEvent('download')`)
     }
-    const action = actionFor(step, baseURL, pageVar, undefined, columns)
+    const action = actionFor(step, baseURL, pageVar, undefined, columns, idPolicy.portable)
     if (!action) continue
     // Day 17: a step that OPENS a tab must set up the page wait BEFORE the click,
     // so wrap it in Promise.all([context.waitForEvent('page'), <action>]) and
@@ -680,6 +738,9 @@ export function generatePlaywrightTest(
   // emitted relative to the base, so overriding this one value retargets them all.
   const useProps: string[] = []
   if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
+  // Tell Playwright which attribute getByTestId() should read — without this it
+  // looks for `data-testid` and a `data-test` app's locators never resolve.
+  if (idPolicy.attr) useProps.push(`testIdAttribute: ${quote(idPolicy.attr)}`)
   if (options?.storageState) {
     useProps.push(`storageState: ${quote(`sessions/${options.storageState}`)}`)
   }
@@ -759,6 +820,9 @@ export function generateEdgeSuite(
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const variants = cases.filter((c) => !c.baseline)
+  // Test-id portability, decided once across every variant's steps (they share
+  // the same flow, so the policy is uniform for the whole file).
+  const idPolicy = testIdPolicy(cases.flatMap((c) => c.steps).filter((s) => !s.disabled))
 
   const testBlocks: string[] = []
   for (const c of variants) {
@@ -771,13 +835,13 @@ export function generateEdgeSuite(
 
     const actionLines: string[] = []
     for (const step of actionSteps) {
-      const action = actionFor(step, baseURL, 'page', undefined, [])
+      const action = actionFor(step, baseURL, 'page', undefined, [], idPolicy.portable)
       if (!action) continue
       actionLines.push(`  // ${stepText(step)}\n  ${action}`)
     }
 
     const checkLines = checkSteps
-      .map((s) => actionFor(s, baseURL, 'page', undefined, []))
+      .map((s) => actionFor(s, baseURL, 'page', undefined, [], idPolicy.portable))
       .filter((x): x is string => !!x)
 
     const safeVal = (c.value || '').replace(/\s+/g, ' ').trim().slice(0, 50) || '(empty)'
@@ -812,6 +876,8 @@ export function generateEdgeSuite(
 
   const useProps: string[] = []
   if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
+  // Same reason as generatePlaywrightTest: getByTestId needs the right attribute.
+  if (idPolicy.attr) useProps.push(`testIdAttribute: ${quote(idPolicy.attr)}`)
   if (options?.viewport) {
     useProps.push(
       `viewport: { width: ${options.viewport.width}, height: ${options.viewport.height} }`
@@ -884,6 +950,8 @@ export function generatePageObjectTest(
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const className = `${pascalName(options?.name || 'recorded flow')}Page`
   const pageFileName = `${className}.ts`
+  // Test-id portability — same policy as the inline export (see testIdPolicy).
+  const idPolicy = testIdPolicy(enabled)
 
   // Member names shared across locators + methods (a class can't have a property
   // and a method with the same name), plus reserved members.
@@ -891,7 +959,10 @@ export function generatePageObjectTest(
   const locatorDefs: { name: string; selector: string }[] = []
   const nameByExpr = new Map<string, string>()
   const nameForElement = (step: RecorderStep, clickTarget = false): string => {
-    const expr = step.selector as string
+    // The class's Locator fields must use the SAME portable rewrite as the
+    // inline export, or a data-test app's POM locators resolve to nothing.
+    const expr = ((idPolicy.portable && portableTestIdSelector(step)) ||
+      step.selector) as string
     const existing = nameByExpr.get(expr)
     if (existing) return existing
     // A clicked element's locator gets a "Button" suffix (the POM convention for
@@ -959,7 +1030,14 @@ export function generatePageObjectTest(
       const name = usesElement(step) ? nameForElement(step) : ''
       // The assert lives in the spec, where `data` is in scope (inside the
       // per-row loop), so a tokenized expected value can stay a `data.*` ref.
-      const line = actionFor(step, baseURL, 'app.page', name ? `app.${name}` : undefined, columns)
+      const line = actionFor(
+        step,
+        baseURL,
+        'app.page',
+        name ? `app.${name}` : undefined,
+        columns,
+        idPolicy.portable
+      )
       if (line) specBody.push(`  ${line}`)
       continue
     }
@@ -968,7 +1046,7 @@ export function generatePageObjectTest(
     // not a page-object method.
     if (step.type === 'a11y' || step.type === 'perf') {
       flush()
-      const line = actionFor(step, baseURL, 'app.page', undefined, columns)
+      const line = actionFor(step, baseURL, 'app.page', undefined, columns, idPolicy.portable)
       if (line) specBody.push(`  ${line}`)
       continue
     }
@@ -976,14 +1054,14 @@ export function generatePageObjectTest(
     // element of their own (page-level actions), so handle them before the
     // no-selector skip below.
     if (step.type === 'wait' || step.type === 'back') {
-      const line = actionFor(step, baseURL, 'this.page', undefined, columns)
+      const line = actionFor(step, baseURL, 'this.page', undefined, columns, idPolicy.portable)
       if (line) buffer.push(`    ${line}`)
       if (stepUsesData(step)) bufferUsesData = true
       continue
     }
     if (!step.selector) continue
     const name = nameForElement(step, step.type === 'click')
-    const line = actionFor(step, baseURL, 'this.page', `this.${name}`, columns)
+    const line = actionFor(step, baseURL, 'this.page', `this.${name}`, columns, idPolicy.portable)
     if (line) buffer.push(`    ${line}`)
     if (stepUsesData(step)) bufferUsesData = true
     if (step.type === 'click' || step.type === 'press') lastActionLabel = step.label || ''
@@ -1039,6 +1117,8 @@ export function generatePageObjectTest(
   const imports = hasAssert ? '{ test, expect }' : '{ test }'
   const useProps: string[] = []
   if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
+  // Same reason as the inline export: getByTestId needs the right attribute.
+  if (idPolicy.attr) useProps.push(`testIdAttribute: ${quote(idPolicy.attr)}`)
   if (options?.storageState) {
     useProps.push(`storageState: ${quote(`sessions/${options.storageState}`)}`)
   }

@@ -24,6 +24,9 @@ export interface DupInfo {
 export interface ElementFacts {
   tag: string
   testId?: string // data-test / data-testid — put there FOR testing
+  // WHICH attribute held the test id. Needed by the export: Playwright's
+  // getByTestId() reads a single configurable attribute (default data-testid).
+  testIdAttr?: 'data-test' | 'data-testid'
   id?: string
   name?: string
   role?: string // aria role (explicit, or implied by the tag/type)
@@ -57,6 +60,9 @@ export interface SelectorCandidate {
   role?: string // for kind 'role' — the ARIA role
   name?: string // for kind 'role' — the accessible name
   text?: string // for kind 'text' — the visible text
+  // for kind 'testId' — the attribute the id came from, so the export can emit
+  // `testIdAttribute` (absent on tests recorded before this was captured).
+  testIdAttr?: 'data-test' | 'data-testid'
   // Day 10(b): when this strategy matched several elements, which one is ours.
   // A selector that silently matches 5 things is a lie — .nth() makes the
   // ambiguity explicit (and costs score: position is fragile).
@@ -127,7 +133,10 @@ export function buildSelectors(facts: ElementFacts): BuiltSelector {
           // Match BOTH conventions — the element may carry data-test OR
           // data-testid (we read either as the test id), and getByTestId in
           // export defaults to data-testid. Mirrors collectDup's both-attr count.
-          css: `[data-test="${esc(facts.testId)}"], [data-testid="${esc(facts.testId)}"]`
+          css: `[data-test="${esc(facts.testId)}"], [data-testid="${esc(facts.testId)}"]`,
+          // Which one it actually was — the export declares it via
+          // `testIdAttribute` so getByTestId resolves in real Playwright.
+          testIdAttr: facts.testIdAttr
         },
         dup.testId
       )

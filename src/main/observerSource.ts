@@ -542,8 +542,17 @@ export function observerProgram(): void {
   function collectFacts(el: Element): ElementFacts {
     const facts: ElementFacts = { tag: el.tagName.toLowerCase() }
 
-    const testId = el.getAttribute('data-test') || el.getAttribute('data-testid')
-    if (testId) facts.testId = testId
+    // Remember WHICH attribute carried the test id. Both conventions exist, and
+    // real Playwright's getByTestId() reads only ONE of them (data-testid by
+    // default) — so the export must declare the attribute it actually saw, or
+    // the exported locator matches nothing. Mirrors the `||` preference below.
+    const dataTest = el.getAttribute('data-test')
+    const dataTestId = el.getAttribute('data-testid')
+    const testId = dataTest || dataTestId
+    if (testId) {
+      facts.testId = testId
+      facts.testIdAttr = dataTest ? 'data-test' : 'data-testid'
+    }
     if (el.id) facts.id = el.id
 
     const name = el.getAttribute('name')

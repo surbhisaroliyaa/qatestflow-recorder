@@ -93,6 +93,16 @@ ${projects}
 `
 }
 
+// Remove ANSI colour escapes (ESC "[" … "m") from Playwright's error text: the
+// raw escapes rendered as literal "[31m…" in the results modal AND ate into the
+// 300-char budget, hiding the useful part of the message. The ESC is required in
+// the pattern, so a literal "[0m" inside a real error message is never eaten.
+const ESC = String.fromCharCode(27)
+const ANSI_RE = new RegExp(ESC + '\\[[0-9;]*m', 'g')
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '')
+}
+
 // Walk the Playwright JSON report and collect every test with its project name.
 // The tree is suites → (nested suites) → specs → tests; tests carry projectName
 // and a results[] with a status. A project "passes" when all its tests passed.
@@ -120,7 +130,10 @@ function collectTests(
           project: test.projectName || 'unknown',
           title: spec.title || 'test',
           ok,
-          error: firstErr ? firstErr.replace(/\s+/g, ' ').slice(0, 300) : undefined
+          // Playwright colourises its messages; the raw ANSI escapes rendered as
+          // literal "[31m…" in the UI AND ate into the 300-char budget, hiding
+          // the useful part (the call log, e.g. "waiting for getByTestId(…)").
+          error: firstErr ? stripAnsi(firstErr).replace(/\s+/g, ' ').slice(0, 300) : undefined
         })
       }
     }
