@@ -12,6 +12,7 @@
 import { join } from 'path'
 import { mkdir, writeFile, readFile, rm, readdir } from 'fs/promises'
 import { libraryDir } from './library'
+import type { ApiEvidence } from './apiStep'
 
 // One recorded step in a trace. `text` is the human sentence (computed by
 // the renderer and handed in, so the trace is self-contained). Asset file
@@ -30,6 +31,10 @@ export interface TraceStepRecord {
   domFile?: string
   consoleErrors: string[]
   networkErrors: string[]
+  // F24: an API step's HTTP exchange. It has NO screenshot on purpose — the
+  // request/response is the evidence; a photo of whatever page the browser
+  // happened to be showing is not, and reads as if the page were involved.
+  apiEvidence?: ApiEvidence
 }
 
 export interface TraceManifest {
@@ -307,9 +312,35 @@ export function generateReportHtml(
   const statusIcon = (st: string): string =>
     st === 'done' ? '✓' : st === 'error' ? '✗' : st === 'skipped' ? '⤼' : '○'
 
+  // F24: the HTTP exchange, shown where a UI step would show its screenshot.
+  // Credentials arrive already masked (apiStep.ts) — this report gets shared.
+  const apiBlock = (a: ApiEvidence): string =>
+    `<div class="ev-log ev-api"><div class="ev-lbl">API request / response</div>` +
+    `<div class="ev-line">${esc(`${a.method} ${a.url}`)}</div>` +
+    (a.requestHeaders
+      ? a.requestHeaders
+          .split('\n')
+          .map((l) => `<div class="ev-line">${esc(l)}</div>`)
+          .join('')
+      : '') +
+    (a.requestBody ? `<div class="ev-line">${esc(a.requestBody)}</div>` : '') +
+    `<div class="ev-line">${esc(
+      a.status === undefined ? '← no response (never reached the server)' : `← ${a.status}`
+    )}</div>` +
+    (a.responseBody ? `<div class="ev-line">${esc(a.responseBody)}</div>` : '') +
+    `</div>`
+
   const evidenceBlocks = (s: TraceStepRecord): string => {
     const parts: string[] = []
+    // F24: for an API step the exchange leads (it IS the evidence) and the page
+    // follows, captioned so no one reads it as the cause of an HTTP failure.
+    if (s.apiEvidence) parts.push(apiBlock(s.apiEvidence))
     if (s.screenshotFile && assets[s.screenshotFile]) {
+      if (s.apiEvidence) {
+        parts.push(
+          `<div class="ev-lbl">Page at the time — context only; the API call above did not involve this page</div>`
+        )
+      }
       parts.push(`<img class="ev-shot" src="${src(s.screenshotFile)}" alt="Screenshot of step ${s.index + 1}">`)
     }
     for (const [lbl, arr] of [
@@ -330,7 +361,10 @@ export function generateReportHtml(
   const stepRows = steps
     .map((s) => {
       const hasEvidence =
-        (s.screenshotFile && assets[s.screenshotFile]) || s.consoleErrors?.length || s.networkErrors?.length
+        (s.screenshotFile && assets[s.screenshotFile]) ||
+        s.apiEvidence ||
+        s.consoleErrors?.length ||
+        s.networkErrors?.length
       const barPct = Math.round(((s.durationMs || 0) / maxMs) * 100)
       const openAttr = s.status === 'error' ? ' open' : '' // failures are expanded by default
       const inner =
@@ -489,6 +523,8 @@ export function generateReportHtml(
           (fs) => `<div class="fb-item">
         ${multiFail ? `<div class="fb-step">Step ${fs.index + 1} — ${esc(fs.text)}</div>` : ''}
         ${fs.error ? `<div class="fb-err">${esc(fs.error)}</div>` : ''}
+        ${fs.apiEvidence ? apiBlock(fs.apiEvidence) : ''}
+        ${fs.apiEvidence && fs.screenshotFile && assets[fs.screenshotFile] ? `<div class="ev-lbl">Page at the time — context only; the API call above did not involve this page</div>` : ''}
         ${fs.screenshotFile && assets[fs.screenshotFile] ? `<img src="${src(fs.screenshotFile)}" alt="Failure screenshot for step ${fs.index + 1}">` : ''}
       </div>`
         )

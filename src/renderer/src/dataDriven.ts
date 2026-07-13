@@ -24,6 +24,22 @@ const ENV_PREFIX = 'env:'
 const isEnvToken = (name: string): boolean => name.startsWith(ENV_PREFIX)
 export const envVarOf = (name: string): string => name.slice(ENV_PREFIX.length).trim()
 
+// F24.1 — RUNTIME tokens, resolved by MAIN during the run, not here.
+//   {{uuid}} {{timestamp}} {{randomInt}}  a fresh value per run (unique data)
+//   {{saved:orderId}}                     a value lifted out of an API response
+// MIRROR: src/main/runtimeTokens.ts owns the resolution; this module only has to
+// KEEP ITS HANDS OFF them. Two things would otherwise break:
+//   1. dataColumns() would turn {{uuid}} into a column in the data table;
+//   2. substituteText() blanks unknown tokens, so {{saved:orderId}} would become
+//      '' before the run even started — and `DELETE /orders/` on a real API can
+//      mean "delete the whole collection". Leaving them intact is not cosmetic.
+const SAVED_PREFIX = 'saved:'
+const DYNAMIC_TOKENS = ['uuid', 'timestamp', 'randomInt']
+export function isRuntimeToken(name: string): boolean {
+  const n = name.trim()
+  return n.startsWith(SAVED_PREFIX) || DYNAMIC_TOKENS.includes(n)
+}
+
 // Every token name inside a string, trimmed and in order (duplicates kept —
 // callers dedupe when they need to).
 export function extractTokens(text: string | undefined | null): string[] {
@@ -62,7 +78,9 @@ export function dataColumns(steps: RecorderStep[]): string[] {
   for (const s of steps) {
     for (const f of tokenFields(s)) {
       for (const t of extractTokens(f)) {
-        if (isEnvToken(t) || seen.has(t)) continue
+        // F24.1: runtime tokens are NOT columns — nobody types a uuid into a
+        // data table, and a saved id doesn't exist until the run produces it.
+        if (isEnvToken(t) || isRuntimeToken(t) || seen.has(t)) continue
         seen.add(t)
         cols.push(t)
       }
@@ -92,9 +110,12 @@ export function substituteText(
   row: Record<string, string>,
   envMap: Record<string, string>
 ): string {
-  return text.replace(TOKEN_RE, (_m, raw) => {
+  return text.replace(TOKEN_RE, (whole, raw) => {
     const name = String(raw).trim()
     if (isEnvToken(name)) return envMap[envVarOf(name)] ?? ''
+    // F24.1: leave runtime tokens EXACTLY as written — main resolves them mid-run.
+    // Blanking them here (the old `?? ''`) would silently gut the step.
+    if (isRuntimeToken(name)) return whole
     return row[name] ?? ''
   })
 }

@@ -90,6 +90,14 @@ export function suppressedChoice(
 
 // A COPY of the steps with every navigation re-pointed to `toBase`. No-op when
 // there's no target (no active env) or no source base to anchor the swap.
+//
+// F24: an `api` step carries a URL too, and it MUST follow the environment. If
+// it didn't, "run the suite against staging" would send the UI to staging while
+// the API calls kept hitting PROD — and an API setup step is usually a POST /
+// DELETE, so a staging run would quietly write to the production database. The
+// safety rule lives in retargetUrl: only a URL on the recorded base's own origin
+// is swapped, so a THIRD-PARTY endpoint (Stripe, Auth0, a public API) is left
+// exactly as recorded — it was never ours to retarget.
 export function retargetSteps(
   steps: RecorderStep[],
   fromBase: string,
@@ -97,8 +105,39 @@ export function retargetSteps(
 ): RecorderStep[] {
   if (!toBase || !fromBase) return steps
   return steps.map((s) =>
-    s.type === 'navigate' && typeof s.url === 'string'
+    (s.type === 'navigate' || s.type === 'api') && typeof s.url === 'string'
       ? { ...s, url: retargetUrl(s.url, fromBase, toBase) }
       : s
   )
+}
+
+// F24 × F25 guard: which hosts will this test's API steps ACTUALLY call once the
+// active environment has done its retargeting? Any host that isn't the
+// environment's own is reported — because retargetUrl only rewrites URLs on the
+// recorded base's origin, and that leaves two very different cases looking the
+// same from the outside:
+//
+//   • a deliberate third-party call (jsonplaceholder, Stripe) — correct, ignore;
+//   • the app's OWN API on a separate host (api.shop.com next to www.shop.com) —
+//     NOT retargeted, so a "staging" run still hits the PRODUCTION API. This is
+//     the trap, and it is invisible: every navigation went to staging, so the
+//     existing host-mismatch check sees nothing wrong.
+//
+// We can't tell those two apart automatically (both are "a host the env doesn't
+// cover"), so we don't guess — we name the hosts and let the human decide.
+export function apiHostsOutsideEnv(
+  steps: RecorderStep[],
+  fromBase: string,
+  toBase: string
+): string[] {
+  if (!toBase) return []
+  const envHost = hostOfBase(toBase)
+  const hosts = new Set<string>()
+  for (const s of steps) {
+    if (s.type !== 'api' || typeof s.url !== 'string' || !s.url.trim()) continue
+    // The URL as it will be CALLED (after any retarget), not as recorded.
+    const host = hostOfBase(retargetUrl(s.url, fromBase, toBase))
+    if (host && host !== envHost) hosts.add(host)
+  }
+  return [...hosts]
 }

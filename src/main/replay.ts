@@ -42,6 +42,9 @@ export interface ReplayStep {
   // popup). Replay uses a shorter find timeout for it, and a failure is treated
   // as a skip (not a test failure) — see the run loop in index.ts.
   optional?: boolean
+  // F24.4: a CLEANUP step — it runs even when an earlier step failed and ended
+  // the run, so a broken test still deletes the data it created. API steps only.
+  teardown?: boolean
   baselineId?: string // Day 19: a `snapshot` step's baseline image id
   maskSelectors?: string // F15: CSS selectors whose rects are masked out of the diff
   freezeAnimations?: boolean // F15: disable animations before capture (default on)
@@ -67,6 +70,20 @@ export interface ReplayStep {
   apiBody?: string
   apiExpectStatus?: string
   apiExpectBody?: string
+  // F24.1: lift values out of the response into {{saved:NAME}} tokens for later
+  // steps — one `name = json.path` per line. Without this, create → verify →
+  // delete is impossible: the server invents the id, so you can't type it.
+  apiSave?: string
+  // F24.2: real assertions ("status equals CONFIRMED"), one per line — a
+  // substring "contains" check passes on {"id": null} and proves nothing.
+  apiChecks?: string
+  apiContract?: Record<string, string> // the captured response SHAPE (path → type)
+  apiMaxMs?: number // SLA: fail if it took longer than this
+  apiTimeoutMs?: number // give up after this (Node's fetch has no default timeout)
+  // F24.3: hand this response's auth to the embedded browser, so the UI test
+  // starts ALREADY logged in instead of driving the login screen every time.
+  apiInjectCookies?: boolean // copy the response's Set-Cookie into the browser
+  apiInjectStorage?: string // `key = value` per line → localStorage in the page
 }
 
 // === The in-page resolver ===========================================

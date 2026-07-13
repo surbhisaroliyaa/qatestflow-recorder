@@ -118,6 +118,31 @@ function parseHeaderLines(text?: string): Array<[string, string]> {
 function apiStatusAssertion(expect: string | undefined, resVar: string): string {
   const e = (expect ?? '').trim().toLowerCase()
   if (!e) return `expect(${resVar}.ok(), 'status is 2xx').toBeTruthy()`
+  // F24.1: a comma-separated list ("204,404") means ANY of them — the idempotent
+  // teardown form. Emitted as a membership check so the exported test is just as
+  // re-runnable as the in-app one.
+  const parts = e
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)
+  if (parts.length > 1) {
+    const codes: string[] = []
+    for (const p of parts) {
+      const fam = /^([1-5])xx$/.exec(p)
+      if (fam) {
+        const lo = Number(fam[1]) * 100
+        for (let c = lo; c < lo + 100; c++) codes.push(String(c))
+      } else if (Number.isFinite(Number(p))) {
+        codes.push(String(Number(p)))
+      }
+    }
+    // A whole family expands to 100 codes — keep the emitted line readable by
+    // range-checking instead when that happens.
+    if (codes.length > 8) {
+      return `expect([${parts.map((p) => quote(p)).join(', ')}].some((s) => s.endsWith('xx') ? Math.floor(${resVar}.status() / 100) === Number(s[0]) : Number(s) === ${resVar}.status()), 'status is one of ${e}').toBeTruthy()`
+    }
+    return `expect([${codes.join(', ')}], 'status is one of ${e}').toContain(${resVar}.status())`
+  }
   const fam = /^([1-5])xx$/.exec(e)
   if (fam) {
     const lo = Number(fam[1]) * 100
@@ -169,8 +194,226 @@ function tokenRef(name: string, columns: string[]): string | null {
     const v = name.slice('env:'.length).trim()
     return isIdent(v) ? `process.env.${v} ?? ''` : `process.env[${quote(v)}] ?? ''`
   }
+  // F24.1: the runtime tokens the app resolves mid-run must have an equivalent in
+  // the exported spec, or a test that runs green in the app would fail in CI —
+  // the export is a PROMISE that the two behave the same.
+  if (name.startsWith('saved:')) {
+    const v = name.slice('saved:'.length).trim()
+    return isIdent(v) ? `saved.${v}` : `saved[${quote(v)}]`
+  }
+  if (name === 'uuid') return 'runUuid'
+  if (name === 'timestamp') return 'runTimestamp'
+  if (name === 'randomInt') return 'runRandomInt'
   if (columns.includes(name)) return isIdent(name) ? `data.${name}` : `data[${quote(name)}]`
   return null
+}
+
+// F24.1: which runtime helpers does this test actually need? Only the ones used
+// get declared, so an ordinary export stays byte-for-byte unchanged.
+export function runtimeTokenUse(steps: RecorderStep[]): {
+  uuid: boolean
+  timestamp: boolean
+  randomInt: boolean
+  saved: boolean
+} {
+  const all = steps
+    .flatMap((s) => [s.value, s.url, s.apiHeaders, s.apiBody])
+    .filter((f): f is string => typeof f === 'string')
+    .flatMap((f) => extractTokens(f))
+  return {
+    uuid: all.includes('uuid'),
+    timestamp: all.includes('timestamp'),
+    randomInt: all.includes('randomInt'),
+    // `saved` is needed to READ a value, and also to WRITE one (an api step with
+    // a save spec declares the object even if nothing reads it yet).
+    saved:
+      all.some((t) => t.startsWith('saved:')) ||
+      steps.some((s) => (s.apiSave ?? '').trim().length > 0)
+  }
+}
+
+// The `const` block that opens a test body when runtime tokens are in play.
+export function runtimeTokenPreamble(steps: RecorderStep[], indent = '  '): string {
+  const use = runtimeTokenUse(steps)
+  const lines: string[] = []
+  if (use.uuid || use.timestamp || use.randomInt) {
+    lines.push(
+      `${indent}// Fresh every run, so a re-run never collides with the data the last one left behind.`
+    )
+  }
+  if (use.uuid) lines.push(`${indent}const runUuid = randomUUID()`)
+  if (use.timestamp) lines.push(`${indent}const runTimestamp = String(Date.now())`)
+  if (use.randomInt) {
+    lines.push(`${indent}const runRandomInt = String(Math.floor(Math.random() * 1_000_000))`)
+  }
+  if (use.saved) {
+    lines.push(`${indent}// Values lifted out of API responses (the server invents them).`)
+    lines.push(`${indent}const saved: Record<string, string> = {}`)
+  }
+  return lines.length ? lines.join('\n') + '\n\n' : ''
+}
+
+// A dot path ("data.items.0.sku") as a JS member expression on `body`.
+function pathExpr(path: string): string {
+  let expr = 'body'
+  for (const rawSeg of path.split('.')) {
+    const seg = rawSeg.trim()
+    if (!seg) continue
+    if (/^\d+$/.test(seg)) expr += `[${seg}]`
+    else if (isIdent(seg)) expr += `.${seg}`
+    else expr += `[${quote(seg)}]`
+  }
+  return expr
+}
+
+// F24.2: the response checks, as real Playwright assertions. Each one names the
+// path in its message, so a CI failure reads the same as the in-app one.
+function apiCheckLines(step: RecorderStep, ind: string): string {
+  const lines: string[] = []
+  const checks = (step.apiChecks ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'))
+  const contract = step.apiContract && Object.keys(step.apiContract).length ? step.apiContract : null
+  const needsBody =
+    !!contract || checks.some((l) => !/^header:/i.test(l))
+  if (!checks.length && !contract) return ''
+
+  if (needsBody) lines.push(`${ind}const body = await res.json()`)
+
+  for (const line of checks) {
+    const m = /^(\S+)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(line)
+    if (!m) continue
+    const [, path, rawOp, rawVal] = m
+    const op = rawOp.toLowerCase()
+    const val = (rawVal ?? '').trim()
+    const label = quote(line)
+
+    if (/^header:/i.test(path)) {
+      const name = path.slice('header:'.length).toLowerCase()
+      const ref = `res.headers()[${quote(name)}]`
+      if (op === 'exists') lines.push(`${ind}expect(${ref}, ${label}).toBeDefined()`)
+      else if (op === 'equals') lines.push(`${ind}expect(${ref}, ${label}).toBe(${quote(val)})`)
+      else if (op === 'contains') {
+        lines.push(`${ind}expect(${ref}, ${label}).toContain(${quote(val)})`)
+      }
+      continue
+    }
+
+    const ref = pathExpr(path)
+    switch (op) {
+      case 'exists':
+        lines.push(`${ind}expect(${ref}, ${label}).toBeDefined()`)
+        break
+      case 'not-empty':
+        lines.push(`${ind}expect(${ref}, ${label}).toBeTruthy()`)
+        break
+      case 'empty':
+        lines.push(`${ind}expect(${ref}, ${label}).toBeFalsy()`)
+        break
+      case 'equals':
+        lines.push(`${ind}expect(String(${ref}), ${label}).toBe(${quote(val)})`)
+        break
+      case 'not-equals':
+        lines.push(`${ind}expect(String(${ref}), ${label}).not.toBe(${quote(val)})`)
+        break
+      case 'contains':
+        lines.push(`${ind}expect(String(${ref}), ${label}).toContain(${quote(val)})`)
+        break
+      case 'not-contains':
+        lines.push(`${ind}expect(String(${ref}), ${label}).not.toContain(${quote(val)})`)
+        break
+      case 'gt':
+        lines.push(`${ind}expect(Number(${ref}), ${label}).toBeGreaterThan(${Number(val)})`)
+        break
+      case 'lt':
+        lines.push(`${ind}expect(Number(${ref}), ${label}).toBeLessThan(${Number(val)})`)
+        break
+      case 'count-eq':
+        lines.push(`${ind}expect(${ref}, ${label}).toHaveLength(${Number(val)})`)
+        break
+      case 'count-gt':
+        lines.push(`${ind}expect(${ref}.length, ${label}).toBeGreaterThan(${Number(val)})`)
+        break
+      case 'count-lt':
+        lines.push(`${ind}expect(${ref}.length, ${label}).toBeLessThan(${Number(val)})`)
+        break
+      case 'is-number':
+      case 'is-string':
+      case 'is-boolean':
+        lines.push(`${ind}expect(typeof ${ref}, ${label}).toBe(${quote(op.slice(3))})`)
+        break
+      case 'is-array':
+        lines.push(`${ind}expect(Array.isArray(${ref}), ${label}).toBe(true)`)
+        break
+      default:
+        lines.push(`${ind}// ⚠ unknown check "${op}" — not exported`)
+    }
+  }
+
+  // The contract: every captured field must still be there, with the same type.
+  // Emitted as data + a loop rather than N assertions, so a 40-field contract
+  // doesn't bury the rest of the test.
+  if (contract) {
+    const entries = Object.entries(contract)
+      .map(([p, t]) => `${ind}  [${quote(p)}, ${quote(t)}]`)
+      .join(',\n')
+    lines.push(
+      `${ind}// 📐 Contract — fails if a field was renamed, dropped, or changed type.`,
+      `${ind}const contract: [string, string][] = [\n${entries}\n${ind}]`,
+      `${ind}const shapeOf = (v: unknown): string =>`,
+      `${ind}  v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v`,
+      `${ind}const readShape = (o: unknown, p: string): unknown =>`,
+      `${ind}  p.split('.').reduce<unknown>((cur, k) => {`,
+      `${ind}    if (cur == null) return undefined`,
+      `${ind}    if (k.endsWith('[]')) {`,
+      `${ind}      const arr = (cur as Record<string, unknown>)[k.slice(0, -2)]`,
+      `${ind}      return Array.isArray(arr) ? arr[0] : undefined`,
+      `${ind}    }`,
+      `${ind}    return (cur as Record<string, unknown>)[k]`,
+      `${ind}  }, o)`,
+      `${ind}for (const [p, want] of contract) {`,
+      `${ind}  const actual = shapeOf(readShape(body, p))`,
+      `${ind}  expect(actual, \`contract: \${p} (was \${want})\`).toBe(want)`,
+      `${ind}}`
+    )
+  }
+
+  return lines.length ? '\n' + lines.join('\n') : ''
+}
+
+// The lines that lift saved values out of an API response in the exported spec.
+// `bodyDeclared` says whether apiCheckLines already emitted `const body = …` in
+// this block — declaring it twice would be a duplicate-const syntax error.
+function apiSaveLines(step: RecorderStep, indentStr: string, bodyDeclared: boolean): string {
+  const specs = (step.apiSave ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const eq = l.indexOf('=')
+      return eq > 0
+        ? { name: l.slice(0, eq).trim(), path: l.slice(eq + 1).trim() }
+        : { name: '', path: '' }
+    })
+    .filter((s) => s.name && s.path)
+  if (!specs.length) return ''
+  const out = bodyDeclared ? [] : [`\n${indentStr}const body = await res.json()`]
+  for (const { name, path } of specs) {
+    const key = isIdent(name) ? `saved.${name}` : `saved[${quote(name)}]`
+    out.push(`\n${indentStr}${key} = String(${pathExpr(path)})`)
+  }
+  return out.join('')
+}
+
+// Does this step's check block declare `body`? (Mirrors apiCheckLines' own rule.)
+function checksDeclareBody(step: RecorderStep): boolean {
+  const checks = (step.apiChecks ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'))
+  const hasContract = !!(step.apiContract && Object.keys(step.apiContract).length)
+  return hasContract || checks.some((l) => !/^header:/i.test(l))
 }
 
 // Turn a possibly-tokenized user value into a JS EXPRESSION for the export:
@@ -551,14 +794,31 @@ function actionFor(
       )
     }
     if (hasBody) optParts.push(`data: ${valueExpr(step.apiBody!, columns)}`)
+    // F24.2: a hard timeout, so a dead endpoint can't hang the exported suite
+    // either (Playwright's request fixture has its own default, but an explicit
+    // per-step budget is what the tester actually asked for).
+    if (step.apiTimeoutMs) optParts.push(`timeout: ${step.apiTimeoutMs}`)
     const opts = optParts.length ? `, { ${optParts.join(', ')} }` : ''
     const bodyCheck = (step.apiExpectBody ?? '').trim()
       ? `\n    expect(await res.text()).toContain(${valueExpr(step.apiExpectBody!.trim(), columns)})`
       : ''
+    // F24.2: the real assertions (field / header / count / type), the contract,
+    // and the SLA — all of which must survive into CI or the export is a lie.
+    const checks = apiCheckLines(step, '    ')
+    // F24.1: lift saved values out of the response, so the exported test can also
+    // GET/DELETE the record it just created. It reuses `body` when the checks
+    // above already parsed it — declaring it twice would not compile.
+    const saves = apiSaveLines(step, '    ', checksDeclareBody(step))
+    // F24.2: SLA — time the call and assert the budget.
+    const sla = step.apiMaxMs
+      ? `\n    expect(Date.now() - t0, 'response time').toBeLessThanOrEqual(${step.apiMaxMs})`
+      : ''
+    const t0 = step.apiMaxMs ? `    const t0 = Date.now()\n` : ''
     return (
       `{\n` +
+      t0 +
       `    const res = await request.${method}(${valueExpr(step.url ?? '', columns)}${opts})\n` +
-      `    ${apiStatusAssertion(step.apiExpectStatus, 'res')}${bodyCheck}\n` +
+      `    ${apiStatusAssertion(step.apiExpectStatus, 'res')}${sla}${bodyCheck}${checks}${saves}\n` +
       `  }`
     )
   }
@@ -805,7 +1065,48 @@ export function generatePlaywrightTest(
     ? `  // F1: deterministic replay — serve recorded network from the HAR\n` +
       `  await ${pv(0)}.routeFromHAR('hars/${options.har}', { notFound: 'fallback' })\n\n`
     : ''
-  const body = prelude + harSetup + lines.join('\n\n')
+  // F24.1: declare the run-scoped helpers ({{uuid}}/{{timestamp}} and the `saved`
+  // store) at the TOP of the test body, so every run gets fresh values and a
+  // re-run never collides with the data the last one left behind.
+  const tokenPrelude = runtimeTokenPreamble(enabled)
+
+  // F24.4: teardown steps must run even when the test FAILED — otherwise the
+  // exported spec quietly behaves differently from the app, and every failed CI
+  // run leaves its data behind. A `finally` is the Playwright-native way to say
+  // that. `lines` is emitted in step order, so the teardown ones are pulled out
+  // by index (they were tagged while the list was walked).
+  const teardownIdx = new Set<number>()
+  enabled.forEach((s, i) => {
+    if (s.teardown && s.type === 'api') teardownIdx.add(i)
+  })
+  let body: string
+  if (teardownIdx.size && lines.length) {
+    const mainLines: string[] = []
+    const downLines: string[] = []
+    // `lines` and `enabled` can drift (dialog/download steps fold into a
+    // neighbour), so match on the emitted text rather than assuming 1:1.
+    const teardownText = enabled.filter((_s, i) => teardownIdx.has(i)).map((s) => stepText(s))
+    for (const line of lines) {
+      if (teardownText.some((t) => line.includes(t))) downLines.push(line)
+      else mainLines.push(line)
+    }
+    const reindent = (ls: string[]): string =>
+      ls
+        .join('\n\n')
+        .split('\n')
+        .map((l) => (l ? `  ${l}` : l))
+        .join('\n')
+    body =
+      tokenPrelude +
+      prelude +
+      harSetup +
+      `  try {\n${reindent(mainLines)}\n  } finally {\n` +
+      `    // 🧹 Teardown — runs even if the test failed above, so the data this\n` +
+      `    // test created is never left behind in the environment.\n` +
+      `${reindent(downLines)}\n  }`
+  } else {
+    body = tokenPrelude + prelude + harSetup + lines.join('\n\n')
+  }
 
   // Only import expect when an assertion (or a download check) uses it; pull in
   // fs only when a download check needs a file-size assertion.
@@ -827,7 +1128,9 @@ export function generatePlaywrightTest(
     (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
     `import ${imports} from '@playwright/test'\n` +
     (hasA11y ? "import AxeBuilder from '@axe-core/playwright'\n" : '') +
-    (hasDownload ? "import fs from 'fs'\n" : '')
+    (hasDownload ? "import fs from 'fs'\n" : '') +
+    // F24.1: only when a {{uuid}} token is actually used.
+    (runtimeTokenUse(enabled).uuid ? "import { randomUUID } from 'node:crypto'\n" : '')
   // Day 17: test.use carries baseURL and (when a session is attached) the
   // storageState path, so the exported test starts logged in.
   // F25: the baseURL reads process.env.BASE_URL first, defaulting to the recorded
@@ -1052,22 +1355,45 @@ export function generatePageObjectTest(
   // Test-id portability — same policy as the inline export (see testIdPolicy).
   const idPolicy = testIdPolicy(enabled)
 
+  // The class's Locator fields must use the SAME portable rewrite as the inline
+  // export, or a data-test app's POM locators resolve to nothing.
+  const exprOf = (step: RecorderStep): string =>
+    ((idPolicy.portable && portableTestIdSelector(step)) || step.selector) as string
+
+  // What IS each element? Decided by every action performed on it across the
+  // WHOLE test — not by the one step we happen to name it from.
+  //
+  // The old rule suffixed "Button" onto anything that was CLICKED, so a text
+  // input you clicked into before typing came out as `usernameButton` — and the
+  // class then read `await this.usernameButton.fill("standard_user")`, which is
+  // nonsense a reviewer would flag instantly. A click tells you what the tester
+  // DID; it does not tell you what the element IS. Typing into it does.
+  type ElKind = 'input' | 'select' | 'button'
+  const kindByExpr = new Map<string, ElKind>()
+  for (const s of enabled) {
+    if (!s.selector) continue
+    const e = exprOf(s)
+    // `type` wins unconditionally — you cannot fill a button, so a fill is proof.
+    if (s.type === 'type') kindByExpr.set(e, 'input')
+    else if (s.type === 'select' && kindByExpr.get(e) !== 'input') kindByExpr.set(e, 'select')
+    else if ((s.type === 'click' || s.type === 'press') && !kindByExpr.has(e)) {
+      kindByExpr.set(e, 'button')
+    }
+  }
+  const SUFFIX: Record<ElKind, string> = { input: 'Input', select: 'Select', button: 'Button' }
+
   // Member names shared across locators + methods (a class can't have a property
   // and a method with the same name), plus reserved members.
   const used = new Set<string>(['page', 'goto', 'constructor'])
   const locatorDefs: { name: string; selector: string }[] = []
   const nameByExpr = new Map<string, string>()
-  const nameForElement = (step: RecorderStep, clickTarget = false): string => {
-    // The class's Locator fields must use the SAME portable rewrite as the
-    // inline export, or a data-test app's POM locators resolve to nothing.
-    const expr = ((idPolicy.portable && portableTestIdSelector(step)) ||
-      step.selector) as string
+  const nameForElement = (step: RecorderStep): string => {
+    const expr = exprOf(step)
     const existing = nameByExpr.get(expr)
     if (existing) return existing
-    // A clicked element's locator gets a "Button" suffix (the POM convention for
-    // clickable things) so the ACTION METHOD can keep the clean verb — e.g. the
-    // login button is `loginButton`, the method that uses it is `login()`.
-    const baseName = camelName(step.label || step.type) + (clickTarget ? 'Button' : '')
+    const kind = kindByExpr.get(expr)
+    // An element only ever ASSERTED on gets no suffix — it isn't a control.
+    const baseName = camelName(step.label || step.type) + (kind ? SUFFIX[kind] : '')
     let name = baseName
     let n = 2
     while (used.has(name)) name = `${baseName}${n++}`
@@ -1167,11 +1493,24 @@ export function generatePageObjectTest(
       continue
     }
     if (!step.selector) continue
-    const name = nameForElement(step, step.type === 'click')
+    const name = nameForElement(step)
     const line = actionFor(step, baseURL, 'this.page', `this.${name}`, columns, idPolicy.portable)
     if (line) buffer.push(step.optional ? wrapOptional(line, '    ') : `    ${line}`)
     if (stepUsesData(step)) bufferUsesData = true
-    if (step.type === 'click' || step.type === 'press') lastActionLabel = step.label || ''
+    // A method should be ONE intent, named for it. The old rule flushed only at a
+    // navigate/assert boundary and named the method after its LAST step — so
+    // "fill user, fill password, click Login, click Add to cart" became a single
+    // `addToCart()` that secretly logs you in. A page object that lies about what
+    // its methods do is worse than no page object.
+    //
+    // A click on a real BUTTON is what completes an intent (submit / add / save);
+    // a click on an input is just focus, and must not end anything or name it.
+    if (step.type === 'click' || step.type === 'press') {
+      if (kindByExpr.get(exprOf(step)) === 'button') {
+        lastActionLabel = step.label || ''
+        flush()
+      }
+    }
   }
   flush()
 
@@ -1245,7 +1584,11 @@ export function generatePageObjectTest(
     (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
     `import ${imports} from '@playwright/test'\n` +
     (hasA11y ? "import AxeBuilder from '@axe-core/playwright'\n" : '') +
+    // F24.1: parity with the inline export — the POM spec runs the same API steps.
+    (runtimeTokenUse(enabled).uuid ? "import { randomUUID } from 'node:crypto'\n" : '') +
     `import { ${className} } from './pages/${className}'\n`
+  // F24.1: run-scoped uuid/timestamp/saved helpers, declared inside each test.
+  const tokenPrelude = runtimeTokenPreamble(enabled)
 
   // Day 20: a data-driven spec — a `dataset` array and one test per row (named
   // by the first column so a failing row is identifiable), each instantiating
@@ -1267,7 +1610,7 @@ export function generatePageObjectTest(
       `const dataset = [\n${dataset}\n]\n\n` +
       `for (const data of dataset) {\n` +
       `  test(${title}, async (${specFixtures}) => {\n` +
-      `${inner}\n` +
+      `${runtimeTokenPreamble(enabled, '    ')}${inner}\n` +
       `  })\n` +
       `}\n`
     return { spec, page, pageFileName, className }
@@ -1277,6 +1620,7 @@ export function generatePageObjectTest(
     `${importLines}` +
     `${use}\n` +
     `test(${quote(options?.name || 'recorded flow')}, async (${specFixtures}) => {\n` +
+    `${tokenPrelude}` +
     `  const app = new ${className}(page)\n` +
     `${specBody.join('\n')}\n` +
     `})\n`

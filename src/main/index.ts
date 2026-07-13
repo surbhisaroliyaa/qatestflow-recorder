@@ -1,4 +1,13 @@
-import { app, shell, BrowserWindow, ipcMain, WebContentsView, dialog, webFrameMain } from 'electron'
+import {
+  app,
+  shell,
+  BrowserWindow,
+  ipcMain,
+  WebContentsView,
+  dialog,
+  webFrameMain,
+  session
+} from 'electron'
 import { join, basename, dirname } from 'path'
 import { writeFile, mkdir, copyFile, readFile, readdir, rm } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -101,7 +110,14 @@ import {
   type Environment
 } from './environments'
 import { checkPlaywright, runCrossBrowser, type BrowserName } from './xbrowser'
-import { runApiStep } from './apiStep'
+import { runApiStep, type ApiEvidence } from './apiStep'
+import {
+  newRunTokens,
+  resolveRuntimeStep,
+  resolveRuntimeText,
+  applySaves,
+  type RunTokens
+} from './runtimeTokens'
 import {
   saveEdgeRun,
   listEdgeRuns,
@@ -742,6 +758,24 @@ function createWindow(): void {
       } catch {
         // view mid-teardown — skip it
       }
+    }
+  }
+
+  // Some modals hide the browser (overlayOpen) yet still need to READ the page:
+  // F15 re-captures a baseline and F18 measures the page's interactive elements.
+  // A hidden view is zero-sized, so capturePage() returns an empty image and
+  // every element lays out 0×0 (F18's visibility filter would drop them all).
+  // Restore the real bounds for the duration of the read, then hide it again.
+  const withBrowserShown = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (!overlayOpen) return fn()
+    overlayOpen = false
+    resizeEmbedded()
+    await wait(150) // let the view resize and the page re-layout at full size
+    try {
+      return await fn()
+    } finally {
+      overlayOpen = true
+      resizeEmbedded()
     }
   }
 
@@ -1657,7 +1691,7 @@ function createWindow(): void {
       networkErrors?: string[]
       // Day 20: EVERY failed step in this run (not just the first) — so the
       // banner can surface each one's screenshot when Continue bypassed several.
-      failures?: { index: number; error: string; screenshotPath?: string }[]
+      failures?: { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
       // F1: how many requests were served from the HAR vs passed through live.
       harServed?: number
       harPassthrough?: number
@@ -1784,7 +1818,9 @@ function createWindow(): void {
         error?: string,
         // Day 18: for a failure step, reuse the ANNOTATED capture (red banner +
         // outline) so the trace shows WHERE it failed, not a clean page.
-        preImage?: Electron.NativeImage
+        preImage?: Electron.NativeImage,
+        // F24: an API step's HTTP exchange, recorded INSTEAD of a page shot.
+        apiEvidence?: ApiEvidence
       ): Promise<void> => {
         if (!traceEnabled) return
         const num = i + 1
@@ -1796,9 +1832,13 @@ function createWindow(): void {
           durationMs: Math.max(0, Date.now() - startMs),
           error,
           consoleErrors: consoleErrors.slice(traceConsoleCursor).map(stripStepTag),
-          networkErrors: networkErrors.slice(traceNetworkCursor).map(stripStepTag)
+          networkErrors: networkErrors.slice(traceNetworkCursor).map(stripStepTag),
+          apiEvidence
         }
         // Skipped steps never ran — record the row, but no page shot.
+        // F24 note: an API step DOES keep its page shot here. The exchange above
+        // is the evidence; the page is context, and dropping it would punch a
+        // hole in the filmstrip timeline for no gain.
         if (status !== 'skipped') {
           try {
             rec.url = currentWC.getURL()
@@ -2199,7 +2239,7 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
         traceId?: string
-        failures?: { index: number; error: string; screenshotPath?: string }[]
+        failures?: { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
         harServed?: number
         harPassthrough?: number
         whatChanged?: DomDiff
@@ -2215,7 +2255,7 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
         traceId?: string
-        failures?: { index: number; error: string; screenshotPath?: string }[]
+        failures?: { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
         harServed?: number
         harPassthrough?: number
         whatChanged?: DomDiff
@@ -2326,6 +2366,162 @@ function createWindow(): void {
       replayDownloadCursor = 0
       currentWC.executeJavaScript('window.__qaflowReplaying=true').catch(() => {})
 
+      // F24.1: this run's runtime tokens — {{uuid}}/{{timestamp}} (fresh per run,
+      // stable within it) and {{saved:x}} (lifted out of an earlier API response).
+      // Scoped to ONE run: a fresh run must not reuse the last run's saved order id.
+      const runTokens: RunTokens = newRunTokens()
+
+      const method = (s: ReplayStep): string => (s.apiMethod ?? 'GET').toUpperCase()
+
+      // F24.4 — ALWAYS-RUN TEARDOWN.
+      // A test that fails midway never reaches its cleanup step, so the record it
+      // created is orphaned. Do that 200 times and the test environment fills with
+      // junk that breaks OTHER tests for reasons nobody can trace back here.
+      //
+      // So when the run ends early, the steps marked ◆ teardown that never got a
+      // chance to run are executed anyway — the equivalent of an `afterEach` that
+      // runs whether the test passed or blew up.
+      //
+      // HONEST LIMIT: teardown runs API steps only. A UI cleanup step ("click
+      // Delete account") is not re-driven here — after a failure the page is in an
+      // unknown state, and blindly clicking around a broken app is how you turn a
+      // failed test into a corrupted environment. An HTTP call has no such problem:
+      // it doesn't care what the browser is doing.
+      const runTeardowns = async (afterIndex: number): Promise<void> => {
+        const pending = list
+          .map((s, j) => ({ s, j }))
+          .filter(({ s, j }) => j > afterIndex && s.teardown && !s.disabled && s.type === 'api')
+        if (!pending.length) return
+
+        for (const { s, j } of pending) {
+          const t = resolveRuntimeStep(s, runTokens)
+          mainWindow.webContents.send('recorder:replay-progress', { index: j, status: 'running' })
+          try {
+            const api = await runApiStep({
+              method: t.apiMethod,
+              url: t.url,
+              headers: t.apiHeaders,
+              body: t.apiBody,
+              expectStatus: t.apiExpectStatus,
+              expectBody: t.apiExpectBody,
+              checks: t.apiChecks,
+              contract: t.apiContract,
+              maxMs: t.apiMaxMs,
+              timeoutMs: t.apiTimeoutMs
+            })
+            if (api.evidence) {
+              mainWindow.webContents.send('recorder:api-response', {
+                index: j,
+                evidence: api.evidence
+              })
+            }
+            mainWindow.webContents.send('recorder:replay-progress', {
+              index: j,
+              status: api.ok ? 'done' : 'error'
+            })
+            if (!api.ok) {
+              // A teardown that fails is worth knowing about — it means something
+              // was NOT cleaned up — but it must never replace the run's real
+              // error, which is what actually broke the test.
+              failures.push({
+                index: j,
+                error: `Teardown failed — ${api.error}`,
+                apiEvidence: api.evidence
+              })
+            }
+          } catch (err) {
+            mainWindow.webContents.send('recorder:replay-progress', { index: j, status: 'error' })
+            failures.push({
+              index: j,
+              error: `Teardown failed — ${err instanceof Error ? err.message : String(err)}`
+            })
+          }
+        }
+      }
+
+      // F24.3: copy an API login's Set-Cookie headers into the embedded browser's
+      // session, so the very next navigation is authenticated. Returns how many
+      // cookies actually landed (0 = nothing usable, which we treat as a failure —
+      // silently "logging in" and then testing a logged-OUT app is the worst
+      // possible outcome: every later assertion fails for a reason that looks
+      // nothing like the cause).
+      const injectCookies = async (setCookies: string[], forUrl: string): Promise<number> => {
+        let origin: URL
+        try {
+          origin = new URL(forUrl)
+        } catch {
+          return 0
+        }
+        let count = 0
+        for (const raw of setCookies) {
+          // "name=value; Path=/; HttpOnly; Domain=…" — the first pair is the
+          // cookie, the rest are its attributes.
+          const [pair, ...attrs] = raw.split(';')
+          const eq = pair.indexOf('=')
+          if (eq <= 0) continue
+          const name = pair.slice(0, eq).trim()
+          const value = pair.slice(eq + 1).trim()
+          if (!name) continue
+          const attr = (key: string): string | undefined => {
+            const hit = attrs.find((a) => a.trim().toLowerCase().startsWith(`${key}=`))
+            return hit ? hit.split('=').slice(1).join('=').trim() : undefined
+          }
+          const domain = attr('domain')
+          const path = attr('path') || '/'
+          const expires = attr('expires')
+          const details: Electron.CookiesSetDetails = {
+            url: `${origin.protocol}//${origin.host}${path}`,
+            name,
+            value,
+            path,
+            secure: origin.protocol === 'https:',
+            httpOnly: attrs.some((a) => a.trim().toLowerCase() === 'httponly')
+          }
+          if (domain) details.domain = domain
+          if (expires) {
+            const t = Date.parse(expires)
+            if (!Number.isNaN(t)) details.expirationDate = t / 1000
+          }
+          try {
+            await session.defaultSession.cookies.set(details)
+            count++
+          } catch {
+            // a malformed cookie — skip it, but don't claim success for it
+          }
+        }
+        return count
+      }
+
+      // F24.3: the other half — an API that returns a TOKEN in the body (rather
+      // than a cookie) needs it written into the page's localStorage under the key
+      // the app reads. `key = value` per line; the value may use {{saved:token}}.
+      const injectLocalStorage = async (spec: string, tokens: RunTokens): Promise<string | null> => {
+        const entries: [string, string][] = []
+        for (const line of spec.split('\n')) {
+          const t = line.trim()
+          if (!t) continue
+          const eq = t.indexOf('=')
+          if (eq <= 0) continue
+          const key = t.slice(0, eq).trim()
+          const value = resolveRuntimeText(t.slice(eq + 1).trim(), tokens)
+          if (!key) continue
+          if (value.includes('{{')) {
+            return `Could not set localStorage "${key}" — its value still contains an unresolved token (${value}). Save it from an earlier API response first.`
+          }
+          entries.push([key, value])
+        }
+        if (!entries.length) return null
+        try {
+          await currentWC.executeJavaScript(
+            `(() => { const e = ${JSON.stringify(entries)}; for (const [k, v] of e) localStorage.setItem(k, v); return true })()`,
+            true
+          )
+          return null
+        } catch (err) {
+          return `Could not set localStorage — ${err instanceof Error ? err.message : String(err)}`
+        }
+      }
+
       // Day 18: 'Continue' bypasses a failure to check later steps — the run is
       // STILL failed overall. Remember the FIRST bypassed failure so the run
       // reports it at the end (and the trace is kept).
@@ -2335,7 +2531,12 @@ function createWindow(): void {
       // Day 20: EVERY failed step this run (Continue-bypassed ones + a final
       // Stop), so the banner can show each failure's screenshot — not just the
       // first. The trace already keeps all; this surfaces them in the result.
-      const failures: { index: number; error: string; screenshotPath?: string }[] = []
+      const failures: {
+        index: number
+        error: string
+        screenshotPath?: string
+        apiEvidence?: ApiEvidence
+      }[] = []
       // F4 (self-heal 2.0): steps we've already AUTO-healed this run. Guards the
       // re-run: if a healed step fails AGAIN it's a real failure, not a heal loop.
       const aiHealedOnce = new Set<number>()
@@ -2568,7 +2769,13 @@ function createWindow(): void {
       }
 
       for (let i = 0; i < list.length; i++) {
-        const step = list[i]
+        // F24.1: resolve the LATE tokens now, for THIS step. {{env:X}} and data
+        // columns were substituted by the renderer before the run; {{uuid}} and
+        // {{saved:orderId}} can't be — a saved id doesn't exist until the step
+        // that creates it has run. Resolving on a COPY leaves the saved test
+        // untouched (the step list still shows the token, which is what you
+        // authored and what you'd want to see).
+        const step = resolveRuntimeStep(list[i], runTokens)
         // Steps turned off in the editor are skipped — leave their row neutral
         // (no running/done/error) so the UI shows them as inert, not run.
         if (step.disabled) continue
@@ -2596,6 +2803,12 @@ function createWindow(): void {
           ratioPct: number
           thresholdPct: number
         } | null = null
+        // F24: set when an `api` step FAILS — the catch uses it as the evidence
+        // (the page screenshot is only context) and hands it to the report.
+        let pendingApi: ApiEvidence | null = null
+        // F24: the exchange for THIS step whether it passed or failed, so the
+        // trace records a passing API step's response too (not just failures).
+        let stepApi: ApiEvidence | null = null
         mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
         // Day 17 (Phase 4): if THIS step opens a new tab, arm a one-shot to
         // capture it so we can bind it to `opensWindow` after the action runs.
@@ -2966,9 +3179,72 @@ function createWindow(): void {
               headers: step.apiHeaders,
               body: step.apiBody,
               expectStatus: step.apiExpectStatus,
-              expectBody: step.apiExpectBody
+              expectBody: step.apiExpectBody,
+              // F24.2: real assertions + contract + SLA + a hard timeout.
+              checks: step.apiChecks,
+              contract: step.apiContract,
+              maxMs: step.apiMaxMs,
+              timeoutMs: step.apiTimeoutMs,
+              // F24.3: only walk the redirect chain by hand when we actually need
+              // the cookies — a plain API step keeps fetch's normal behaviour.
+              collectCookies: !!step.apiInjectCookies
             })
-            if (!api.ok) throw new Error(api.error)
+            // Keep the exchange whether it passed or failed, and push it to the
+            // renderer immediately so the step row can show "↩ 201 · 142ms" and
+            // open a Postman-style response panel. A green API step you can't
+            // inspect is just "trust me" — the response is what makes it evidence.
+            stepApi = api.evidence ?? null
+            if (api.evidence) {
+              mainWindow.webContents.send('recorder:api-response', {
+                index: i,
+                evidence: api.evidence
+              })
+            }
+            if (!api.ok) {
+              pendingApi = api.evidence ?? null
+              throw new Error(api.error)
+            }
+            // F24.1: lift values OUT of the response into {{saved:…}} tokens, so a
+            // later step can GET/DELETE the very record this one just created —
+            // the id is invented by the server, so it cannot be typed in advance.
+            // A miss FAILS here, where the cause is obvious; saving nothing and
+            // carrying on would blow up later on a nonsense URL.
+            const saveErr = applySaves(api.bodyText ?? '', step.apiSave, runTokens)
+            if (saveErr) {
+              pendingApi = api.evidence ?? null
+              throw new Error(saveErr)
+            }
+
+            // F24.3: hand this response's auth to the BROWSER. This is the big
+            // suite-scale win: log in once over the API and the UI test starts
+            // already authenticated — no login screen in 500 tests, which is both
+            // the slowest part of a suite and its biggest single flake source.
+            if (step.apiInjectCookies && api.setCookies?.length) {
+              const injected = await injectCookies(api.setCookies, step.url ?? '')
+              if (injected === 0) {
+                pendingApi = api.evidence ?? null
+                throw new Error(
+                  `Could not hand the session to the browser — ${method(step)} ${step.url} returned no usable Set-Cookie header. (If this API returns a TOKEN in the body instead of a cookie, use "set localStorage" rather than "copy cookies".)`
+                )
+              }
+            }
+            if ((step.apiInjectStorage ?? '').trim()) {
+              // localStorage is per-ORIGIN, so the browser has to already be on
+              // the app's origin — on about:blank it would write to nowhere and
+              // the "logged in" illusion would silently fail. Say so, loudly.
+              const pageUrl = currentWC.getURL()
+              if (!/^https?:/i.test(pageUrl)) {
+                pendingApi = api.evidence ?? null
+                throw new Error(
+                  `Could not set localStorage — the browser isn't on a page yet (${pageUrl || 'blank'}). localStorage belongs to an origin, so navigate to the app FIRST, then run this step.`
+                )
+              }
+              const storeErr = await injectLocalStorage(step.apiInjectStorage!, runTokens)
+              if (storeErr) {
+                pendingApi = api.evidence ?? null
+                throw new Error(storeErr)
+              }
+            }
           } else {
             // Day 15: route the action into the frame it was recorded in (or
             // the top frame for a normal step). The injected script is entirely
@@ -3060,7 +3336,7 @@ function createWindow(): void {
             }
           }
           mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'done' })
-          await captureTraceStep(i, 'done', stepStartMs)
+          await captureTraceStep(i, 'done', stepStartMs, undefined, undefined, stepApi ?? undefined)
           await wait(450)
         } catch (err) {
           onPopupOpened = null // disarm any popup hook if the step failed
@@ -3136,7 +3412,23 @@ function createWindow(): void {
           // Best-effort: a screenshot problem must never mask the real error.
           let screenshotPath: string | undefined
           let annotatedImage: Electron.NativeImage | undefined
-          if (pendingVisual) {
+          if (pendingApi) {
+            // F24: an API-step failure. The request/response IS the evidence (it
+            // travels in `apiEvidence`); the page is CONTEXT — often the whole
+            // point ("the UI says 'Order placed ✓' but the API has no order").
+            // So capture it, but PLAIN: no red error banner, no culprit outline.
+            // The page didn't cause an HTTP failure and must not be annotated as
+            // if it had — that was the misleading part, not the picture itself.
+            try {
+              annotatedImage = await currentWC.capturePage()
+              const dir = join(libraryDir(), '_failures')
+              await mkdir(dir, { recursive: true })
+              screenshotPath = join(dir, `failure-${Date.now()}.png`)
+              await writeFile(screenshotPath, annotatedImage.toPNG())
+            } catch {
+              screenshotPath = undefined // page gone — the exchange still stands alone
+            }
+          } else if (pendingVisual) {
             // Day 19: a visual-snapshot failure — the DIFF image is the evidence
             // (changed pixels in red), so don't annotate/capture the page.
             screenshotPath = pendingVisual.diffPath ?? pendingVisual.currentPath
@@ -3173,7 +3465,7 @@ function createWindow(): void {
           // Day 18: the trace's failure shot reuses the ANNOTATED image (red
           // banner + culprit outline) so it shows WHERE it failed. DOM is grabbed
           // clean here (the marks were just erased above).
-          await captureTraceStep(i, 'error', stepStartMs, message, annotatedImage)
+          await captureTraceStep(i, 'error', stepStartMs, message, annotatedImage, pendingApi ?? undefined)
           // Day 12: in an interactive replay we PAUSE here instead of ending.
           // The browser is sitting in the exact state where things broke —
           // ideal for retrying or re-picking the element. The loop holds on
@@ -3204,6 +3496,8 @@ function createWindow(): void {
                     thresholdPct: pendingVisual.thresholdPct
                   }
                 : undefined,
+              // F24: the request/response detail, in place of a screenshot.
+              apiEvidence: pendingApi ?? undefined,
               // Day 13: evidence so far — the Explain button works mid-pause too
               consoleErrors: consoleErrors.slice(),
               networkErrors: networkErrors.slice()
@@ -3228,7 +3522,7 @@ function createWindow(): void {
                 bypassedError = message
                 bypassedShot = screenshotPath
               }
-              failures.push({ index: i, error: message, screenshotPath })
+              failures.push({ index: i, error: message, screenshotPath, apiEvidence: pendingApi ?? undefined })
               continue
             }
             if (decision.action === 'skip') {
@@ -3254,7 +3548,10 @@ function createWindow(): void {
           }
           // This step is a real failure (Stop, or a non-interactive run that
           // ends at the first failure) — record it before returning.
-          failures.push({ index: i, error: message, screenshotPath })
+          failures.push({ index: i, error: message, screenshotPath, apiEvidence: pendingApi ?? undefined })
+          // F24.4: the run is over, but the cleanup steps below never ran. Do them
+          // now — otherwise every failed run leaves its data behind for good.
+          await runTeardowns(i)
           // Option 2 (conservative unattended heal): the selector broke and
           // self-heal FOUND a likely fix but wasn't confident enough to auto-apply
           // (and there was no one to click Accept in a batch run). We DON'T apply
@@ -3447,8 +3744,12 @@ function createWindow(): void {
     ): Promise<boolean> => {
       if (!isSafeBaselineId(baselineId)) return false
       try {
-        await waitForVisualStable(activeWC())
-        const image = await captureStabilized(activeWC(), maskSelectors, freeze)
+        // The snapshot editor is a modal, so the browser is hidden — show it for
+        // the capture or we'd save a blank baseline every future compare differs from.
+        const image = await withBrowserShown(async () => {
+          await waitForVisualStable(activeWC())
+          return captureStabilized(activeWC(), maskSelectors, freeze)
+        })
         await saveBaseline(baselineId, image.toPNG())
         return true
       } catch {
@@ -3687,7 +3988,11 @@ function createWindow(): void {
         candidates: Array<Record<string, unknown>>
       }>
       try {
-        captured = (await activeWC().executeJavaScript(AI_CAPTURE_JS, true)) as typeof captured
+        // The prompt modal is open (browser hidden). Measure the page at its real
+        // size — at zero size every element is 0×0 and the filter drops them all.
+        captured = (await withBrowserShown(() =>
+          activeWC().executeJavaScript(AI_CAPTURE_JS, true)
+        )) as typeof captured
       } catch {
         captured = []
       }

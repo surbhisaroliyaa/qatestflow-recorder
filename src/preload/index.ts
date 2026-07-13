@@ -181,6 +181,15 @@ const api = {
       return () => ipcRenderer.removeListener('recorder:replay-progress', listener)
     },
 
+    // F24: an API step's HTTP exchange, pushed as soon as the call returns —
+    // pass OR fail — so the step row can show its status/timing and open the
+    // response panel. Secrets are already masked in main.
+    onApiResponse: (callback: (info: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, info: unknown): void => callback(info)
+      ipcRenderer.on('recorder:api-response', listener)
+      return () => ipcRenderer.removeListener('recorder:api-response', listener)
+    },
+
     // === Element picker (Day 9) ===
     // Turn pick mode on/off in the embedded page.
     setPicking: (active: boolean): Promise<void> =>

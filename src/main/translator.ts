@@ -17,6 +17,7 @@
 // =====================================================================
 
 import { spawn } from 'child_process'
+import type { ApiEvidence } from './apiStep'
 
 // Everything we know about a failure, gathered at the moment it happened.
 // Assembled by the renderer (it owns the step list + human step text);
@@ -28,6 +29,7 @@ export interface FailureItem {
   error: string
   selector?: string
   screenshotPath?: string
+  apiEvidence?: ApiEvidence
 }
 
 export interface FailureEvidence {
@@ -42,6 +44,8 @@ export interface FailureEvidence {
   consoleErrors: string[] // "[step 3] Uncaught TypeError: …"
   networkErrors: string[] // "[step 3] HTTP 500 on https://…/api/items"
   screenshotPath?: string
+  // F24: an API step's request/response — the evidence in place of a screenshot.
+  apiEvidence?: ApiEvidence
   allSteps: string[] // every step as a numbered sentence (repro context)
   // When a test failed at MORE THAN ONE step, all of them — so Explain and the
   // bug report cover the WHOLE test at once instead of step-by-step. The primary
@@ -332,6 +336,13 @@ export function categorizeFailure(ev: FailureEvidence): FailureCategory {
 
 const CLAUDE_TIMEOUT_MS = 90_000
 
+// Indent a multi-line block so it reads as one unit inside the prompt.
+const indent = (text: string): string =>
+  text
+    .split('\n')
+    .map((l) => `    ${l}`)
+    .join('\n')
+
 function buildPrompt(ev: FailureEvidence): string {
   const multi = !!(ev.failures && ev.failures.length > 1)
   const failedIdx = new Set(multi ? ev.failures!.map((f) => f.index) : [ev.stepIndex])
@@ -379,9 +390,33 @@ function buildPrompt(ev: FailureEvidence): string {
       : 'Network problems during the run: none',
     ''
   )
+  // F24: for an API step the HTTP exchange is the evidence — hand the model the
+  // real request + response instead of a screenshot of an unrelated page. The
+  // values are already secret-masked (apiStep.ts) before they get here.
+  if (ev.apiEvidence) {
+    const a = ev.apiEvidence
+    lines.push(
+      'This step was an API request, not a UI action. The page is unrelated to it —',
+      'judge the failure from the HTTP exchange below (credentials shown as ••••):',
+      `  Request: ${a.method} ${a.url}`,
+      ...(a.requestHeaders ? [`  Request headers:\n${indent(a.requestHeaders)}`] : []),
+      ...(a.requestBody ? [`  Request body:\n${indent(a.requestBody)}`] : []),
+      a.status === undefined
+        ? '  Response: none — the request never reached the server.'
+        : `  Response status: ${a.status}`,
+      ...(a.responseBody ? [`  Response body:\n${indent(a.responseBody)}`] : []),
+      ''
+    )
+  }
   if (ev.screenshotPath) {
     lines.push(
-      `An annotated screenshot of the page at the moment of failure is saved at: ${ev.screenshotPath}`,
+      ev.apiEvidence
+        ? // F24: the page is context for an API failure, NOT its cause. Say so, or
+          // the model will hunt for a culprit on a page that was never involved.
+          // It is still worth looking at: "the UI says success but the API has no
+          // record of it" is exactly the bug an API step exists to catch.
+          `A screenshot of the page as it looked at that moment is saved at: ${ev.screenshotPath}. It is CONTEXT, not the cause — the API call was made by the test runner, not by this page, and the screenshot carries no failure annotation. Do look at it: if the page claims success while the API disagrees, that contradiction is the finding.`
+        : `An annotated screenshot of the page at the moment of failure is saved at: ${ev.screenshotPath}`,
       'Use the Read tool to look at it before answering.',
       ''
     )

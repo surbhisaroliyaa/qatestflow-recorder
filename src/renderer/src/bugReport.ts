@@ -26,6 +26,24 @@ function expectedVsActual(error: string): { expected: string; actual: string } {
   }
 }
 
+// F24: an API step's evidence is the HTTP exchange, not a screenshot. Rendered
+// as a fenced block a dev can read (and re-issue) directly. Secrets were already
+// masked in main — this report gets pasted into Jira/GitHub/Slack.
+function apiEvidenceLines(a: ApiEvidence): string[] {
+  const out: string[] = ['**API request / response:**', '', '```http', `${a.method} ${a.url}`]
+  if (a.requestHeaders) out.push(a.requestHeaders)
+  if (a.requestBody) out.push('', a.requestBody)
+  out.push('')
+  out.push(
+    a.status === undefined
+      ? '← no response (the request never reached the server)'
+      : `← ${a.status}`
+  )
+  if (a.responseBody) out.push('', a.responseBody)
+  out.push('```', '')
+  return out
+}
+
 export function generateBugReport(ev: FailureEvidence, analysis: FailureAnalysis | null): string {
   const now = new Date()
   const lines: string[] = []
@@ -41,7 +59,8 @@ export function generateBugReport(ev: FailureEvidence, analysis: FailureAnalysis
           stepText: ev.stepText,
           error: ev.error,
           selector: ev.selector,
-          screenshotPath: ev.screenshotPath
+          screenshotPath: ev.screenshotPath,
+          apiEvidence: ev.apiEvidence
         }
       ]
   const failingIdx = new Set(fails.map((f) => f.index))
@@ -89,9 +108,17 @@ export function generateBugReport(ev: FailureEvidence, analysis: FailureAnalysis
     lines.push(`**Expected:** ${expected}`, `**Actual:** ${actual}`, '')
     lines.push(`**Error:** \`${f.error}\``)
     if (f.selector) lines.push(`**Selector:** \`${f.selector}\``)
+    // An API step's screenshot is CONTEXT, not the cause (and it carries no
+    // failure annotation) — say so, rather than passing it off as the evidence.
     if (f.screenshotPath)
-      lines.push(`**Screenshot:** \`${f.screenshotPath}\` (annotated at the moment of failure)`)
+      lines.push(
+        f.apiEvidence
+          ? `**Page at the time:** \`${f.screenshotPath}\` (context only — the API call below did not involve this page)`
+          : `**Screenshot:** \`${f.screenshotPath}\` (annotated at the moment of failure)`
+      )
     lines.push('')
+    // F24: the HTTP exchange — the actual evidence for an API failure.
+    if (f.apiEvidence) lines.push(...apiEvidenceLines(f.apiEvidence))
   })
 
   lines.push('## Evidence during the run', '')

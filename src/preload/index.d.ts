@@ -101,6 +101,10 @@ interface RecorderAPI {
   ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
+  // F24: an API step's exchange (pass or fail), for the step-row chip + panel.
+  onApiResponse: (
+    callback: (info: { index: number; evidence: ApiEvidence }) => void
+  ) => () => void
   // F4 (self-heal 2.0): main auto-healed a broken selector mid-run and re-ran the
   // step. The renderer swaps in the healed step (so a 💾 save keeps the fix) and
   // shows a "fixed by AI" badge. `signals` = which of role/text/name/position/
@@ -623,8 +627,27 @@ declare global {
       ratioPct: number
       thresholdPct: number
     }
+    // F24: an API-step failure — the request/response IS the evidence (there is
+    // deliberately no screenshot; the page is unrelated to the HTTP call).
+    apiEvidence?: ApiEvidence
     consoleErrors?: string[] // evidence so far — Explain works mid-pause (Day 13)
     networkErrors?: string[]
+  }
+
+  // F24: what actually went over the wire on a failed API step. Secrets are
+  // masked in main BEFORE this crosses the bridge — a bug report is pasted into
+  // Jira/GitHub, so a token must never reach the renderer in the clear.
+  // MIRROR: same shape as ApiEvidence in src/main/apiStep.ts.
+  interface ApiEvidence {
+    method: string
+    url: string
+    status?: number
+    requestHeaders?: string
+    requestBody?: string
+    responseBody?: string
+    durationMs?: number
+    sizeBytes?: number // the FULL size, even when responseBody is truncated
+    responseHeaders?: string // secrets masked
   }
 
   // === Failure translator (Day 13) ===
@@ -638,6 +661,7 @@ declare global {
     error: string
     selector?: string
     screenshotPath?: string
+    apiEvidence?: ApiEvidence
   }
   interface FailureEvidence {
     testName?: string
@@ -651,6 +675,7 @@ declare global {
     consoleErrors: string[]
     networkErrors: string[]
     screenshotPath?: string
+    apiEvidence?: ApiEvidence
     allSteps: string[]
     // All failed steps when a test failed at more than one (whole-test analysis).
     failures?: FailureItem[]
@@ -802,6 +827,10 @@ declare global {
     // banner / promo popup). Replay skips it instead of failing when its element
     // isn't found (with a shorter wait); export wraps it in try/catch.
     optional?: boolean
+    // F24.4: a CLEANUP step — runs even when an earlier step FAILED and ended the
+    // run, so a broken test still deletes the data it created (an orphaned record
+    // poisons the environment for every later test). API steps only.
+    teardown?: boolean
     url?: string
     // Day 16(+): a `download` step's saved file path (for "Show in folder" and
     // the on-replay file check). The step's `value` holds the EXPECTED filename
@@ -848,8 +877,24 @@ declare global {
     apiMethod?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
     apiHeaders?: string // raw text, one "Name: value" per line
     apiBody?: string // request body (POST/PUT/PATCH); sent as-is
-    apiExpectStatus?: string // "200", or "2xx"/"4xx" families; blank = any 2xx
+    // "200", a "2xx"/"4xx" family, or a comma-separated list ("204,404" — the
+    // idempotent-teardown form: gone is gone). Blank = any 2xx.
+    apiExpectStatus?: string
     apiExpectBody?: string // substring the response body must contain; blank = skip
+    // F24.1: save values OUT of the response for later steps — one
+    // "name = json.path" per line (e.g. `orderId = id`), used as {{saved:orderId}}.
+    apiSave?: string
+    // F24.2: real response assertions, one per line ("status equals CONFIRMED",
+    // "items count-gt 0", "header:content-type contains application/json").
+    // "Body contains" is a substring match — it passes on {"id": null}.
+    apiChecks?: string
+    apiContract?: Record<string, string> // captured response SHAPE: path → JSON type
+    apiMaxMs?: number // SLA — fail if the response took longer than this
+    apiTimeoutMs?: number // abort the request after this (fetch has no default)
+    // F24.3: hand this response's auth to the browser — the UI test then starts
+    // already logged in, instead of driving the login form in every single test.
+    apiInjectCookies?: boolean
+    apiInjectStorage?: string // `key = value` per line → localStorage
   }
 
   // Day 17: one open browser tab, as the renderer's tab strip sees it.

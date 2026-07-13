@@ -12,6 +12,7 @@ import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } f
 import {
   retargetSteps,
   retargetHostMismatch,
+  apiHostsOutsideEnv,
   suppressedChoice,
   retargetWarnKey
 } from './environments'
@@ -358,6 +359,9 @@ function App(): React.JSX.Element {
   // replay yields one; a suite spanning several sites yields several.
   const [envWarn, setEnvWarn] = useState<{
     mismatches: { from: string; to: string; tests: string[] }[]
+    // F24: hosts this run's API steps will call that the environment does NOT
+    // cover — they are NOT retargeted and will hit those hosts as recorded.
+    apiHosts: { host: string; tests: string[] }[]
     resolve: (choice: 'run' | 'noenv' | 'cancel') => void
   } | null>(null)
   const [envWarnRemember, setEnvWarnRemember] = useState(false)
@@ -366,6 +370,12 @@ function App(): React.JSX.Element {
   // editor commits on Save, so an abandoned edit doesn't mutate the step.
   const [apiEditIndex, setApiEditIndex] = useState<number | null>(null)
   const [apiDraft, setApiDraft] = useState<RecorderStep | null>(null)
+  // F24: the LAST run's HTTP exchange per API step (display index → evidence),
+  // captured on pass as well as fail. `apiPanelIndex` is the row whose response
+  // panel is expanded. Without this a green API step is unverifiable: "body
+  // contains id" passes on {"id": null, "status": "FAILED"} and you'd never know.
+  const [apiResponses, setApiResponses] = useState<Record<number, ApiEvidence>>({})
+  const [apiPanelIndex, setApiPanelIndex] = useState<number | null>(null)
   // F15 (smarter visual diffing): snapshot step being edited + its draft, plus a
   // transient status for the "re-capture baseline" action.
   const [snapEditIndex, setSnapEditIndex] = useState<number | null>(null)
@@ -421,7 +431,7 @@ function App(): React.JSX.Element {
   // is which inline list is expanded ('shots' | 'explain' | null) — only when
   // more than one step failed.
   const [lastFailures, setLastFailures] = useState<
-    { index: number; error: string; screenshotPath?: string }[]
+    { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
   >([])
   const [failDetail, setFailDetail] = useState<'shots' | 'explain' | null>(null)
   const [traceView, setTraceView] = useState<TraceManifest | null>(null)
@@ -736,33 +746,56 @@ function App(): React.JSX.Element {
   // recorded host, so a suite spanning three sites asks once, listing all three
   // — not once per test.
   const confirmRetargetFor = (
-    entries: { name: string; fromBase: string }[]
+    entries: { name: string; fromBase: string; steps?: RecorderStep[] }[]
   ): Promise<'run' | 'noenv' | 'cancel'> => {
     const to = activeEnv?.baseURL
     if (!to || !activeEnv) return Promise.resolve('run')
     const byHost = new Map<string, { from: string; to: string; tests: string[] }>()
+    // F24 × F25: an API step's URL only follows the environment when it sits on
+    // the recorded base's OWN origin. Anything else keeps calling the host it was
+    // recorded with — fine for a public/third-party API, DANGEROUS when it's the
+    // app's own API on a separate host (api.shop.com beside www.shop.com), because
+    // a "staging" run would then still POST to the PRODUCTION API. Both look
+    // identical from here, so we name the hosts instead of guessing.
+    const byApiHost = new Map<string, { host: string; tests: string[] }>()
     for (const e of entries) {
       const m = retargetHostMismatch(e.fromBase, to)
-      if (!m) continue
-      const hit = byHost.get(m.from) ?? { ...m, tests: [] }
-      hit.tests.push(e.name)
-      byHost.set(m.from, hit)
+      if (m) {
+        const hit = byHost.get(m.from) ?? { ...m, tests: [] }
+        hit.tests.push(e.name)
+        byHost.set(m.from, hit)
+      }
+      for (const host of apiHostsOutsideEnv(e.steps ?? [], e.fromBase, to)) {
+        const hit = byApiHost.get(host) ?? { host, tests: [] }
+        if (!hit.tests.includes(e.name)) hit.tests.push(e.name)
+        byApiHost.set(host, hit)
+      }
     }
     const mismatches = [...byHost.values()]
-    if (mismatches.length === 0) return Promise.resolve('run')
+    const apiHosts = [...byApiHost.values()]
+    if (mismatches.length === 0 && apiHosts.length === 0) return Promise.resolve('run')
     // Auto-resolve ONLY when every host pair was remembered AND they all agree.
     // A suite where one host says "run anyway" and another says "run without
     // environment" has no single answer — ask, rather than silently pick one.
     const suppress = envState.retargetSuppress
-    const choices = mismatches.map((m) => suppressedChoice(suppress, activeEnv.id, m.from, m.to))
+    const choices = [
+      ...mismatches.map((m) => suppressedChoice(suppress, activeEnv.id, m.from, m.to)),
+      // API hosts get their own remembered key (prefixed so it can never collide
+      // with a navigation host pair) — silencing "my tests call jsonplaceholder"
+      // must not also silence "this suite is retargeted to another site".
+      ...apiHosts.map((a) => suppressedChoice(suppress, activeEnv.id, `api:${a.host}`, to))
+    ]
     if (choices.every((c) => c !== null) && new Set(choices).size === 1) {
       return Promise.resolve(choices[0]!)
     }
-    return new Promise((resolve) => setEnvWarn({ mismatches, resolve }))
+    return new Promise((resolve) => setEnvWarn({ mismatches, apiHosts, resolve }))
   }
 
-  const confirmRetarget = (fromBase: string): Promise<'run' | 'noenv' | 'cancel'> =>
-    confirmRetargetFor([{ name: testName || 'this test', fromBase }])
+  const confirmRetarget = (
+    fromBase: string,
+    runSteps?: RecorderStep[]
+  ): Promise<'run' | 'noenv' | 'cancel'> =>
+    confirmRetargetFor([{ name: testName || 'this test', fromBase, steps: runSteps }])
 
   // Day 18: auto-save the current UNSAVED recording as a draft (debounced), so
   // a forgotten Save never loses work. Saved tests persist via the library, so
@@ -1018,7 +1051,16 @@ function App(): React.JSX.Element {
         // F25 guard: the run is BLOCKED awaiting this modal's answer, so the
         // browser view must come down or the dialog is invisible underneath it
         // and the replay hangs forever.
-        envWarn !== null
+        envWarn !== null ||
+        // F24 / F15 / F18: step editors are modals too. Any modal MISSING from
+        // this list renders underneath the native browser pane — the backdrop
+        // still eats clicks, so the app looks frozen. The two that need the page
+        // while open (F15 re-capture, F18 element capture) un-hide it in main for
+        // the duration of that read (withBrowserShown).
+        apiDraft !== null ||
+        snapDraft !== null ||
+        aiPromptOpen ||
+        apiPanelIndex !== null
     )
   }, [
     exportCode,
@@ -1035,7 +1077,11 @@ function App(): React.JSX.Element {
     edgeReportOpen,
     xbOpen,
     docOpen,
-    envWarn
+    envWarn,
+    apiDraft,
+    snapDraft,
+    aiPromptOpen,
+    apiPanelIndex
   ])
 
   // Day 18: remember the trace policy across sessions.
@@ -1059,6 +1105,17 @@ function App(): React.JSX.Element {
         setSkippedIndices((prev) => new Set(prev).add(idx))
         setFailedIndex((prev) => (prev === idx ? null : prev))
       }
+    })
+    return unsubscribe
+  }, [])
+
+  // F24: an API step's HTTP exchange arrived (pass or fail) — key it by DISPLAY
+  // row, like replay progress, so a linked block's expanded index lands on the
+  // row you can actually see.
+  useEffect(() => {
+    const unsubscribe = window.api.recorder.onApiResponse(({ index, evidence }) => {
+      const idx = runPlanRef.current?.[index] ?? index
+      setApiResponses((prev) => ({ ...prev, [idx]: evidence }))
     })
     return unsubscribe
   }, [])
@@ -1192,6 +1249,9 @@ function App(): React.JSX.Element {
     setLastHarUsage(null)
     setTestVersions([]) // F12: no history for a brand-new recording
     setHistoryOpen(false)
+    // F24: the previous test's API responses must not follow us to a new one.
+    setApiResponses({})
+    setApiPanelIndex(null)
     // F20 (Option 2): a fresh start has no test, so no edge-run history/run.
     setEdgeRun(null)
     setEdgeReportOpen(false)
@@ -1346,7 +1406,7 @@ function App(): React.JSX.Element {
     traceId?: string
     consoleErrors?: string[]
     networkErrors?: string[]
-    failures?: { index: number; error: string; screenshotPath?: string }[]
+    failures?: { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
     category?: FailureCategory // F9 (Stage 2): auto-classified failure type
     aiHealed?: number // B: how many selectors auto-healed this run
     // Option 2: a found-but-not-confident heal, for review & accept in the report
@@ -1358,6 +1418,10 @@ function App(): React.JSX.Element {
     setReplayingIndex(null)
     setLastFailures([])
     setFailDetail(null)
+    // F24: drop the previous run's API responses — a stale 201 next to a step
+    // that just failed would be a lie, and the panel is meant to be evidence.
+    setApiResponses({})
+    setApiPanelIndex(null)
     setLastScreenshotPath(null)
     setLastTraceId(null)
     setSkippedIndices(new Set())
@@ -1569,7 +1633,8 @@ function App(): React.JSX.Element {
     runPlanRef.current = map
     const fromBase = baseURL || deriveBaseURL(flat)
     // F25 guard: the active env would send this test to another host — ask.
-    const choice = await confirmRetarget(fromBase)
+    // F24: `flat` is passed so the guard can also inspect API-step URLs.
+    const choice = await confirmRetarget(fromBase, flat)
     if (choice === 'cancel') return
     const noEnv = choice === 'noenv'
     if (isDataDriven) {
@@ -1705,7 +1770,7 @@ function App(): React.JSX.Element {
     if (cases.length <= 1) return // nothing but the baseline
     // F25 guard: ask ONCE before the batch, not once per variant — every variant
     // of this one test shares the same recorded host.
-    const edgeChoice = await confirmRetarget(baseURL || deriveBaseURL(edgeFlat))
+    const edgeChoice = await confirmRetarget(baseURL || deriveBaseURL(edgeFlat), edgeFlat)
     if (edgeChoice === 'cancel') return
     const edgeNoEnv = edgeChoice === 'noenv'
     // A success check is what lets us tell "app rejected the bad input" (the
@@ -2035,7 +2100,10 @@ function App(): React.JSX.Element {
     error: string,
     screenshotPath: string | null | undefined,
     consoleErrors: string[],
-    networkErrors: string[]
+    networkErrors: string[],
+    // F24: an API step fails with an HTTP exchange, not a screenshot — pass it
+    // so the analysis reasons over the real request/response.
+    apiEvidence?: ApiEvidence
   ): Promise<void> => {
     setBugReport(null)
     setReportSavedPath(null)
@@ -2067,6 +2135,7 @@ function App(): React.JSX.Element {
       consoleErrors,
       networkErrors,
       screenshotPath: screenshotPath ?? undefined,
+      apiEvidence: apiEvidence ?? lastFailures.find((f) => f.index === index)?.apiEvidence,
       allSteps: steps.map((s) => stepText(s))
     }
     setLastEvidence(evidence)
@@ -2111,7 +2180,9 @@ function App(): React.JSX.Element {
         stepText: s ? stepText(s) : `Step ${f.index + 1}`,
         error: f.error,
         selector: s?.selector,
-        screenshotPath: f.screenshotPath
+        screenshotPath: f.screenshotPath,
+        // F24: an API failure's evidence is its HTTP exchange, not a screenshot.
+        apiEvidence: f.apiEvidence
       }
     })
     const first = failures[0]
@@ -2128,6 +2199,7 @@ function App(): React.JSX.Element {
       consoleErrors: lastConsoleErrors,
       networkErrors: lastNetworkErrors,
       screenshotPath: first.screenshotPath,
+      apiEvidence: first.apiEvidence,
       allSteps: steps.map((s) => stepText(s)),
       failures
     }
@@ -2391,7 +2463,10 @@ function App(): React.JSX.Element {
         const d = await window.api.library.load(t.fileName)
         return {
           name: t.name,
-          fromBase: d ? d.baseURL || deriveBaseURL(d.steps as RecorderStep[]) : ''
+          fromBase: d ? d.baseURL || deriveBaseURL(d.steps as RecorderStep[]) : '',
+          // F24: the guard inspects each test's API-step URLs too — this is where
+          // the prod-write trap bites hardest (one env, the whole suite).
+          steps: d ? (d.steps as RecorderStep[]) : []
         }
       })
     )
@@ -2675,6 +2750,11 @@ function App(): React.JSX.Element {
     setAiHealedIndices(new Set()) // AI-heal badges describe the old order too
     setDataRun(null) // Day 20: a past data-run summary describes the old steps
     setFailDetail(null)
+    // F24: the recorded HTTP responses describe the OLD list. Insert a step above
+    // an API step and every index shifts, so a "↩ 200 · 322 ms" chip would sit on
+    // a step that never ran — the exact kind of lie this app exists to prevent.
+    setApiResponses({})
+    setApiPanelIndex(null)
   }
 
   // Day 10(c): hand-pick a selector candidate as the step's primary. The pick
@@ -3484,7 +3564,14 @@ function App(): React.JSX.Element {
       // Persist for every host pair shown — the checkbox names them all. Goes to
       // the main-process store (userData), which the per-run storage clear can't
       // touch; refresh the cached envState so the next run sees it.
-      const keys = envWarn.mismatches.map((m) => retargetWarnKey(activeEnv.id, m.from, m.to))
+      const keys = [
+        ...envWarn.mismatches.map((m) => retargetWarnKey(activeEnv.id, m.from, m.to)),
+        // F24: remember the API-host acknowledgements under their own keys too,
+        // or the modal would re-ask for them on every run.
+        ...envWarn.apiHosts.map((a) =>
+          retargetWarnKey(activeEnv.id, `api:${a.host}`, activeEnv.baseURL)
+        )
+      ]
       window.api.environments.rememberRetarget(keys, choice).then(setEnvState)
     }
     envWarn?.resolve(choice)
@@ -3495,31 +3582,72 @@ function App(): React.JSX.Element {
     <div className="modal-backdrop">
       <div className="modal env-warn" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span className="modal-title">⚠ Environment retargets this run</span>
+          <span className="modal-title">
+            {envWarn.mismatches.length === 0
+              ? '⚠ API steps bypass this environment'
+              : '⚠ Environment retargets this run'}
+          </span>
         </div>
         <div className="env-warn-body">
-          <p>
-            The active environment <strong>{activeEnv?.name}</strong> re-points every navigation at{' '}
-            <code className="env-warn-to">{envWarn.mismatches[0].to}</code>.{' '}
-            {envWarn.mismatches.length === 1 && envWarn.mismatches[0].tests.length === 1
-              ? 'This test was recorded somewhere else.'
-              : `${envWarn.mismatches.reduce((n, m) => n + m.tests.length, 0)} test(s) in this run were recorded on ${envWarn.mismatches.length} other host(s).`}
-          </p>
-          <div className="env-warn-hosts">
-            {envWarn.mismatches.map((m) => (
-              <div key={m.from} className="env-warn-row">
-                <code>{m.from}</code>
-                <span className="env-warn-arrow">→</span>
-                <code className="env-warn-to">{m.to}</code>
-                <span className="env-warn-count" title={m.tests.join('\n')}>
-                  {m.tests.length === 1 ? m.tests[0] : `${m.tests.length} tests`}
-                </span>
+          {/* Navigations retargeted to another site (the original F25 warning). */}
+          {envWarn.mismatches.length > 0 && (
+            <>
+              <p>
+                The active environment <strong>{activeEnv?.name}</strong> re-points every navigation
+                at <code className="env-warn-to">{envWarn.mismatches[0].to}</code>.{' '}
+                {envWarn.mismatches.length === 1 && envWarn.mismatches[0].tests.length === 1
+                  ? 'This test was recorded somewhere else.'
+                  : `${envWarn.mismatches.reduce((n, m) => n + m.tests.length, 0)} test(s) in this run were recorded on ${envWarn.mismatches.length} other host(s).`}
+              </p>
+              <div className="env-warn-hosts">
+                {envWarn.mismatches.map((m) => (
+                  <div key={m.from} className="env-warn-row">
+                    <code>{m.from}</code>
+                    <span className="env-warn-arrow">→</span>
+                    <code className="env-warn-to">{m.to}</code>
+                    <span className="env-warn-count" title={m.tests.join('\n')}>
+                      {m.tests.length === 1 ? m.tests[0] : `${m.tests.length} tests`}
+                    </span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <p className="env-warn-hint">
-            If those aren’t the same app, the run will hit pages that don’t exist.
-          </p>
+              <p className="env-warn-hint">
+                If those aren’t the same app, the run will hit pages that don’t exist.
+              </p>
+            </>
+          )}
+          {/* F24: API steps calling a host the environment does NOT cover. These
+              are NOT retargeted — the danger is an app's own API on a separate
+              host, where a "staging" run would still write to PRODUCTION. */}
+          {envWarn.apiHosts.length > 0 && (
+            <>
+              <p className="env-warn-api-lead">
+                🔌 This run’s <strong>API steps</strong> call{' '}
+                {envWarn.apiHosts.length === 1 ? 'a host' : `${envWarn.apiHosts.length} hosts`} the
+                environment does <strong>not</strong> cover. Those calls are{' '}
+                <strong>not retargeted</strong> — they go to the host below exactly as recorded,
+                even though the rest of the run goes to {activeEnv?.name}.
+              </p>
+              <div className="env-warn-hosts">
+                {envWarn.apiHosts.map((a) => (
+                  <div key={a.host} className="env-warn-row">
+                    <code className="env-warn-api">{a.host}</code>
+                    <span className="env-warn-arrow">↛</span>
+                    <span className="env-warn-nochange">not retargeted</span>
+                    <span className="env-warn-count" title={a.tests.join('\n')}>
+                      {a.tests.length === 1 ? a.tests[0] : `${a.tests.length} tests`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="env-warn-hint">
+                Fine for a third-party API (Stripe, a public endpoint). But if that host is{' '}
+                <strong>your own API</strong>, this run will read and write <strong>real
+                production data</strong> while everything else points at {activeEnv?.name} — add it
+                to the environment’s base URL, or edit the step to use a relative host.
+              </p>
+            </>
+          )}
           <label className="env-warn-remember">
             <input
               type="checkbox"
@@ -3528,15 +3656,19 @@ function App(): React.JSX.Element {
             />
             <span>
               Don’t ask again for{' '}
-              {envWarn.mismatches.length === 1 ? (
-                <>
-                  <code>{envWarn.mismatches[0].from}</code> →{' '}
-                  <code>{envWarn.mismatches[0].to}</code>
-                </>
+              {envWarn.mismatches.length + envWarn.apiHosts.length === 1 ? (
+                envWarn.mismatches.length === 1 ? (
+                  <>
+                    <code>{envWarn.mismatches[0].from}</code> →{' '}
+                    <code>{envWarn.mismatches[0].to}</code>
+                  </>
+                ) : (
+                  <code>{envWarn.apiHosts[0].host}</code>
+                )
               ) : (
-                <>these {envWarn.mismatches.length} host pairs</>
+                <>these {envWarn.mismatches.length + envWarn.apiHosts.length} hosts</>
               )}
-              <em> (these host pairs only — a new site still asks)</em>
+              <em> (these hosts only — a new one still asks)</em>
             </span>
           </label>
         </div>
@@ -3550,6 +3682,140 @@ function App(): React.JSX.Element {
           <button className="modal-btn primary" onClick={() => settleEnvWarn('noenv')}>
             Run without environment
           </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // F24: the response panel — a Postman-style view of what the server actually
+  // returned, for a PASSING step as much as a failing one. The point: `body
+  // contains "id"` goes green on {"id": null, "status": "FAILED"}, and no amount
+  // of staring at a green tick would tell you. Now you can just look.
+  const statusIsOk = (status?: number): boolean =>
+    status !== undefined && status >= 200 && status < 300
+
+  // F24.2: capture the SHAPE of a known-good response and store it on the step as
+  // its contract. Inferring from the MASKED body is fine — masking swaps a
+  // secret's value for "••••", which is still a string, so every TYPE survives.
+  // MIRROR: inferContract in src/main/apiChecks.ts (which enforces it at replay).
+  const inferShape = (value: unknown, prefix = '', out: Record<string, string> = {}) => {
+    const t = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
+    if (prefix) out[prefix] = t
+    if (t === 'object') {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        inferShape(v, prefix ? `${prefix}.${k}` : k, out)
+      }
+    } else if (t === 'array') {
+      const arr = value as unknown[]
+      // A list of 3 things and a list of 300 have the SAME shape — contract the
+      // element, not each index.
+      if (arr.length) inferShape(arr[0], prefix ? `${prefix}[]` : '[]', out)
+    }
+    return out
+  }
+
+  const handleCaptureContract = (index: number): void => {
+    const ev = apiResponses[index]
+    if (!ev?.responseBody) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(ev.responseBody)
+    } catch {
+      window.alert("This response isn't JSON, so it has no shape to contract.")
+      return
+    }
+    const contract = inferShape(parsed)
+    if (!Object.keys(contract).length) {
+      window.alert('This response has no fields to contract.')
+      return
+    }
+    // setSteps, NOT editSteps: capturing a contract adds a field to one step — no
+    // row moves, so the run's pass/fail marks and its recorded responses all still
+    // describe this list. editSteps would (correctly, for a reordering edit) throw
+    // them away, closing the very panel you're reading.
+    setSteps((prev) => prev.map((s, i) => (i === index ? { ...s, apiContract: contract } : s)))
+  }
+
+  // Pretty-print JSON so a one-line payload is actually readable; leave anything
+  // that isn't JSON (HTML, plain text) exactly as it came.
+  const prettyBody = (text?: string): string => {
+    const raw = (text ?? '').trim()
+    if (!raw) return ''
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2)
+    } catch {
+      return raw
+    }
+  }
+
+  // Rendered as a MODAL, not inline in the steps column: the column is ~300px
+  // wide and a JSON body wrapped into it is unreadable. A modal is the only
+  // surface here that can be genuinely wide (it also hides the native browser
+  // pane, which would otherwise paint straight over it — see setOverlay).
+  const apiResponseStep = apiPanelIndex !== null ? steps[apiPanelIndex] : undefined
+  const apiResponseEv = apiPanelIndex !== null ? apiResponses[apiPanelIndex] : undefined
+  const apiResponseModal = apiPanelIndex !== null && apiResponseEv && (
+    <div className="modal-backdrop" onClick={() => setApiPanelIndex(null)}>
+      <div className="modal api-response-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">
+            ↩ Response — step {apiPanelIndex + 1}
+            {apiResponseStep ? ` · ${apiResponseStep.apiMethod ?? 'GET'}` : ''}
+          </span>
+          <button className="modal-close" onClick={() => setApiPanelIndex(null)} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="api-response-body">
+          <div className={`api-panel-status${statusIsOk(apiResponseEv.status) ? ' ok' : ' bad'}`}>
+            {apiResponseEv.status != null
+              ? apiResponseEv.status
+              : 'no response — the request never reached the server'}
+            {apiResponseEv.durationMs != null && (
+              <span className="api-panel-meta">· {apiResponseEv.durationMs} ms</span>
+            )}
+            {apiResponseEv.sizeBytes != null && (
+              <span className="api-panel-meta">· {formatBytes(apiResponseEv.sizeBytes)}</span>
+            )}
+          </div>
+          <div className="api-panel-lbl">Sent</div>
+          <pre className="api-panel-pre">
+            {`${apiResponseEv.method} ${apiResponseEv.url}`}
+            {apiResponseEv.requestHeaders ? `\n${apiResponseEv.requestHeaders}` : ''}
+            {apiResponseEv.requestBody ? `\n\n${apiResponseEv.requestBody}` : ''}
+          </pre>
+          <div className="api-panel-lbl">Received</div>
+          {apiResponseEv.responseHeaders && (
+            <pre className="api-panel-pre api-panel-headers">{apiResponseEv.responseHeaders}</pre>
+          )}
+          <pre className="api-panel-pre">
+            {prettyBody(apiResponseEv.responseBody) || '(empty body)'}
+          </pre>
+          <p className="api-panel-note">
+            Credentials are masked (••••). Long bodies are cut at 2,000 characters — the size above
+            is the real one.
+          </p>
+          {/* F24.2: capture the SHAPE of this known-good response as a contract.
+              This is the check that catches a backend renaming `total` → `amount`:
+              no value assertion can, because the field simply isn't there. */}
+          {apiResponseStep?.type === 'api' && (
+            <div className="api-contract-capture">
+              <button
+                type="button"
+                className="modal-btn"
+                onClick={() => handleCaptureContract(apiPanelIndex!)}
+                disabled={!apiResponseEv.responseBody}
+                title="Remember this response's SHAPE. Later runs fail if a field is renamed, dropped, or changes type."
+              >
+                📐 Save this shape as the contract
+              </button>
+              <span className="api-panel-note">
+                {apiResponseStep.apiContract
+                  ? `Contract set — ${Object.keys(apiResponseStep.apiContract).length} fields are being enforced.`
+                  : 'No contract yet: a renamed or dropped field would go unnoticed.'}
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -3616,7 +3882,7 @@ function App(): React.JSX.Element {
               <span>Expect status</span>
               <input
                 type="text"
-                placeholder="2xx (or 200, 404…)"
+                placeholder="2xx  ·  200  ·  204,404"
                 value={apiDraft.apiExpectStatus ?? ''}
                 onChange={(e) => patchApiDraft({ apiExpectStatus: e.target.value })}
               />
@@ -3631,9 +3897,130 @@ function App(): React.JSX.Element {
               />
             </label>
           </div>
+          {/* F24.2: REAL assertions. "Body contains" is a substring match — it
+              passes on {"id": null}, which is the dead-assertion disease F6 exists
+              to catch, reinvented in API form. */}
+          <label className="api-field">
+            <span>
+              Response checks — one per line: <code>path op value</code>
+            </span>
+            <textarea
+              className="api-headers"
+              rows={3}
+              placeholder={
+                'id not-empty\nstatus equals CONFIRMED\nitems count-gt 0\nheader:content-type contains application/json'
+              }
+              value={apiDraft.apiChecks ?? ''}
+              onChange={(e) => patchApiDraft({ apiChecks: e.target.value })}
+            />
+          </label>
+          <p className="api-hint api-ops">
+            <strong>Operators:</strong> <code>equals</code> · <code>not-equals</code> ·{' '}
+            <code>contains</code> · <code>not-contains</code> · <code>exists</code> ·{' '}
+            <code>not-empty</code> · <code>empty</code> · <code>gt</code> · <code>lt</code> ·{' '}
+            <code>count-eq</code> · <code>count-gt</code> · <code>count-lt</code> ·{' '}
+            <code>is-number</code> · <code>is-string</code> · <code>is-boolean</code> ·{' '}
+            <code>is-array</code>. Prefix a path with <code>header:</code> to check a response
+            header.
+          </p>
+          <div className="api-row api-expect">
+            <label className="api-field api-field-inline">
+              <span>Must respond within (ms) — SLA, blank = no limit</span>
+              <input
+                type="text"
+                placeholder="e.g. 500"
+                value={apiDraft.apiMaxMs != null ? String(apiDraft.apiMaxMs) : ''}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10)
+                  patchApiDraft({ apiMaxMs: Number.isFinite(n) && n > 0 ? n : undefined })
+                }}
+              />
+            </label>
+            <label className="api-field api-field-inline">
+              <span>Give up after (seconds) — default 30</span>
+              <input
+                type="text"
+                placeholder="30"
+                value={apiDraft.apiTimeoutMs != null ? String(apiDraft.apiTimeoutMs / 1000) : ''}
+                onChange={(e) => {
+                  const n = parseFloat(e.target.value)
+                  patchApiDraft({
+                    apiTimeoutMs: Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : undefined
+                  })
+                }}
+              />
+            </label>
+          </div>
+          {/* F24.2: the contract. Captured from the response panel, shown here so
+              you can see it exists and drop it. */}
+          {apiDraft.apiContract && Object.keys(apiDraft.apiContract).length > 0 && (
+            <div className="api-contract-row">
+              <span>
+                📐 <strong>Contract:</strong> {Object.keys(apiDraft.apiContract).length} fields —
+                fails if any is renamed, dropped, or changes type.
+              </span>
+              <button
+                type="button"
+                className="modal-btn"
+                onClick={() => patchApiDraft({ apiContract: undefined })}
+              >
+                Remove
+              </button>
+            </div>
+          )}
+          {/* F24.1: the piece that makes create → verify → delete possible. The
+              server invents the id, so it cannot be typed when authoring. */}
+          <label className="api-field">
+            <span>
+              Save from response — one <code>name = path</code> per line, used later as{' '}
+              <code>{'{{saved:name}}'}</code>
+            </span>
+            <textarea
+              className="api-headers"
+              rows={2}
+              placeholder={'orderId = id\ntoken = data.accessToken'}
+              value={apiDraft.apiSave ?? ''}
+              onChange={(e) => patchApiDraft({ apiSave: e.target.value })}
+            />
+          </label>
+          {/* F24.3: hand this response's auth to the browser — the suite-scale win. */}
+          <div className="api-auth-block">
+            <label className="api-check-line">
+              <input
+                type="checkbox"
+                checked={!!apiDraft.apiInjectCookies}
+                onChange={(e) => patchApiDraft({ apiInjectCookies: e.target.checked })}
+              />
+              <span>
+                🔑 Log the <strong>browser</strong> in with this response’s cookies — the UI steps
+                after this start already authenticated, with no login screen.
+              </span>
+            </label>
+            <label className="api-field">
+              <span>
+                …or, if the API returns a <strong>token in the body</strong>: set localStorage —
+                one <code>key = value</code> per line
+              </span>
+              <textarea
+                className="api-headers"
+                rows={2}
+                placeholder={'authToken = {{saved:token}}'}
+                value={apiDraft.apiInjectStorage ?? ''}
+                onChange={(e) => patchApiDraft({ apiInjectStorage: e.target.value })}
+              />
+            </label>
+          </div>
           <p className="api-hint">
-            The request runs from the app itself (not the browser tab), so it works on any page.
-            A failed status or missing body text fails the step like any check.
+            The request runs from the app itself (not the browser tab), so it works on any page. A
+            failed status or missing body text fails the step like any check.
+          </p>
+          <p className="api-hint">
+            <strong>Re-runnable tests:</strong> use <code>{'{{uuid}}'}</code>,{' '}
+            <code>{'{{timestamp}}'}</code> or <code>{'{{randomInt}}'}</code> anywhere in the URL,
+            headers or body to create data that never collides on a second run (
+            <code>qa+{'{{timestamp}}'}@x.com</code>). For a teardown check, an{' '}
+            <strong>Expect status</strong> of <code>204,404</code> accepts either — so “already
+            gone” still passes and the test doesn’t go red forever after run 1.
           </p>
         </div>
         <div className="modal-footer">
@@ -5350,7 +5737,8 @@ function App(): React.JSX.Element {
                           recovery.error,
                           recovery.screenshotPath,
                           recovery.consoleErrors ?? [],
-                          recovery.networkErrors ?? []
+                          recovery.networkErrors ?? [],
+                          recovery.apiEvidence // F24: the HTTP exchange, mid-pause
                         )
                       }
                       title="Explain this failure: app bug, test bug, or just timing?"
@@ -6077,13 +6465,31 @@ function App(): React.JSX.Element {
                           spellCheck={false}
                         />
                       ) : step.type === 'api' ? (
-                        <span
-                          className="step-text step-text-api"
-                          onClick={() => canEdit && openApiEditor(i)}
-                          title="Edit this API request"
-                        >
-                          {stepText(step)}
-                        </span>
+                        <>
+                          <span
+                            className="step-text step-text-api"
+                            onClick={() => canEdit && openApiEditor(i)}
+                            title="Edit this API request"
+                          >
+                            {stepText(step)}
+                          </span>
+                          {/* F24: what the server ACTUALLY sent back — shown for a
+                              passing step too, because a green tick you can't
+                              inspect proves nothing. */}
+                          {apiResponses[i] && (
+                            <button
+                              type="button"
+                              className={`api-chip${statusIsOk(apiResponses[i].status) ? ' ok' : ' bad'}`}
+                              onClick={() => setApiPanelIndex(i)}
+                              title="Show the response the server actually sent"
+                            >
+                              ↩ {apiResponses[i].status ?? 'no response'}
+                              {apiResponses[i].durationMs != null
+                                ? ` · ${apiResponses[i].durationMs} ms`
+                                : ''}
+                            </button>
+                          )}
+                        </>
                       ) : step.type === 'snapshot' ? (
                         <span
                           className="step-text step-text-api"
@@ -6108,6 +6514,14 @@ function App(): React.JSX.Element {
                           title="Optional — replay skips this (doesn’t fail) if its element isn’t present. Export wraps it in try/catch."
                         >
                           ◆ optional
+                        </span>
+                      )}
+                      {step.teardown && (
+                        <span
+                          className="teardown-badge"
+                          title="Teardown — runs even when an earlier step fails and ends the run, so the data this test created is always cleaned up."
+                        >
+                          🧹 teardown
                         </span>
                       )}
                       {/* F6: dead/weak assertion warning — a check that verifies
@@ -6347,6 +6761,29 @@ function App(): React.JSX.Element {
                             aria-label={step.optional ? 'Make required' : 'Make optional'}
                           >
                             {step.optional ? '◆' : '◇'}
+                          </button>
+                        )}
+                        {/* F24.4: mark an API step as CLEANUP — it runs even when
+                            an earlier step failed and ended the run, so a broken
+                            test still deletes the data it created. */}
+                        {step.type === 'api' && (
+                          <button
+                            className={`step-action${step.teardown ? ' teardown-on' : ''}`}
+                            onClick={() =>
+                              editSteps(
+                                steps.map((s, idx) =>
+                                  idx === i ? { ...s, teardown: !s.teardown } : s
+                                )
+                              )
+                            }
+                            title={
+                              step.teardown
+                                ? 'Teardown — runs even if the test fails earlier, so cleanup always happens. Click to make it a normal step.'
+                                : 'Make this a teardown (cleanup) step — it will run even when an earlier step fails, so the data this test created is never orphaned'
+                            }
+                            aria-label={step.teardown ? 'Make normal step' : 'Make teardown step'}
+                          >
+                            🧹
                           </button>
                         )}
                         <button
@@ -7210,6 +7647,9 @@ function App(): React.JSX.Element {
 
       {/* F24: the API-request step editor. */}
       {apiEditorModal}
+
+      {/* F24: what the server actually sent back (pass or fail). */}
+      {apiResponseModal}
 
       {/* F15: the visual-snapshot settings editor. */}
       {snapEditorModal}
