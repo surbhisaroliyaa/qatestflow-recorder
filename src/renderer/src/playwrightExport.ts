@@ -217,7 +217,11 @@ export function runtimeTokenUse(steps: RecorderStep[]): {
   saved: boolean
 } {
   const all = steps
-    .flatMap((s) => [s.value, s.url, s.apiHeaders, s.apiBody])
+    // apiChecks/apiExpectBody belong here too: a token can live ONLY in a check
+    // (`id equals {{saved:objId}}`), and if this list misses it, the spec compiles a
+    // reference to `saved` / `runUuid` that was never declared — a spec that doesn't
+    // even build. Same omission as the app's own token resolver had.
+    .flatMap((s) => [s.value, s.url, s.apiHeaders, s.apiBody, s.apiChecks, s.apiExpectBody])
     .filter((f): f is string => typeof f === 'string')
     .flatMap((f) => extractTokens(f))
   return {
@@ -268,87 +272,189 @@ function pathExpr(path: string): string {
 
 // F24.2: the response checks, as real Playwright assertions. Each one names the
 // path in its message, so a CI failure reads the same as the in-app one.
-function apiCheckLines(step: RecorderStep, ind: string): string {
+// Does any api step carry response checks? (Decides whether the shared check
+// helper is emitted at the top of the file.)
+export function anyApiChecks(steps: RecorderStep[]): boolean {
+  return steps.some(
+    (s) =>
+      s.type === 'api' &&
+      (s.apiChecks ?? '')
+        .split('\n')
+        .some((l) => l.trim() && !l.trim().startsWith('#'))
+  )
+}
+
+// F24.2: the response-check engine, emitted ONCE into the exported spec.
+//
+// It used to be hand-translated per operator into the nearest Playwright matcher
+// — `not-empty` → toBeTruthy(), `empty` → toBeFalsy(), and so on. Those aren't the
+// same thing: `[]` is truthy in JS, so the app failed `items not-empty` on an empty
+// list while the export PASSED it; `0` is falsy, so the export failed `count empty`
+// on zero while the app passed. An unknown operator was a red step in the app and a
+// `// comment` in CI. The app and its own export disagreed about what the test meant.
+//
+// So the export now ships the SAME implementation the app runs (mirrors runCheck in
+// src/main/apiChecks.ts). One meaning, two places to run it.
+const API_CHECK_HELPER = `// ── QATestFlow: API response checks (mirrors the in-app engine exactly) ──
+const __MISSING = Symbol('missing')
+function __readField(body: unknown, path: string): unknown {
+  let cur: unknown = body
+  for (const seg of path.split('.')) {
+    const key = seg.trim()
+    if (!key) continue
+    if (cur == null) return __MISSING
+    if (Array.isArray(cur)) {
+      const i = Number(key)
+      if (!Number.isInteger(i) || i < 0 || i >= cur.length) return __MISSING
+      cur = cur[i]
+    } else if (typeof cur === 'object') {
+      const o = cur as Record<string, unknown>
+      if (!(key in o)) return __MISSING
+      cur = o[key]
+    } else return __MISSING
+  }
+  return cur
+}
+const __show = (v: unknown): string =>
+  v === __MISSING ? '(absent)' : v === null ? 'null' : typeof v === 'object' ? JSON.stringify(v).slice(0, 80) : String(v)
+// null takes no article — "is null", never "is a null". (Mirrors apiChecks.ts.)
+const __article = (t: string): string =>
+  t === 'null' ? t : /^[aeiou]/i.test(t) ? \`an \${t}\` : \`a \${t}\`
+function __why(body: unknown, headers: Record<string, string>, path: string, op: string, expected: string): string | null {
+  if (!op) return \`"\${path}" isn't a check — write it as: <field> <operator> [value]\`
+  if (path.toLowerCase().startsWith('header:')) {
+    const name = path.slice(7).toLowerCase()
+    const actual = headers[name]
+    if (actual === undefined) return op === 'not-exists' ? null : \`the response has no "\${name}" header\`
+    if (op === 'exists') return null
+    if (op === 'not-exists') return \`header "\${name}" IS present ("\${actual}") — expected it to be absent\`
+    if (op === 'equals') {
+      return actual.toLowerCase() === expected.toLowerCase() ? null : \`header "\${name}" is "\${actual}", expected "\${expected}"\`
+    }
+    if (op === 'contains') {
+      return actual.toLowerCase().includes(expected.toLowerCase()) ? null : \`header "\${name}" is "\${actual}", which does not contain "\${expected}"\`
+    }
+    return \`unknown operator "\${op}" for a header check\`
+  }
+  const value = __readField(body, path)
+  const absent = value === __MISSING
+  switch (op) {
+    case 'exists':
+      return absent ? \`"\${path}" is not in the response\` : null
+    case 'not-exists':
+      return absent ? null : \`"\${path}" IS in the response (\${__show(value)}) — expected it to be absent\`
+    case 'not-empty':
+      if (absent) return \`"\${path}" is not in the response\`
+      if (value === null || value === '') return \`"\${path}" is \${__show(value)} — expected a value\`
+      if (Array.isArray(value) && value.length === 0) return \`"\${path}" is an empty array\`
+      return null
+    case 'empty':
+      if (absent || value === null || value === '') return null
+      if (Array.isArray(value) && value.length === 0) return null
+      return \`"\${path}" is \${__show(value)} — expected it to be empty\`
+    case 'equals':
+      if (absent) return \`"\${path}" is not in the response (expected "\${expected}")\`
+      return String(value) === expected ? null : \`"\${path}" is \${__show(value)}, expected "\${expected}"\`
+    case 'not-equals':
+      if (absent) return \`"\${path}" is not in the response — a not-equals check can't pass on a field that isn't there\`
+      return String(value) !== expected ? null : \`"\${path}" is "\${expected}" — expected it not to be\`
+    case 'contains':
+      if (absent) return \`"\${path}" is not in the response\`
+      return String(value).includes(expected) ? null : \`"\${path}" is \${__show(value)}, which does not contain "\${expected}"\`
+    case 'not-contains':
+      if (absent) return \`"\${path}" is not in the response — a not-contains check can't pass on a field that isn't there\`
+      return !String(value).includes(expected) ? null : \`"\${path}" is \${__show(value)}, which contains "\${expected}"\`
+    case 'gt':
+    case 'lt': {
+      if (absent) return \`"\${path}" is not in the response\`
+      if (value === null || typeof value === 'boolean' || typeof value === 'object' || value === '') {
+        return \`"\${path}" is \${__show(value)}, which is not a number\`
+      }
+      const n = Number(value)
+      const target = Number(expected)
+      if (!Number.isFinite(n)) return \`"\${path}" is \${__show(value)}, which is not a number\`
+      if (!Number.isFinite(target)) return \`"\${expected}" is not a number\`
+      if (op === 'gt') return n > target ? null : \`"\${path}" is \${n}, expected greater than \${target}\`
+      return n < target ? null : \`"\${path}" is \${n}, expected less than \${target}\`
+    }
+    case 'count-eq':
+    case 'count-gt':
+    case 'count-lt': {
+      if (absent) return \`"\${path}" is not in the response\`
+      if (!Array.isArray(value)) return \`"\${path}" is \${__show(value)}, which is not an array\`
+      const n = value.length
+      const target = Number(expected)
+      if (!Number.isFinite(target)) return \`"\${expected}" is not a number\`
+      if (op === 'count-eq') return n === target ? null : \`"\${path}" has \${n} items, expected \${target}\`
+      if (op === 'count-gt') return n > target ? null : \`"\${path}" has \${n} items, expected more than \${target}\`
+      return n < target ? null : \`"\${path}" has \${n} items, expected fewer than \${target}\`
+    }
+    case 'is-number':
+    case 'is-string':
+    case 'is-boolean':
+    case 'is-array': {
+      if (absent) return \`"\${path}" is not in the response\`
+      const want = op.slice(3)
+      const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
+      return actual === want ? null : \`"\${path}" is \${__article(actual)}, expected \${__article(want)}\`
+    }
+    default:
+      return \`unknown check "\${op}"\`
+  }
+}
+// Reports EVERY failing check at once, not just the first — you fix them in one pass.
+function __expectChecks(body: unknown, headers: Record<string, string>, list: [string, string, string][]): void {
+  const failures = list
+    .map(([p, op, exp]) => {
+      const why = __why(body, headers, p, op, exp)
+      return why ? \`\${[p, op, exp].filter(Boolean).join(' ')} — \${why}\` : null
+    })
+    .filter(Boolean)
+  expect(failures, 'API response checks').toEqual([])
+}
+`
+
+// `columns` is here so a check line's TOKENS compile to real references, exactly as
+// the url/headers/body already do. Without it the export emitted
+// ["id", "equals", "{{saved:objId}}"] — the LITERAL token — so the single most
+// natural API assertion there is ("the GET returns the id my POST just created")
+// passed in the app and failed in CI. The app learned to resolve tokens in check
+// lines; the exporter didn't. Same feature, two implementations, one got the fix.
+function apiCheckLines(step: RecorderStep, ind: string, columns: string[] = []): string {
   const lines: string[] = []
-  const checks = (step.apiChecks ?? '')
+  const raw = (step.apiChecks ?? '')
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'))
   const contract = step.apiContract && Object.keys(step.apiContract).length ? step.apiContract : null
-  const needsBody =
-    !!contract || checks.some((l) => !/^header:/i.test(l))
-  if (!checks.length && !contract) return ''
+  if (!raw.length && !contract) return ''
 
+  // A line that doesn't parse is kept with an empty op, exactly as the app keeps it
+  // — so the exported test FAILS on it too, instead of quietly not running it.
+  const parsed = raw.map((line) => {
+    const m = /^(\S+)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(line)
+    if (!m) return { path: line, op: '', expected: '' }
+    return { path: m[1], op: m[2].toLowerCase(), expected: (m[3] ?? '').trim() }
+  })
+
+  const needsBody =
+    !!contract || parsed.some((c) => !!c.op && !/^header:/i.test(c.path)) || parsed.some((c) => !c.op)
   if (needsBody) lines.push(`${ind}const body = await res.json()`)
 
-  for (const line of checks) {
-    const m = /^(\S+)\s+(\S+)(?:\s+([\s\S]*))?$/.exec(line)
-    if (!m) continue
-    const [, path, rawOp, rawVal] = m
-    const op = rawOp.toLowerCase()
-    const val = (rawVal ?? '').trim()
-    const label = quote(line)
-
-    if (/^header:/i.test(path)) {
-      const name = path.slice('header:'.length).toLowerCase()
-      const ref = `res.headers()[${quote(name)}]`
-      if (op === 'exists') lines.push(`${ind}expect(${ref}, ${label}).toBeDefined()`)
-      else if (op === 'equals') lines.push(`${ind}expect(${ref}, ${label}).toBe(${quote(val)})`)
-      else if (op === 'contains') {
-        lines.push(`${ind}expect(${ref}, ${label}).toContain(${quote(val)})`)
-      }
-      continue
-    }
-
-    const ref = pathExpr(path)
-    switch (op) {
-      case 'exists':
-        lines.push(`${ind}expect(${ref}, ${label}).toBeDefined()`)
-        break
-      case 'not-empty':
-        lines.push(`${ind}expect(${ref}, ${label}).toBeTruthy()`)
-        break
-      case 'empty':
-        lines.push(`${ind}expect(${ref}, ${label}).toBeFalsy()`)
-        break
-      case 'equals':
-        lines.push(`${ind}expect(String(${ref}), ${label}).toBe(${quote(val)})`)
-        break
-      case 'not-equals':
-        lines.push(`${ind}expect(String(${ref}), ${label}).not.toBe(${quote(val)})`)
-        break
-      case 'contains':
-        lines.push(`${ind}expect(String(${ref}), ${label}).toContain(${quote(val)})`)
-        break
-      case 'not-contains':
-        lines.push(`${ind}expect(String(${ref}), ${label}).not.toContain(${quote(val)})`)
-        break
-      case 'gt':
-        lines.push(`${ind}expect(Number(${ref}), ${label}).toBeGreaterThan(${Number(val)})`)
-        break
-      case 'lt':
-        lines.push(`${ind}expect(Number(${ref}), ${label}).toBeLessThan(${Number(val)})`)
-        break
-      case 'count-eq':
-        lines.push(`${ind}expect(${ref}, ${label}).toHaveLength(${Number(val)})`)
-        break
-      case 'count-gt':
-        lines.push(`${ind}expect(${ref}.length, ${label}).toBeGreaterThan(${Number(val)})`)
-        break
-      case 'count-lt':
-        lines.push(`${ind}expect(${ref}.length, ${label}).toBeLessThan(${Number(val)})`)
-        break
-      case 'is-number':
-      case 'is-string':
-      case 'is-boolean':
-        lines.push(`${ind}expect(typeof ${ref}, ${label}).toBe(${quote(op.slice(3))})`)
-        break
-      case 'is-array':
-        lines.push(`${ind}expect(Array.isArray(${ref}), ${label}).toBe(true)`)
-        break
-      default:
-        lines.push(`${ind}// ⚠ unknown check "${op}" — not exported`)
-    }
+  if (parsed.length) {
+    // valueExpr, NOT quote: `{{saved:objId}}` has to compile to `saved.objId`, a
+    // {{column}} to `data.column`, {{uuid}} to `runUuid` — the same substitution the
+    // app performs at run time. quote() froze the token into a string literal, and
+    // the check then compared the response against the text "{{saved:objId}}".
+    const table = parsed
+      .map(
+        (c) =>
+          `${ind}  [${valueExpr(c.path, columns)}, ${quote(c.op)}, ${valueExpr(c.expected, columns)}]`
+      )
+      .join(',\n')
+    lines.push(
+      `${ind}__expectChecks(${needsBody ? 'body' : 'null'}, res.headers(), [\n${table}\n${ind}])`
+    )
   }
 
   // The contract: every captured field must still be there, with the same type.
@@ -407,6 +513,63 @@ function apiSaveLines(step: RecorderStep, indentStr: string, bodyDeclared: boole
 }
 
 // Does this step's check block declare `body`? (Mirrors apiCheckLines' own rule.)
+// F24.3: hand an API login's session to the BROWSER, in the exported spec.
+//
+// This used to be emitted NOWHERE. The exported test fired the login request and
+// threw its cookies away, so every UI step after it ran LOGGED OUT — green in the
+// app, failing in CI for reasons ("can't find the Add to Cart button") that look
+// nothing like the cause. Cross-browser runs go through this exporter too, so they
+// inherited it three times over.
+//
+// Cookies: Playwright's `request` fixture keeps its own cookie jar and follows
+// redirects, so storageState() already holds every Set-Cookie from the whole chain
+// (including the 302 hop a form login answers with). Copy that jar into the browser
+// context and the next navigation is authenticated.
+function apiInjectLines(
+  step: RecorderStep,
+  ind: string,
+  pageVar: string,
+  columns: string[]
+): string {
+  const lines: string[] = []
+
+  if (step.apiInjectCookies) {
+    lines.push(`// 🔑 Log the browser in with this response's cookies.`)
+    lines.push(`const { cookies } = await request.storageState()`)
+    // Fail LOUDLY on an empty jar. A silent no-op here leaves the browser logged
+    // out and turns every later step into a mystery. (This is the same guard the
+    // app runs — they must agree.)
+    lines.push(
+      `expect(cookies, '🔑 the API login returned no cookies — the browser would run logged OUT').not.toHaveLength(0)`
+    )
+    lines.push(`await ${pageVar}.context().addCookies(cookies)`)
+  }
+
+  // localStorage: "key = value" per line. It belongs to an ORIGIN, so the browser
+  // has to already be on the app — same rule (and same loud failure) as the app.
+  const entries: Array<[string, string]> = []
+  for (const line of (step.apiInjectStorage ?? '').split('\n')) {
+    const t = line.trim()
+    const eq = t.indexOf('=')
+    if (eq <= 0) continue
+    const key = t.slice(0, eq).trim()
+    if (key) entries.push([key, t.slice(eq + 1).trim()])
+  }
+  if (entries.length) {
+    const pairs = entries.map(([k, v]) => `[${quote(k)}, ${valueExpr(v, columns)}]`).join(', ')
+    lines.push(`// 🔑 Log the browser in with a token from this response's body.`)
+    lines.push(
+      `expect(${pageVar}.url(), 'localStorage needs an origin — navigate to the app first').toMatch(/^https?:/)`
+    )
+    lines.push(
+      `await ${pageVar}.evaluate((entries) => { for (const [k, v] of entries) localStorage.setItem(k, v) }, [${pairs}])`
+    )
+  }
+
+  if (!lines.length) return ''
+  return `\n${lines.map((l) => `${ind}${l}`).join('\n')}`
+}
+
 function checksDeclareBody(step: RecorderStep): boolean {
   const checks = (step.apiChecks ?? '')
     .split('\n')
@@ -804,7 +967,7 @@ function actionFor(
       : ''
     // F24.2: the real assertions (field / header / count / type), the contract,
     // and the SLA — all of which must survive into CI or the export is a lie.
-    const checks = apiCheckLines(step, '    ')
+    const checks = apiCheckLines(step, '    ', columns)
     // F24.1: lift saved values out of the response, so the exported test can also
     // GET/DELETE the record it just created. It reuses `body` when the checks
     // above already parsed it — declaring it twice would not compile.
@@ -814,11 +977,15 @@ function actionFor(
       ? `\n    expect(Date.now() - t0, 'response time').toBeLessThanOrEqual(${step.apiMaxMs})`
       : ''
     const t0 = step.apiMaxMs ? `    const t0 = Date.now()\n` : ''
+    // F24.3: the 🔑 session handoff. Emitted LAST, so it only runs once the status
+    // and the assertions have passed — handing a failed login's cookies to the
+    // browser would be worse than not handing anything over at all.
+    const inject = apiInjectLines(step, '    ', pageVar, columns)
     return (
       `{\n` +
       t0 +
       `    const res = await request.${method}(${valueExpr(step.url ?? '', columns)}${opts})\n` +
-      `    ${apiStatusAssertion(step.apiExpectStatus, 'res')}${sla}${bodyCheck}${checks}${saves}\n` +
+      `    ${apiStatusAssertion(step.apiExpectStatus, 'res')}${sla}${bodyCheck}${checks}${saves}${inject}\n` +
       `  }`
     )
   }
@@ -957,6 +1124,62 @@ function actionFor(
 // Build the whole test file from the recorded steps. Day 11: a saved test
 // contributes its NAME (the test title) and its BASE URL (emitted once as
 // test.use, reading process.env.BASE_URL so CI can point it at any environment).
+// F24.4 — pull the 🧹 teardown lines out of the emitted body so they can go in a
+// `finally`. Shared by BOTH the inline and the page-object exports: the POM export
+// used to skip this entirely, so exporting as POM silently threw the cleanup
+// guarantee away and a failed CI run orphaned its data — the exact thing F24.4
+// exists to prevent.
+//
+// `lines` and `enabled` can drift (a dialog/download step folds into its
+// neighbour), so a teardown step is matched by its emitted text. Each teardown step
+// CLAIMS one line: two identical api steps where only one is 🧹 used to hoist both.
+// `downIdx` — the indices of `lines` that ARE teardown — is the reliable path, and
+// callers that build their own line list should pass it. Text matching is only a
+// fallback for the inline exporter, whose lines carry a `// <stepText>` comment.
+function splitTeardown(
+  enabled: RecorderStep[],
+  lines: string[],
+  downIdx?: Set<number>
+): { main: string[]; down: string[] } {
+  if (downIdx) {
+    if (!downIdx.size) return { main: lines, down: [] }
+    return {
+      main: lines.filter((_, i) => !downIdx.has(i)),
+      down: lines.filter((_, i) => downIdx.has(i))
+    }
+  }
+  const downSteps = enabled.filter((s) => s.teardown && s.type === 'api')
+  if (!downSteps.length || !lines.length) return { main: lines, down: [] }
+  const claimed = new Set<number>()
+  const down: string[] = []
+  for (const s of downSteps) {
+    const text = stepText(s)
+    const at = lines.findIndex((l, i) => !claimed.has(i) && l.includes(text))
+    if (at >= 0) {
+      claimed.add(at)
+      down.push(lines[at])
+    }
+  }
+  return { main: lines.filter((_, i) => !claimed.has(i)), down }
+}
+
+// Wrap a body in try/finally when there are teardown lines. Indents by one level.
+function withTeardown(main: string[], down: string[], joiner = '\n\n'): string {
+  if (!down.length) return main.join(joiner)
+  const reindent = (ls: string[]): string =>
+    ls
+      .join(joiner)
+      .split('\n')
+      .map((l) => (l ? `  ${l}` : l))
+      .join('\n')
+  return (
+    `  try {\n${reindent(main)}\n  } finally {\n` +
+    `    // 🧹 Teardown — runs even if the test failed above, so the data this\n` +
+    `    // test created is never left behind in the environment.\n` +
+    `${reindent(down)}\n  }`
+  )
+}
+
 export function generatePlaywrightTest(
   steps: RecorderStep[],
   options?: {
@@ -1075,38 +1298,8 @@ export function generatePlaywrightTest(
   // run leaves its data behind. A `finally` is the Playwright-native way to say
   // that. `lines` is emitted in step order, so the teardown ones are pulled out
   // by index (they were tagged while the list was walked).
-  const teardownIdx = new Set<number>()
-  enabled.forEach((s, i) => {
-    if (s.teardown && s.type === 'api') teardownIdx.add(i)
-  })
-  let body: string
-  if (teardownIdx.size && lines.length) {
-    const mainLines: string[] = []
-    const downLines: string[] = []
-    // `lines` and `enabled` can drift (dialog/download steps fold into a
-    // neighbour), so match on the emitted text rather than assuming 1:1.
-    const teardownText = enabled.filter((_s, i) => teardownIdx.has(i)).map((s) => stepText(s))
-    for (const line of lines) {
-      if (teardownText.some((t) => line.includes(t))) downLines.push(line)
-      else mainLines.push(line)
-    }
-    const reindent = (ls: string[]): string =>
-      ls
-        .join('\n\n')
-        .split('\n')
-        .map((l) => (l ? `  ${l}` : l))
-        .join('\n')
-    body =
-      tokenPrelude +
-      prelude +
-      harSetup +
-      `  try {\n${reindent(mainLines)}\n  } finally {\n` +
-      `    // 🧹 Teardown — runs even if the test failed above, so the data this\n` +
-      `    // test created is never left behind in the environment.\n` +
-      `${reindent(downLines)}\n  }`
-  } else {
-    body = tokenPrelude + prelude + harSetup + lines.join('\n\n')
-  }
+  const { main: mainLines, down: downLines } = splitTeardown(enabled, lines)
+  const body = tokenPrelude + prelude + harSetup + withTeardown(mainLines, downLines)
 
   // Only import expect when an assertion (or a download check) uses it; pull in
   // fs only when a download check needs a file-size assertion.
@@ -1130,7 +1323,10 @@ export function generatePlaywrightTest(
     (hasA11y ? "import AxeBuilder from '@axe-core/playwright'\n" : '') +
     (hasDownload ? "import fs from 'fs'\n" : '') +
     // F24.1: only when a {{uuid}} token is actually used.
-    (runtimeTokenUse(enabled).uuid ? "import { randomUUID } from 'node:crypto'\n" : '')
+    (runtimeTokenUse(enabled).uuid ? "import { randomUUID } from 'node:crypto'\n" : '') +
+    // F24.2: the shared response-check engine, so the exported spec judges a check
+    // exactly the way the app did.
+    (anyApiChecks(enabled) ? `\n${API_CHECK_HELPER}` : '')
   // Day 17: test.use carries baseURL and (when a session is attached) the
   // storageState path, so the exported test starts logged in.
   // F25: the baseURL reads process.env.BASE_URL first, defaulting to the recorded
@@ -1236,11 +1432,17 @@ export function generateEdgeSuite(
     const checkSteps = enabled.filter((s) => s.type === 'assert')
 
     const actionLines: string[] = []
+    // F24.4: an edge variant re-runs the whole flow, so it re-creates whatever the
+    // flow creates. If an earlier action throws, the cleanup line below it never
+    // runs — one orphan per hostile input, per run.
+    const edgeTeardownIdx = new Set<number>()
     for (const step of actionSteps) {
       const action = actionFor(step, baseURL, 'page', undefined, [], idPolicy.portable)
       if (!action) continue
       actionLines.push(`  // ${stepText(step)}\n  ${action}`)
+      if (step.teardown && step.type === 'api') edgeTeardownIdx.add(actionLines.length - 1)
     }
+    const edgeSplit = splitTeardown(actionSteps, actionLines, edgeTeardownIdx)
 
     const checkLines = checkSteps
       .map((s) => actionFor(s, baseURL, 'page', undefined, [], idPolicy.portable))
@@ -1269,9 +1471,20 @@ export function generateEdgeSuite(
     }
 
     const title = `${c.fieldLabel} rejects ${c.edgeLabel}`
+    // F24: an api step in the flow emits `await request.…`, and its {{uuid}}/
+    // {{saved:…}} tokens compile to `runUuid` / `saved`. Without the `request`
+    // fixture and the token preamble, this file referenced three identifiers that
+    // were never declared — so ANY recorded flow containing an api step produced an
+    // edge suite that didn't compile.
+    const caseNeedsRequest = actionSteps.some((s) => s.type === 'api')
+    const caseFixtures = caseNeedsRequest ? '{ page, request }' : '{ page }'
+    // The rejection assertion is part of the MAIN body — if it fails (hostile input
+    // was accepted), the teardown still has to run.
+    const caseBody = withTeardown([...edgeSplit.main, rejection], edgeSplit.down)
     testBlocks.push(
-      `test(${quote(title)}, async ({ page }) => {\n` +
-        [...actionLines, rejection].join('\n\n') +
+      `test(${quote(title)}, async (${caseFixtures}) => {\n` +
+        runtimeTokenPreamble(actionSteps) +
+        caseBody +
         `\n})`
     )
   }
@@ -1289,12 +1502,18 @@ export function generateEdgeSuite(
     ? `\n// Base URL — override per environment in CI with the BASE_URL env var.\ntest.use({ ${useProps.join(', ')} })\n`
     : ''
 
+  // F24: the same imports/helper the other exports emit, for the same reason — an
+  // api step in the recorded flow compiles to `request.…`, `runUuid`, `saved` and
+  // (with checks) `__expectChecks`, and every one of those has to be declared.
+  const allSteps = variants.flatMap((c) => c.steps.filter((s) => !s.disabled))
   const header =
     `// Negative / edge-case suite${options?.name ? ` — ${options.name}` : ''}\n` +
     `// Auto-generated by QATestFlow (F20). Each test feeds ONE hostile value and\n` +
     `// asserts the app REJECTS it. A fully passing suite means your input\n` +
     `// validation holds; a FAILURE means bad/malicious input was accepted.\n` +
-    `import { test, expect } from '@playwright/test'\n`
+    `import { test, expect } from '@playwright/test'\n` +
+    (runtimeTokenUse(allSteps).uuid ? "import { randomUUID } from 'node:crypto'\n" : '') +
+    (anyApiChecks(allSteps) ? `\n${API_CHECK_HELPER}` : '')
 
   return `${header}${use}\n${testBlocks.join('\n\n')}\n`
 }
@@ -1417,6 +1636,8 @@ export function generatePageObjectTest(
   // flush it (as a method + a call in the spec) at each navigate/assert boundary.
   const methods: { name: string; body: string[]; usesData: boolean }[] = []
   const specBody: string[] = []
+  // F24.4: which specBody lines are 🧹 teardown (hoisted into a `finally` below).
+  const specTeardownIdx = new Set<number>()
   let buffer: string[] = []
   let bufferUsesData = false
   let lastActionLabel = ''
@@ -1480,7 +1701,14 @@ export function generatePageObjectTest(
     if (step.type === 'api') {
       flush()
       const line = actionFor(step, baseURL, 'app.page', undefined, columns, idPolicy.portable)
-      if (line) specBody.push(`  ${line}`)
+      if (line) {
+        specBody.push(`  ${line}`)
+        // F24.4: remember WHICH emitted line this teardown step became, so it can be
+        // hoisted into a `finally`. (The POM lines carry no `// stepText` comment, so
+        // the text-matching fallback would never find them — which is exactly why the
+        // POM export silently had no teardown at all.)
+        if (step.teardown) specTeardownIdx.add(specBody.length - 1)
+      }
       continue
     }
     // An action step → into the current method buffer. wait + back have no
@@ -1586,7 +1814,10 @@ export function generatePageObjectTest(
     (hasA11y ? "import AxeBuilder from '@axe-core/playwright'\n" : '') +
     // F24.1: parity with the inline export — the POM spec runs the same API steps.
     (runtimeTokenUse(enabled).uuid ? "import { randomUUID } from 'node:crypto'\n" : '') +
-    `import { ${className} } from './pages/${className}'\n`
+    `import { ${className} } from './pages/${className}'\n` +
+    // F24.2: same shared check engine as the inline export — an api step must mean
+    // the same thing whichever export style you picked.
+    (anyApiChecks(enabled) ? `\n${API_CHECK_HELPER}` : '')
   // F24.1: run-scoped uuid/timestamp/saved helpers, declared inside each test.
   const tokenPrelude = runtimeTokenPreamble(enabled)
 
@@ -1602,7 +1833,14 @@ export function generatePageObjectTest(
     const title = '`' + titleBase + ' — ${' + discRef + '}`'
     // The per-row body (build the page object, then the recorded calls), indented
     // one level deeper to sit inside the for-loop's test().
-    const inner = [`  const app = new ${className}(page)`, ...specBody]
+    // F24.4: the 🧹 guarantee has to survive a POM export too — it used to be
+    // emitted only by the inline exporter, so choosing "page object" silently
+    // dropped the cleanup and a failed run orphaned its data.
+    const dd = splitTeardown(enabled, specBody, specTeardownIdx)
+    const inner = [
+      `  const app = new ${className}(page)`,
+      ...(dd.down.length ? [withTeardown(dd.main, dd.down, '\n')] : dd.main)
+    ]
       .map((l) => (l ? `  ${l}` : l))
       .join('\n')
     const spec =
@@ -1616,13 +1854,14 @@ export function generatePageObjectTest(
     return { spec, page, pageFileName, className }
   }
 
+  const { main: specMain, down: specDown } = splitTeardown(enabled, specBody, specTeardownIdx)
   const spec =
     `${importLines}` +
     `${use}\n` +
     `test(${quote(options?.name || 'recorded flow')}, async (${specFixtures}) => {\n` +
     `${tokenPrelude}` +
     `  const app = new ${className}(page)\n` +
-    `${specBody.join('\n')}\n` +
+    `${withTeardown(specMain, specDown, '\n')}\n` +
     `})\n`
 
   return { spec, page, pageFileName, className }

@@ -1873,7 +1873,9 @@ body {
 
 .suite-result {
   display: flex;
-  align-items: center;
+  /* flex-start, not center: the error now wraps to several lines, and centering
+     would float the dot and the row label against its middle. */
+  align-items: flex-start;
   gap: 10px;
   min-width: 0;
   font-size: 13px;
@@ -1885,12 +1887,23 @@ body {
   flex: none;
 }
 
+/* The REASON a step failed is at the END of the message ("… responded 200, but 1 check
+   did not hold: name contains zzz — "name" is qa-…, which does not contain "zzz"").
+   A one-line ellipsis therefore kept the part you already know — the URL — and cut off
+   the only part you opened the panel to read. Worse on a data run, where every row
+   fails differently and the reason is the ONLY thing telling them apart.
+   So: wrap it. Clamped to 5 lines so one monstrous error can't push the other rows off
+   screen, and the full text is on the title attribute either way. */
 .suite-result-error {
   color: #ffb3ae;
   font-size: 12px;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Last-replay outcome dot (mini CI dashboard) */
@@ -2366,17 +2379,60 @@ body {
 
 /* The row of edit controls (move / edit / disable / delete). Dim until you
    hover the step, so the panel stays calm but the controls are always there. */
+/* This is a <fieldset> (so `disabled` can switch off all ten buttons at once while
+   recording/replaying) — hence the border/padding/min-width reset a fieldset needs. */
 .step-actions {
   display: flex;
   flex: none;
   gap: 1px;
-  margin-left: 6px;
+  margin: 0 0 0 6px;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
   opacity: 0.3;
   transition: opacity 120ms ease;
 }
 
 .step-item:hover .step-actions {
   opacity: 1;
+}
+
+/* Recording / replaying: the bar stays VISIBLE (so the panel doesn't look like it lost
+   its controls) but is inert. pointer-events:none on the buttons lets the hover — and
+   therefore the "⏹ Stop recording to edit steps" tooltip — land on the fieldset itself;
+   a disabled button swallows the event and would show no tooltip at all. */
+.step-actions.locked {
+  cursor: not-allowed;
+}
+
+.step-actions.locked .step-action {
+  pointer-events: none;
+}
+
+.step-item:hover .step-actions.locked {
+  opacity: 0.45;
+}
+
+/* The empty-state escape hatch: start a test with an API request, no UI step first. */
+.steps-empty-api {
+  display: block;
+  margin: -6px 16px 0;
+  padding: 8px 10px;
+  border: 1px dashed #3a3a3a;
+  border-radius: 6px;
+  background: transparent;
+  color: #8a8a8a;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.steps-empty-api:hover {
+  border-color: #5a5a5a;
+  color: #ccc;
 }
 
 .step-action {
@@ -4720,6 +4776,22 @@ body {
   color: #4ade80;
   font-size: 10.5px;
   white-space: nowrap;
+}
+
+/* 📐 this api step enforces a response contract. Same shape as the teardown badge,
+   different colour — a contract is a CHECK, not a lifecycle flag. Hover lists the
+   fields it pins. */
+.contract-badge {
+  display: inline-block;
+  margin-top: 4px;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: #2a2740;
+  color: #a5b4fc;
+  font-size: 10.5px;
+  white-space: nowrap;
+  cursor: help;
 }
 
 /* F24.2: operator reference + the contract row in the API editor. */

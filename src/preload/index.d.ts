@@ -648,6 +648,9 @@ declare global {
     durationMs?: number
     sizeBytes?: number // the FULL size, even when responseBody is truncated
     responseHeaders?: string // secrets masked
+    // path → JSON type, inferred in main from the RAW (untruncated) body, so
+    // "save this shape as the contract" works on a payload of any size.
+    shape?: Record<string, string>
   }
 
   // === Failure translator (Day 13) ===
@@ -679,6 +682,10 @@ declare global {
     allSteps: string[]
     // All failed steps when a test failed at more than one (whole-test analysis).
     failures?: FailureItem[]
+    // F29: was 🐌 Slow net on? A timeout under injected latency is chaos working, not
+    // an outage — without this the triage blames the environment and tells you to
+    // restart a server that is running perfectly well.
+    chaos?: { slowNetwork?: boolean; latencyMs?: number }
   }
 
   // The diagnosis: WHO is at fault (the verdict) + the story + next action.

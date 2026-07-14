@@ -2063,6 +2063,38 @@ function App(): React.JSX.Element {
     window.api.recorder.recovery({ action })
   }
 
+  // Retrying an API step RE-FIRES the request. For GET/PUT/DELETE that's harmless —
+  // they're idempotent, so sending them twice lands you in the same place. A POST or
+  // PATCH is not: if the first attempt reached the server before failing (a 500, a
+  // slow response that blew the SLA, a check that didn't hold), the record was
+  // already created, and a silent retry creates a SECOND one. The test then passes
+  // while quietly doubling its data every run.
+  //
+  // So: confirm before re-sending a non-idempotent call. Say plainly what may happen.
+  const retryIsUnsafe = (i: number): boolean => {
+    const s = steps[i]
+    if (!s || s.type !== 'api') return false
+    const m = (s.apiMethod ?? 'GET').toUpperCase()
+    return m === 'POST' || m === 'PATCH'
+  }
+
+  const handleRecoveryRetry = (): void => {
+    if (!recovery) return
+    if (retryIsUnsafe(recovery.index)) {
+      const s = steps[recovery.index]
+      const m = (s.apiMethod ?? 'GET').toUpperCase()
+      const ok = window.confirm(
+        `⚠ Retrying will send this ${m} again.\n\n` +
+          `${m} ${s.url ?? ''}\n\n` +
+          `If the first attempt already reached the server, this may create a DUPLICATE record — ` +
+          `the step could go green while quietly leaving two behind.\n\n` +
+          `Send it again anyway?`
+      )
+      if (!ok) return
+    }
+    answerRecovery('retry')
+  }
+
   // Day 18: PERMANENT skip — disable the failed step (skipped now and in future
   // runs) and continue. setSteps directly (like a re-pick heal) to keep the
   // live replay marks; 💾 Save persists the disable.
@@ -2136,7 +2168,13 @@ function App(): React.JSX.Element {
       networkErrors,
       screenshotPath: screenshotPath ?? undefined,
       apiEvidence: apiEvidence ?? lastFailures.find((f) => f.index === index)?.apiEvidence,
-      allSteps: steps.map((s) => stepText(s))
+      allSteps: steps.map((s) => stepText(s)),
+      // F29: same as the multi-failure bundle below — the triage MUST know the slowness
+      // was injected, or it reports a chaos timeout as a dead server and sends you off to
+      // restart a service that never stopped. (This single-failure path was missed the
+      // first time round, and only surfaced once a teardown stopped counting as a second
+      // failure — which routed the very same run down here instead.)
+      chaos: chaosSlowNet ? { slowNetwork: true, latencyMs: 2000 } : undefined
     }
     setLastEvidence(evidence)
     try {
@@ -2201,7 +2239,11 @@ function App(): React.JSX.Element {
       screenshotPath: first.screenshotPath,
       apiEvidence: first.apiEvidence,
       allSteps: steps.map((s) => stepText(s)),
-      failures
+      failures,
+      // F29: tell the triage that the slowness was INJECTED. Without this it sees a
+      // timeout with no response, concludes the service is down, and sends you off to
+      // restart a server that never stopped.
+      chaos: chaosSlowNet ? { slowNetwork: true, latencyMs: 2000 } : undefined
     }
     setLastEvidence(evidence)
     try {
@@ -3174,15 +3216,34 @@ function App(): React.JSX.Element {
     setApiDraft((prev) => (prev ? { ...prev, ...patch } : prev))
   }
 
-  const closeApiEditor = (): void => {
+  // Just put the form away. Used by Save, which has ALREADY committed the step —
+  // it must not go anywhere near the discard path below.
+  const dismissApiEditor = (): void => {
     setApiEditIndex(null)
     setApiDraft(null)
+  }
+
+  // Cancel / ✕ / backdrop-click. handleAddApiStep inserts the row BEFORE opening the
+  // form (the editor edits a real step, not a phantom). So backing out used to strand
+  // an api step with no URL: it failed every replay with "API step has no URL", and
+  // exported as `await request.get("")`. Backing out of the form backs out of the step.
+  const closeApiEditor = (): void => {
+    if (apiEditIndex !== null) {
+      const s = steps[apiEditIndex]
+      if (s && s.type === 'api' && !(s.url ?? '').trim()) {
+        editSteps(steps.filter((_, i) => i !== apiEditIndex))
+      }
+    }
+    dismissApiEditor()
   }
 
   const saveApiEditor = (): void => {
     if (apiEditIndex === null || !apiDraft) return
     editSteps(steps.map((s, idx) => (idx === apiEditIndex ? apiDraft : s)))
-    closeApiEditor()
+    // NOT closeApiEditor(). `steps` here is still the PRE-save array (editSteps queues
+    // a React state update; it does not apply it synchronously), so the discard path
+    // would look at the phantom's empty URL and delete the step we just saved.
+    dismissApiEditor()
   }
 
   // F18: turn the typed intent into draft steps grounded to the current page,
@@ -3694,37 +3755,27 @@ function App(): React.JSX.Element {
   const statusIsOk = (status?: number): boolean =>
     status !== undefined && status >= 200 && status < 300
 
-  // F24.2: capture the SHAPE of a known-good response and store it on the step as
-  // its contract. Inferring from the MASKED body is fine — masking swaps a
-  // secret's value for "••••", which is still a string, so every TYPE survives.
-  // MIRROR: inferContract in src/main/apiChecks.ts (which enforces it at replay).
-  const inferShape = (value: unknown, prefix = '', out: Record<string, string> = {}) => {
-    const t = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
-    if (prefix) out[prefix] = t
-    if (t === 'object') {
-      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        inferShape(v, prefix ? `${prefix}.${k}` : k, out)
-      }
-    } else if (t === 'array') {
-      const arr = value as unknown[]
-      // A list of 3 things and a list of 300 have the SAME shape — contract the
-      // element, not each index.
-      if (arr.length) inferShape(arr[0], prefix ? `${prefix}[]` : '[]', out)
-    }
-    return out
-  }
+  // F24.2: the contract is the SHAPE of a known-good response. It is inferred in
+  // MAIN (from the raw body) and arrives on the evidence as `shape` — see
+  // handleCaptureContract. The renderer used to re-derive it from the truncated
+  // response text, which quietly broke on any payload over 2 KB.
+
+  // "1 field" / "3 fields". One helper, so the badge, the response panel and the
+  // editor can't disagree — and so none of them says "1 fields".
+  const fieldCount = (n: number): string => `${n} field${n === 1 ? '' : 's'}`
 
   const handleCaptureContract = (index: number): void => {
     const ev = apiResponses[index]
-    if (!ev?.responseBody) return
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(ev.responseBody)
-    } catch {
+    if (!ev) return
+    // Use the shape MAIN inferred from the raw body. Re-parsing `ev.responseBody`
+    // here was a trap: that string is truncated at 2 KB, so every response bigger
+    // than that failed to parse and the user got "this response isn't JSON" — for
+    // a response that was perfectly good JSON.
+    const contract = ev.shape
+    if (!contract) {
       window.alert("This response isn't JSON, so it has no shape to contract.")
       return
     }
-    const contract = inferShape(parsed)
     if (!Object.keys(contract).length) {
       window.alert('This response has no fields to contract.')
       return
@@ -3811,7 +3862,7 @@ function App(): React.JSX.Element {
               </button>
               <span className="api-panel-note">
                 {apiResponseStep.apiContract
-                  ? `Contract set — ${Object.keys(apiResponseStep.apiContract).length} fields are being enforced.`
+                  ? `Contract set — ${fieldCount(Object.keys(apiResponseStep.apiContract).length)} being enforced.`
                   : 'No contract yet: a renamed or dropped field would go unnoticed.'}
               </span>
             </div>
@@ -3956,8 +4007,8 @@ function App(): React.JSX.Element {
           {apiDraft.apiContract && Object.keys(apiDraft.apiContract).length > 0 && (
             <div className="api-contract-row">
               <span>
-                📐 <strong>Contract:</strong> {Object.keys(apiDraft.apiContract).length} fields —
-                fails if any is renamed, dropped, or changes type.
+                📐 <strong>Contract:</strong> {fieldCount(Object.keys(apiDraft.apiContract).length)}{' '}
+                — fails if any is renamed, dropped, or changes type.
               </span>
               <button
                 type="button"
@@ -5747,10 +5798,14 @@ function App(): React.JSX.Element {
                     </button>
                     <button
                       className="modal-btn"
-                      onClick={() => answerRecovery('retry')}
-                      title="Run the same step again (maybe the page was just slow)"
+                      onClick={handleRecoveryRetry}
+                      title={
+                        retryIsUnsafe(recovery.index)
+                          ? 'Re-sends this POST/PATCH — it may create a duplicate record, so it asks first'
+                          : 'Run the same step again (maybe the page was just slow)'
+                      }
                     >
-                      🔁 Retry
+                      🔁 Retry{retryIsUnsafe(recovery.index) ? ' ⚠' : ''}
                     </button>
                     {/* Day 19: a visual snapshot differs — if the new look is
                       intended, adopt it as the new baseline, then retry (passes). */}
@@ -6418,11 +6473,28 @@ function App(): React.JSX.Element {
             </div>
           )}
           {steps.length === 0 ? (
-            <p className="steps-empty">
-              {isRecording
-                ? 'Recording… interact with the page.'
-                : 'Press Record, then use the page to capture steps.'}
-            </p>
+            <>
+              <p className="steps-empty">
+                {isRecording
+                  ? 'Recording… interact with the page.'
+                  : 'Press Record, then use the page to capture steps.'}
+              </p>
+              {/* An API step used to be reachable ONLY from a step's ＋ menu, and an
+                  empty test has no steps — so the first thing in any test was forced to
+                  be a UI action. That made a pure-API test (a health check, a contract
+                  check, an API login before any page loads) impossible to write at all.
+                  This is the same ＋ menu's api entry, hoisted to the empty state. */}
+              {!isRecording && (
+                <button
+                  type="button"
+                  className="steps-empty-api"
+                  onClick={() => handleAddApiStep(0)}
+                  title="Start this test with an HTTP request — no UI step needed first. For an API-only test (health check, contract check) or an API login that authenticates the browser before the first page."
+                >
+                  🔌 …or start with an API request
+                </button>
+              )}
+            </>
           ) : (
             <ol className="steps-list">
               {steps.map((step, i) => {
@@ -6524,6 +6596,24 @@ function App(): React.JSX.Element {
                           🧹 teardown
                         </span>
                       )}
+                      {/* F24.2: this step enforces a contract. Without a badge, a contract
+                          was invisible from the list — you had to open each response modal
+                          one at a time to find out which steps had one, which is how one
+                          ends up pinned to the wrong step and nobody notices. */}
+                      {step.type === 'api' &&
+                        step.apiContract &&
+                        Object.keys(step.apiContract).length > 0 && (
+                          <span
+                            className="contract-badge"
+                            title={`Contract — ${fieldCount(Object.keys(step.apiContract).length)} enforced: ${Object.keys(
+                              step.apiContract
+                            )
+                              .slice(0, 12)
+                              .join(', ')}${Object.keys(step.apiContract).length > 12 ? ', …' : ''}. The step fails if any is renamed, dropped, or changes type — even when the status is 200.`}
+                          >
+                            📐 {fieldCount(Object.keys(step.apiContract).length)}
+                          </span>
+                        )}
                       {/* F6: dead/weak assertion warning — a check that verifies
                           little or nothing, with a fix hint on hover. */}
                       {weakByIndex.has(i) && (
@@ -6705,8 +6795,23 @@ function App(): React.JSX.Element {
                         </ul>
                       )}
                     </div>
-                    {canEdit && editingIndex !== i && (
-                      <div className="step-actions">
+                    {/* A <fieldset disabled> natively disables every control inside it, so
+                        the bar can be SHOWN-but-inert while recording/replaying without
+                        touching all ten buttons. It used to be omitted entirely, which
+                        made the panel look like it had simply lost the ＋ — with nothing
+                        anywhere saying that stopping the recording brings it back. */}
+                    {editingIndex !== i && (
+                      <fieldset
+                        className={`step-actions${canEdit ? '' : ' locked'}`}
+                        disabled={!canEdit}
+                        title={
+                          canEdit
+                            ? undefined
+                            : isRecording
+                              ? '⏹ Stop recording to edit steps or add an API request'
+                              : 'Steps can’t be edited while a replay is running'
+                        }
+                      >
                         <button
                           className="step-action"
                           onClick={() => handleMoveStep(i, -1)}
@@ -6819,7 +6924,7 @@ function App(): React.JSX.Element {
                         >
                           ✕
                         </button>
-                      </div>
+                      </fieldset>
                     )}
                   </li>
                 )
@@ -7042,7 +7147,12 @@ function App(): React.JSX.Element {
                   <span className={`run-dot ${r.status}`} />
                   <span className="suite-result-name">{r.label}</span>
                   {r.status === 'failed' && (
-                    <span className="suite-result-error">
+                    // title: the CSS clamps at 5 lines, so a genuinely enormous error is
+                    // still recoverable on hover rather than lost.
+                    <span
+                      className="suite-result-error"
+                      title={`${r.failedAt !== undefined ? `step ${r.failedAt + 1} — ` : ''}${r.error ?? ''}`}
+                    >
                       {r.failedAt !== undefined ? `step ${r.failedAt + 1} — ` : ''}
                       {r.error}
                     </span>

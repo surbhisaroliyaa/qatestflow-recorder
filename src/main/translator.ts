@@ -51,6 +51,12 @@ export interface FailureEvidence {
   // bug report cover the WHOLE test at once instead of step-by-step. The primary
   // fields above mirror failures[0] for the single-failure code paths.
   failures?: FailureItem[]
+  // F29: was this a CHAOS run? Without it the triage sees "timed out, no response",
+  // concludes the service is down, and tells you to go start a server that is running
+  // perfectly well — the slowness was INJECTED, deliberately, by the test itself. A
+  // confidently wrong verdict is worse than no verdict: it sends someone chasing a
+  // phantom outage, and it teaches them not to trust the next one.
+  chaos?: { slowNetwork?: boolean; latencyMs?: number }
 }
 
 export type FailureVerdict = 'app-bug' | 'test-bug' | 'timing' | 'environment' | 'unknown'
@@ -168,6 +174,20 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
     explanation: string,
     suggestion: string
   ): OneVerdict => ({ verdict, category, explanation, suggestion })
+
+  // F29: a timeout during a CHAOS run is chaos doing its job, not an outage. This has
+  // to be checked BEFORE the unreachable-site rule below, which would otherwise see
+  // "timed out / no response" and confidently blame the network — sending you off to
+  // restart a service that was never down. The slowness was injected by the test.
+  const chaosLatency = ev.chaos?.latencyMs ?? 2000
+  if (ev.chaos?.slowNetwork && /timed out|did not respond within/i.test(err)) {
+    return finish(
+      'timing',
+      'timing',
+      `🐌 Slow net was ON for this run, injecting ~${chaosLatency} ms of latency into every request — the browser AND the API steps. This step then gave up before it got an answer. That is chaos working as designed, NOT an outage: the service is almost certainly up, and the same step passes at normal speed. Either the step's "give up after" is shorter than the injected latency (so it can never survive a chaos run), or the request really is too slow to tolerate a degraded network.`,
+      `Re-run with 🐌 Slow net OFF. If it passes, this is a chaos result, not a bug — decide whether the step's timeout is realistic for a slow network. Do NOT start hunting a dead server: it isn't down.`
+    )
+  }
 
   // Couldn't reach the site at all — nothing about the app or test ran.
   if (
@@ -351,6 +371,16 @@ function buildPrompt(ev: FailureEvidence): string {
     '',
     `Test: ${ev.testName || '(unsaved recording)'}`,
     `Page at failure: ${ev.pageUrl} — "${ev.pageTitle}"`,
+    ...(ev.chaos?.slowNetwork
+      ? [
+          '',
+          `IMPORTANT — this was a CHAOS run. "Slow net" was ON: the test DELIBERATELY injected ~${
+            ev.chaos.latencyMs ?? 2000
+          } ms of latency into every request (the browser tab AND the API steps, which run on Node's fetch).`,
+          'So a timeout or an SLA breach here is EXPECTED BEHAVIOUR of the chaos mode, not evidence that a service is down or unreachable.',
+          'Do NOT diagnose this as an environment/outage problem and do NOT tell the user to start or restart a server — the server is almost certainly running fine. Judge it as a timing/resilience result.'
+        ]
+      : []),
     '',
     'Recorded steps:',
     ...ev.allSteps.map((s, i) => `  ${i + 1}. ${s}${failedIdx.has(i) ? '   <-- FAILED HERE' : ''}`),

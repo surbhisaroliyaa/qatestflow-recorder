@@ -130,6 +130,12 @@ import {
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
+// F29 (chaos): the latency of Chrome DevTools' "Slow 3G" profile. ONE constant, so
+// the CDP throttle applied to the browser tab and the delay applied to API steps
+// (which run on Node's fetch, out of CDP's reach) can never drift apart — a chaos
+// run has to be equally slow for both halves of the test or it proves nothing.
+const SLOW_NETWORK_LATENCY_MS = 2000
+
 // Day 19: a visual snapshot must be captured when the page is STABLE, or a
 // half-loaded page (images still arriving) gets compared against a fully
 // rendered baseline. Wait for document-complete + every image finished, then a
@@ -2114,7 +2120,7 @@ function createWindow(): void {
               d.sendCommand('Network.setCacheDisabled', { cacheDisabled: true }).catch(() => {})
               d.sendCommand('Network.emulateNetworkConditions', {
                 offline: false,
-                latency: 2000, // ~2s round-trip per request (Chrome's Slow 3G)
+                latency: SLOW_NETWORK_LATENCY_MS, // ~2s round-trip (Chrome's Slow 3G)
                 downloadThroughput: (400 * 1024) / 8, // ~400 kbps
                 uploadThroughput: (400 * 1024) / 8
               }).catch(() => {})
@@ -2371,6 +2377,25 @@ function createWindow(): void {
       // Scoped to ONE run: a fresh run must not reuse the last run's saved order id.
       const runTokens: RunTokens = newRunTokens()
 
+      // For each {{saved:NAME}} a step tried to capture: did that step actually get a
+      // RESPONSE from the server? This is the difference between the only two reasons a
+      // token can be missing, and they call for opposite reactions:
+      //
+      //   got a response, step then failed (SLA / check / contract)  → the server ACTED.
+      //       A record exists. Teardown couldn't delete it. Say so, loudly.
+      //   no response at all (timeout, abort, connection refused)    → nothing was created.
+      //       There is nothing to clean up. Warning about orphaned data here is a LIE —
+      //       and a cleanup step that cries wolf gets ignored exactly as fast as one that
+      //       stays silent.
+      const saveGotResponse = new Map<string, boolean>()
+      const notePendingSaves = (s: ReplayStep, gotResponse: boolean): void => {
+        if (!s.apiSave) return
+        for (const line of s.apiSave.split('\n')) {
+          const name = line.split('=')[0].trim()
+          if (name) saveGotResponse.set(name, gotResponse)
+        }
+      }
+
       const method = (s: ReplayStep): string => (s.apiMethod ?? 'GET').toUpperCase()
 
       // F24.4 — ALWAYS-RUN TEARDOWN.
@@ -2395,6 +2420,43 @@ function createWindow(): void {
 
         for (const { s, j } of pending) {
           const t = resolveRuntimeStep(s, runTokens)
+
+          // An UNRESOLVED {{saved:…}} must never be sent. resolveRuntimeText leaves a
+          // token it can't fill as the literal text (deliberately — blanking it would
+          // turn `DELETE /orders/{{saved:id}}` into `DELETE /orders/`, which on a real
+          // API can mean "delete the entire collection"). But firing the literal is its
+          // own trap: the server 404s on `/objects/{{saved:objId}}`, 404 is in the
+          // teardown's accept list, and the step goes GREEN having deleted nothing.
+          // That is a cleanup step lying about cleaning up. Say so instead.
+          const unresolved = [t.url, t.apiBody, t.apiHeaders]
+            .filter((v): v is string => typeof v === 'string')
+            .flatMap((v) => [...v.matchAll(/\{\{\s*saved:([^}]+)\}\}/g)].map((m) => m[1].trim()))
+          if (unresolved.length) {
+            const name = unresolved[0]
+            // Did the step that should have captured this token ever hear back from the
+            // server? If it didn't (timeout / abort / refused), the request never landed,
+            // NOTHING was created, and there is genuinely nothing to clean up. Skipping is
+            // the honest answer. Shouting "your data has NOT been removed" at data that was
+            // never created is the same class of lie as the silent green this guard replaced
+            // — it just fails in the opposite direction.
+            if (saveGotResponse.get(name) !== true) {
+              mainWindow.webContents.send('recorder:replay-progress', {
+                index: j,
+                status: 'skipped'
+              })
+              continue
+            }
+            mainWindow.webContents.send('recorder:replay-progress', { index: j, status: 'error' })
+            failures.push({
+              index: j,
+              error:
+                `Teardown could not run — {{saved:${name}}} was never captured, so this step has nothing to delete. ` +
+                `The step that saves it DID get a response from the server (it failed afterwards, on a check, the contract or its SLA), ` +
+                `which means the record was very likely created and is STILL THERE. Fix the earlier failure — the data it left behind has not been removed.`
+            })
+            continue
+          }
+
           mainWindow.webContents.send('recorder:replay-progress', { index: j, status: 'running' })
           try {
             const api = await runApiStep({
@@ -2407,7 +2469,10 @@ function createWindow(): void {
               checks: t.apiChecks,
               contract: t.apiContract,
               maxMs: t.apiMaxMs,
-              timeoutMs: t.apiTimeoutMs
+              timeoutMs: t.apiTimeoutMs,
+              // F29: a teardown runs under the same adverse conditions as the rest
+              // of the run — cleanup that only works on a fast network isn't cleanup.
+              slowNetworkMs: chaos?.slowNetwork ? SLOW_NETWORK_LATENCY_MS : undefined
             })
             if (api.evidence) {
               mainWindow.webContents.send('recorder:api-response', {
@@ -3185,6 +3250,11 @@ function createWindow(): void {
               contract: step.apiContract,
               maxMs: step.apiMaxMs,
               timeoutMs: step.apiTimeoutMs,
+              // F29: chaos throttles the TAB via CDP, which never touches a Node
+              // fetch — so an API step used to sail through at full speed while the
+              // browser crawled, and the SLA/timeout (the two checks chaos is most
+              // useful against) were the two it couldn't exercise.
+              slowNetworkMs: chaos?.slowNetwork ? SLOW_NETWORK_LATENCY_MS : undefined,
               // F24.3: only walk the redirect chain by hand when we actually need
               // the cookies — a plain API step keeps fetch's normal behaviour.
               collectCookies: !!step.apiInjectCookies
@@ -3200,16 +3270,34 @@ function createWindow(): void {
                 evidence: api.evidence
               })
             }
-            if (!api.ok) {
-              pendingApi = api.evidence ?? null
-              throw new Error(api.error)
-            }
             // F24.1: lift values OUT of the response into {{saved:…}} tokens, so a
             // later step can GET/DELETE the very record this one just created —
             // the id is invented by the server, so it cannot be typed in advance.
+            //
+            // This runs BEFORE the pass/fail verdict, and that order is the whole
+            // point. A POST that breaches its SLA (or fails a check, or violates the
+            // contract) still CREATED THE RECORD — those are all client-side verdicts
+            // on a response the server already committed to. Bailing out first meant
+            // objId was never captured, so teardown fired
+            // `DELETE /objects/{{saved:objId}}` at the literal token, collected a 404
+            // — which is in its accept list — and went GREEN while the record it
+            // existed to remove was orphaned forever. Cleanup matters MOST on a failing
+            // test; that was the one case it silently didn't happen.
+            // Did the server answer at all? A timeout/abort/refusal leaves status
+            // undefined — nothing was created, so a later teardown must NOT claim
+            // that data was left behind.
+            notePendingSaves(step, api.status !== undefined)
+
+            const saveErr = applySaves(api.bodyText ?? '', step.apiSave, runTokens)
+
+            if (!api.ok) {
+              pendingApi = api.evidence ?? null
+              // The step's own error wins. A save miss on an already-failing response
+              // is a symptom; api.error is the cause, and it's what the user needs.
+              throw new Error(api.error)
+            }
             // A miss FAILS here, where the cause is obvious; saving nothing and
             // carrying on would blow up later on a nonsense URL.
-            const saveErr = applySaves(api.bodyText ?? '', step.apiSave, runTokens)
             if (saveErr) {
               pendingApi = api.evidence ?? null
               throw new Error(saveErr)

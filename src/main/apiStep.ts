@@ -12,7 +12,13 @@
 // and runApiStep takes plain input so it can be exercised without Electron.
 // =====================================================================
 
-import { runChecks, checkContract, type Contract, type CheckFailure } from './apiChecks'
+import {
+  runChecks,
+  checkContract,
+  inferContract,
+  type Contract,
+  type CheckFailure
+} from './apiChecks'
 
 export interface ApiStepInput {
   method?: string // GET (default) | POST | PUT | PATCH | DELETE
@@ -33,6 +39,18 @@ export interface ApiStepInput {
   // F24.2: give up on the request after this many ms. Node's fetch has NO default
   // timeout, so without this a dead endpoint hangs the whole suite forever.
   timeoutMs?: number
+  // F29 (chaos): add this much latency before the request goes out, mirroring the
+  // Slow-3G profile CDP applies to the browser tab.
+  //
+  // Chaos throttles the TAB via CDP — which an API step never touches, because it
+  // runs on Node's fetch. So "replay under a slow network" left every API call at
+  // full speed, and the two assertions chaos is most useful against (the SLA and
+  // the timeout) were exactly the two it could not exercise.
+  //
+  // Honest limit: this reproduces Slow-3G's LATENCY, not its bandwidth ceiling. A
+  // 2s round-trip is what makes an SLA bite; throttling throughput on a Node fetch
+  // would mean streaming the body by hand for very little extra signal.
+  slowNetworkMs?: number
   // F24.3: the caller wants this response's cookies (to log the browser in).
   // fetch follows redirects TRANSPARENTLY and only hands back the final response
   // — but a form login very often answers `302 + Set-Cookie` and then redirects
@@ -65,6 +83,12 @@ export interface ApiEvidence {
   durationMs?: number
   sizeBytes?: number // the FULL response size, even when the body is truncated
   responseHeaders?: string // secrets masked; shown in the response panel
+  // The response's SHAPE (path → JSON type), inferred here from the RAW body.
+  // "📐 Save this shape as the contract" used to re-parse `responseBody` in the
+  // renderer — but that string is truncated at 2 KB, so any real payload failed to
+  // parse and the user was told "this response isn't JSON", which was a lie.
+  // The shape carries no values, so it leaks nothing.
+  shape?: Contract
 }
 
 export interface ApiStepResult {
@@ -119,6 +143,15 @@ function truncate(text: string): string {
   return `${text.slice(0, BODY_LIMIT)}\n… (${text.length - BODY_LIMIT} more characters)`
 }
 
+// Mask FIRST, then truncate. The other order leaks: if the 2000-char cut lands in
+// the middle of a secret's value, the closing quote is gone, maskBody's regex no
+// longer matches the pair, and the partial credential is written to the report in
+// the clear. Masking a whole body then cutting it can never do that.
+function safeBody(text?: string): string | undefined {
+  if (!text) return undefined
+  return truncate(maskBody(text) ?? '')
+}
+
 // "Name: value" lines → a header map. Blank lines and lines without a colon are
 // skipped (forgiving of a trailing newline or a stray comment). The first colon
 // splits, so header values may themselves contain colons (e.g. a URL).
@@ -150,19 +183,25 @@ export function parseHeaders(text?: string): Record<string, string> {
 export function statusMatches(actual: number, expect?: string): boolean {
   const e = (expect ?? '').trim().toLowerCase()
   if (!e) return actual >= 200 && actual < 300
-  return e
+  const parts = e
     .split(',')
     .map((part) => part.trim())
     .filter(Boolean)
-    .some((part) => {
-      const family = /^([1-5])xx$/.exec(part)
-      if (family) {
-        const hundreds = Number(family[1]) * 100
-        return actual >= hundreds && actual < hundreds + 100
-      }
-      const n = Number(part)
-      return Number.isFinite(n) && actual === n
-    })
+  // A field holding only separators (","  or " , ") used to leave an empty list,
+  // and [].some() is false — so the step failed on EVERY status, with the baffling
+  // message 'expected ,'. Treat "nothing was actually specified" as blank.
+  if (!parts.length) return actual >= 200 && actual < 300
+  return parts.some((part) => {
+    const family = /^([1-5])xx$/.exec(part)
+    if (family) {
+      const hundreds = Number(family[1]) * 100
+      return actual >= hundreds && actual < hundreds + 100
+    }
+    // Number() would happily accept "0x1F4", "2e2" and "200.0" as 200. A status is
+    // three plain digits or it's a typo the user needs to hear about.
+    if (!/^\d{3}$/.test(part)) return false
+    return actual === Number(part)
+  })
 }
 
 // A short, human description of the expectation, for error messages + labels.
@@ -210,6 +249,23 @@ export async function runApiStep(input: ApiStepInput): Promise<ApiStepResult> {
   // which the automatic follower would have swallowed.
   const chainCookies: string[] = []
   try {
+    // F29: the chaos delay is INSIDE the try and honours the abort signal, so a
+    // timeout shorter than the injected latency still fires (and reports as a
+    // timeout). A plain sleep here would make the step un-cancellable — the very
+    // thing the timeout exists to rule out.
+    if (input.slowNetworkMs && input.slowNetworkMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, input.slowNetworkMs)
+        abort.signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(t)
+            reject(new Error('aborted'))
+          },
+          { once: true }
+        )
+      })
+    }
     if (input.collectCookies) {
       // Walk the redirects by hand so no Set-Cookie is lost. This mirrors what
       // fetch does automatically (301/302/303 downgrade to GET and drop the body;
@@ -218,24 +274,53 @@ export async function runApiStep(input: ApiStepInput): Promise<ApiStepResult> {
       let currentUrl = url
       let currentMethod = method
       let currentBody: string | undefined = hasBody ? input.body : undefined
+      let currentHeaders = headers
       let hops = 0
+      let tooManyHops = false
       for (;;) {
         res = await fetch(currentUrl, {
           method: currentMethod,
-          headers,
+          headers: currentHeaders,
           body: currentBody,
           redirect: 'manual',
           signal: abort.signal
         })
         chainCookies.push(...setCookiesOf(res))
         const location = res.headers.get('location')
-        if (res.status < 300 || res.status >= 400 || !location || hops >= MAX_REDIRECTS) break
-        currentUrl = new URL(location, currentUrl).toString()
+        if (res.status < 300 || res.status >= 400 || !location) break
+        // Running out of hops is an ERROR, not a quiet stop. Breaking here left the
+        // 3xx as "the response", and the step then failed with "returned 302,
+        // expected 2xx" — which hides a redirect loop behind a status complaint.
+        if (hops >= MAX_REDIRECTS) {
+          tooManyHops = true
+          break
+        }
+        const nextUrl = new URL(location, currentUrl)
+        // Because we follow redirects by hand, we also have to do what the real
+        // fetch does on a CROSS-ORIGIN hop: drop the auth headers. Forwarding
+        // Authorization / Cookie to whatever host a Location points at would hand
+        // this test's credentials to a third party.
+        if (nextUrl.origin !== new URL(currentUrl).origin) {
+          currentHeaders = Object.fromEntries(
+            Object.entries(currentHeaders).filter(
+              ([name]) => !/^(authorization|cookie|proxy-authorization)$/i.test(name)
+            )
+          )
+        }
+        currentUrl = nextUrl.toString()
         if (res.status === 301 || res.status === 302 || res.status === 303) {
           currentMethod = 'GET'
           currentBody = undefined
         }
         hops++
+      }
+      if (tooManyHops) {
+        clearTimeout(timer)
+        return {
+          ok: false,
+          error: `API request gave up after ${MAX_REDIRECTS} redirects — ${method} ${url} is still redirecting (a redirect loop, or a login that never lands).`,
+          evidence: { ...sent, status: res.status, durationMs: Date.now() - startedAt }
+        }
       }
     } else {
       res = await fetch(url, {
@@ -258,10 +343,31 @@ export async function runApiStep(input: ApiStepInput): Promise<ApiStepResult> {
       evidence: { ...sent, durationMs: Date.now() - startedAt }
     }
   }
-  clearTimeout(timer)
 
   const status = res.status
-  const bodyText = await res.text().catch(() => '')
+
+  // The timer stays ARMED across the body read. A server can answer with headers
+  // in 20 ms and then dribble (or never finish) the body — `res.text()` waits for
+  // the last byte, so cancelling the timeout before this line reopened the exact
+  // hang the timeout exists to prevent, just one step later.
+  let bodyText: string
+  try {
+    bodyText = await res.text()
+  } catch (err) {
+    clearTimeout(timer)
+    const timedOut = abort.signal.aborted
+    return {
+      ok: false,
+      error: timedOut
+        ? `API request timed out — ${method} ${url} sent its headers but did not finish sending its body within ${timeoutMs} ms.`
+        : // Don't swallow this as an empty body: "the response isn't JSON" would
+          // send you hunting the wrong problem entirely.
+          `API response could not be read — ${method} ${url} answered ${status}, but its body failed to download (${err instanceof Error ? err.message : String(err)}).`,
+      evidence: { ...sent, status, durationMs: Date.now() - startedAt }
+    }
+  }
+  clearTimeout(timer)
+
   const durationMs = Date.now() - startedAt
 
   // Response headers, for header checks and for the panel. Lower-cased names, so
@@ -273,17 +379,34 @@ export async function runApiStep(input: ApiStepInput): Promise<ApiStepResult> {
   // F24.3: every Set-Cookie from the whole chain (see collectCookies above).
   const setCookies: string[] = chainCookies
 
+  // Inferred from the RAW body, so "save this shape as the contract" works on a
+  // 2 MB payload as happily as on a 200-byte one. undefined when the body isn't
+  // JSON — which is the honest answer, and the one the UI can act on.
+  let shape: Contract | undefined
+  try {
+    const parsed: unknown = JSON.parse(bodyText)
+    if (parsed && typeof parsed === 'object') shape = inferContract(parsed)
+  } catch {
+    shape = undefined
+  }
+
   const evidence: ApiEvidence = {
     ...sent,
     status,
-    responseBody: maskBody(truncate(bodyText)),
+    responseBody: safeBody(bodyText),
     durationMs,
     // The real size on the wire, measured BEFORE truncation — otherwise a 2 MB
     // payload would report itself as 2 KB and hide exactly the thing worth seeing.
     sizeBytes: Buffer.byteLength(bodyText, 'utf8'),
-    responseHeaders: maskHeaders(resHeaders) || undefined
+    responseHeaders: maskHeaders(resHeaders) || undefined,
+    shape
   }
-  const fail = (error: string): ApiStepResult => ({ ok: false, status, error, evidence })
+  // bodyText rides along on FAILURE too. A failing step is very often one the server
+  // already acted on — an SLA breach, a failed check and a contract violation are all
+  // verdicts the CLIENT passes on a response the server has already committed to. The
+  // record exists, and its id is in this body. Without it, the caller cannot capture
+  // {{saved:…}}, and teardown then deletes nothing while reporting success.
+  const fail = (error: string): ApiStepResult => ({ ok: false, status, error, evidence, bodyText })
 
   if (!statusMatches(status, input.expectStatus)) {
     return fail(

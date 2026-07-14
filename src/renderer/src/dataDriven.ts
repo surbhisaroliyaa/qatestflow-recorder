@@ -57,9 +57,14 @@ function tokenFields(step: RecorderStep): string[] {
   if (typeof step.value === 'string') fields.push(step.value)
   if (typeof step.url === 'string') fields.push(step.url)
   // F24: an API step's headers/body commonly carry an {{env:APIKEY}} or a
-  // {{env:BASE}} token, so they participate in token resolution too.
+  // {{env:BASE}} token, so they participate in token resolution too — and so do
+  // its assertions, so a data row can drive what the response is expected to say
+  // (`name equals {{customer}}`). Leaving checks out meant a {{column}} there was
+  // never even recognised as a column, and got compared literally.
   if (typeof step.apiHeaders === 'string') fields.push(step.apiHeaders)
   if (typeof step.apiBody === 'string') fields.push(step.apiBody)
+  if (typeof step.apiChecks === 'string') fields.push(step.apiChecks)
+  if (typeof step.apiExpectBody === 'string') fields.push(step.apiExpectBody)
   return fields
 }
 
@@ -132,9 +137,15 @@ export function substituteSteps(
     const next: RecorderStep = { ...s }
     if (typeof s.value === 'string') next.value = substituteText(s.value, row, envMap)
     if (typeof s.url === 'string') next.url = substituteText(s.url, row, envMap)
-    // F24: resolve env/data tokens inside an API step's headers + body too.
+    // F24: resolve env/data tokens inside an API step's headers + body too — and
+    // its assertions, so `name equals {{customer}}` actually checks the row's
+    // customer instead of the literal text "{{customer}}".
     if (typeof s.apiHeaders === 'string') next.apiHeaders = substituteText(s.apiHeaders, row, envMap)
     if (typeof s.apiBody === 'string') next.apiBody = substituteText(s.apiBody, row, envMap)
+    if (typeof s.apiChecks === 'string') next.apiChecks = substituteText(s.apiChecks, row, envMap)
+    if (typeof s.apiExpectBody === 'string') {
+      next.apiExpectBody = substituteText(s.apiExpectBody, row, envMap)
+    }
     return next
   })
 }

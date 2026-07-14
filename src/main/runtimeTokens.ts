@@ -99,7 +99,15 @@ export function resolveRuntimeText(text: string, tokens: RunTokens): string {
 // and what the step list should keep showing); only the run sees the values.
 export function resolveRuntimeStep<T extends ReplayStep>(step: T, tokens: RunTokens): T {
   // Nothing to do for the overwhelmingly common case — don't clone every step.
-  const fields = ['url', 'value', 'apiHeaders', 'apiBody'] as const
+  //
+  // apiChecks and apiExpectBody are in here for a reason: without them, a check
+  // like `id equals {{saved:orderId}}` was compared against the LITERAL string
+  // "{{saved:orderId}}" and could never pass — silently, with no warning. Asserting
+  // that a GET returns the id an earlier POST created is the single most natural
+  // thing to want from a chained API test, and it was the one thing that couldn't
+  // work. (The Playwright export already resolved tokens here, so the app and the
+  // exported spec disagreed.)
+  const fields = ['url', 'value', 'apiHeaders', 'apiBody', 'apiChecks', 'apiExpectBody'] as const
   const needs = fields.some((f) => typeof step[f] === 'string' && step[f]!.includes('{{'))
   if (!needs) return step
 
