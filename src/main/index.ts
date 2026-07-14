@@ -3219,8 +3219,14 @@ function createWindow(): void {
             // suite-scale win: log in once over the API and the UI test starts
             // already authenticated — no login screen in 500 tests, which is both
             // the slowest part of a suite and its biggest single flake source.
-            if (step.apiInjectCookies && api.setCookies?.length) {
-              const injected = await injectCookies(api.setCookies, step.url ?? '')
+            // An API that returns NO Set-Cookie at all must fail here just as hard
+            // as one whose cookies we couldn't use — it's the likelier mistake (🔑
+            // ticked on the wrong endpoint), and it's the one that ends with a
+            // green "login" and a logged-OUT browser.
+            if (step.apiInjectCookies) {
+              const injected = api.setCookies?.length
+                ? await injectCookies(api.setCookies, step.url ?? '')
+                : 0
               if (injected === 0) {
                 pendingApi = api.evidence ?? null
                 throw new Error(
