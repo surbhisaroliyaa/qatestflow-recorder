@@ -6,7 +6,6 @@ import {
   WebContentsView,
   dialog,
   webFrameMain,
-  session,
   nativeImage
 } from 'electron'
 import { join, basename, dirname } from 'path'
@@ -1055,7 +1054,14 @@ function createWindow(): void {
     const view = new WebContentsView({
       webPreferences: {
         preload: join(__dirname, '../preload/recorder.js'),
-        sandbox: false
+        sandbox: false,
+        // Own session bucket, separate from the app UI (localhost:5173, on the
+        // default session). Per-run test isolation calls clearStorageData() on this
+        // session with no origin filter; without a partition that wipe also erased
+        // the app UI's OWN localStorage (e.g. the saved traceMode). All tabs share
+        // this one partition, so cookies/session-block/downloads stay shared as
+        // before — only the app UI is now insulated from the wipe.
+        partition: 'persist:qaflow-browser'
       }
     })
     mainWindow.contentView.addChildView(view)
@@ -2596,7 +2602,11 @@ function createWindow(): void {
             if (!Number.isNaN(t)) details.expirationDate = t / 1000
           }
           try {
-            await session.defaultSession.cookies.set(details)
+            // Write into the BROWSER VIEW's session, not defaultSession. The view
+            // now has its own partition, so an injected API-login cookie left in the
+            // default bucket would never reach the tab and the browser would stay
+            // silently logged out. activeWC().session IS the partition session.
+            await activeWC().session.cookies.set(details)
             count++
           } catch {
             // a malformed cookie — skip it, but don't claim success for it
