@@ -48,6 +48,8 @@ export interface ReplayStep {
   baselineId?: string // Day 19: a `snapshot` step's baseline image id
   maskSelectors?: string // F15: CSS selectors whose rects are masked out of the diff
   freezeAnimations?: boolean // F15: disable animations before capture (default on)
+  maxDiffPixels?: number // F15: also fail past this many changed pixels — a % floor
+  // alone dilutes a small localized change on a large full-page image (default 200)
   selector?: string
   candidates?: ReplayCandidate[]
   // Day 15: when set, the element lives inside an <iframe>. The action script

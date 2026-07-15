@@ -381,11 +381,17 @@ function App(): React.JSX.Element {
   const [snapEditIndex, setSnapEditIndex] = useState<number | null>(null)
   const [snapDraft, setSnapDraft] = useState<RecorderStep | null>(null)
   const [snapStatus, setSnapStatus] = useState<string>('')
+  // The re-capture runs AFTER the modal closes (so the native browser doesn't flash
+  // up over it), so its progress shows in a top-right toast instead of in the modal.
+  const [snapToast, setSnapToast] = useState<'busy' | 'ok' | 'fail' | null>(null)
   // F18 (plain-English AI Prompt step): the intent prompt, busy state, and any note.
   const [aiPromptOpen, setAiPromptOpen] = useState(false)
   const [aiPromptText, setAiPromptText] = useState('')
-  const [aiPromptBusy, setAiPromptBusy] = useState(false)
   const [aiPromptNote, setAiPromptNote] = useState('')
+  // Generation runs AFTER the modal closes (so the native browser we must show to
+  // read the page doesn't flash up over it), so its progress/result shows in a
+  // top-right toast instead of inside the modal.
+  const [aiToast, setAiToast] = useState<{ tone: 'progress' | 'ok' | 'warn' | 'fail'; msg: string } | null>(null)
   // F31 (living docs): a generated plain-English doc of the current test.
   const [docOpen, setDocOpen] = useState(false)
   const [docContent, setDocContent] = useState('')
@@ -1054,9 +1060,9 @@ function App(): React.JSX.Element {
         envWarn !== null ||
         // F24 / F15 / F18: step editors are modals too. Any modal MISSING from
         // this list renders underneath the native browser pane — the backdrop
-        // still eats clicks, so the app looks frozen. The two that need the page
-        // while open (F15 re-capture, F18 element capture) un-hide it in main for
-        // the duration of that read (withBrowserShown).
+        // still eats clicks, so the app looks frozen. F15 re-capture and F18 step
+        // generation close their modal FIRST, then read the page with the browser
+        // shown normally (main leaves it shown) — no flash over the modal.
         apiDraft !== null ||
         snapDraft !== null ||
         aiPromptOpen ||
@@ -3251,25 +3257,32 @@ function App(): React.JSX.Element {
   const handleGenerateAiSteps = async (): Promise<void> => {
     const intent = aiPromptText.trim()
     if (!intent) return
-    setAiPromptBusy(true)
+    // Close the modal FIRST. Generation has to show the native browser to read the
+    // page's elements, and the browser draws over any HTML modal — leaving it open
+    // made it flash under the browser. With the modal gone the read is clean, and a
+    // top-right toast (safe over the pane) reports progress/result.
+    setAiPromptOpen(false)
+    setAiPromptText('')
     setAiPromptNote('')
+    setAiToast({ tone: 'progress', msg: '🪄 Generating steps…' })
     try {
       const res = await window.api.ai.generateSteps(intent)
       if (res === null) {
-        setAiPromptNote('⚠ The AI is unavailable (needs the Claude CLI). Try again, or add steps manually.')
-        return
-      }
-      if (res.steps.length) {
-        editSteps([...steps, ...(res.steps as RecorderStep[])])
-        setAiPromptNote(
-          `✓ Added ${res.steps.length} step${res.steps.length === 1 ? '' : 's'}. Review them below and Replay to verify.${res.note ? ' ' + res.note : ''}`
-        )
-        setAiPromptText('')
+        setAiToast({
+          tone: 'fail',
+          msg: '⚠ The AI is unavailable (needs the Claude CLI). Try again, or add steps manually.'
+        })
+      } else if (res.steps.length) {
+        editSteps([...stepsRef.current, ...(res.steps as RecorderStep[])])
+        setAiToast({
+          tone: 'ok',
+          msg: `✓ Added ${res.steps.length} step${res.steps.length === 1 ? '' : 's'}. Review + Replay to verify.${res.note ? ' ' + res.note : ''}`
+        })
       } else {
-        setAiPromptNote(res.note || 'The AI produced no steps for this page.')
+        setAiToast({ tone: 'warn', msg: res.note || 'The AI produced no steps for this page.' })
       }
     } finally {
-      setAiPromptBusy(false)
+      window.setTimeout(() => setAiToast(null), 6000)
     }
   }
 
@@ -3292,17 +3305,18 @@ function App(): React.JSX.Element {
   // baseline. Re-capture uses the CURRENT page, so the user must be on it.
   const saveSnapEditor = async (): Promise<void> => {
     if (snapEditIndex === null || !snapDraft) return
+    const { baselineId, maskSelectors, freezeAnimations } = snapDraft
     editSteps(steps.map((s, idx) => (idx === snapEditIndex ? snapDraft : s)))
-    setSnapStatus('Re-capturing baseline…')
-    const ok = snapDraft.baselineId
-      ? await window.api.visual.recaptureBaseline(
-          snapDraft.baselineId,
-          snapDraft.maskSelectors,
-          snapDraft.freezeAnimations
-        )
-      : false
-    setSnapStatus(ok ? '✓ Baseline re-captured with these settings' : '⚠ Could not re-capture baseline (is the page loaded?)')
-    if (ok) window.setTimeout(closeSnapEditor, 1100)
+    // Close the modal FIRST. The re-capture has to show the native browser to
+    // photograph the page, and the browser draws over any HTML modal — leaving the
+    // modal open made it flash under the browser and back. With the modal gone the
+    // re-capture reads as "taking the photo", and a top-right toast reports it.
+    closeSnapEditor()
+    if (!baselineId) return
+    setSnapToast('busy')
+    const ok = await window.api.visual.recaptureBaseline(baselineId, maskSelectors, freezeAnimations)
+    setSnapToast(ok ? 'ok' : 'fail')
+    window.setTimeout(() => setSnapToast(null), 3200)
   }
 
   const handleStartEdit = async (i: number): Promise<void> => {
@@ -4132,6 +4146,23 @@ function App(): React.JSX.Element {
               onChange={(e) => patchSnapDraft({ value: e.target.value })}
             />
           </label>
+          <label className="api-field api-field-inline">
+            <span>Also fail past N changed pixels</span>
+            <input
+              type="text"
+              placeholder="200"
+              value={snapDraft.maxDiffPixels ?? ''}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10)
+                patchSnapDraft({ maxDiffPixels: Number.isFinite(n) && n >= 0 ? n : undefined })
+              }}
+            />
+          </label>
+          <p className="api-hint">
+            On a big full-page snapshot, a small change (one button, a badge) can stay under the %
+            bar. This also fails once more than N real pixels change — so localized regressions
+            aren&apos;t diluted. Blank = 200.
+          </p>
           {snapStatus && <p className="api-hint" style={{ color: '#8ab4f8' }}>{snapStatus}</p>}
         </div>
         <div className="modal-footer">
@@ -4153,16 +4184,11 @@ function App(): React.JSX.Element {
   // F18: the AI-prompt step composer. Grounded to the CURRENT page's elements,
   // so it's a per-page authoring aid — the produced steps are a draft to verify.
   const aiPromptModal = aiPromptOpen && (
-    <div className="modal-backdrop" onClick={() => !aiPromptBusy && setAiPromptOpen(false)}>
+    <div className="modal-backdrop" onClick={() => setAiPromptOpen(false)}>
       <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">🪄 AI step — describe what to do</span>
-          <button
-            className="modal-close"
-            onClick={() => setAiPromptOpen(false)}
-            disabled={aiPromptBusy}
-            aria-label="Close"
-          >
+          <button className="modal-close" onClick={() => setAiPromptOpen(false)} aria-label="Close">
             ✕
           </button>
         </div>
@@ -4193,15 +4219,15 @@ function App(): React.JSX.Element {
           )}
         </div>
         <div className="modal-footer">
-          <button className="modal-btn" onClick={() => setAiPromptOpen(false)} disabled={aiPromptBusy}>
+          <button className="modal-btn" onClick={() => setAiPromptOpen(false)}>
             Close
           </button>
           <button
             className="modal-btn primary"
             onClick={handleGenerateAiSteps}
-            disabled={aiPromptBusy || !aiPromptText.trim()}
+            disabled={!aiPromptText.trim()}
           >
-            {aiPromptBusy ? 'Thinking…' : '🪄 Generate steps'}
+            🪄 Generate steps
           </button>
         </div>
       </div>
@@ -4866,6 +4892,22 @@ function App(): React.JSX.Element {
               : `✓ Downloaded ${downloadToast.name} — ${formatBytes(downloadToast.bytes)}`
           return <div className={`download-toast ${tone}`}>{message}</div>
         })()}
+      {/* F15: re-capture baseline progress (runs after the snapshot modal closes,
+          so it can't live in the modal). Same top-right toast, safe over the pane. */}
+      {snapToast && (
+        <div
+          className={`download-toast ${snapToast === 'busy' ? 'progress' : snapToast === 'ok' ? 'ok' : 'fail'}`}
+        >
+          {snapToast === 'busy'
+            ? '📸 Re-capturing baseline…'
+            : snapToast === 'ok'
+              ? '✓ Baseline re-captured with these settings'
+              : '⚠ Could not re-capture baseline (is the page loaded?)'}
+        </div>
+      )}
+      {/* F18: AI step-generation progress (runs after the AI modal closes, so the
+          browser can be read without flashing over it). Same top-right toast. */}
+      {aiToast && <div className={`download-toast ${aiToast.tone}`}>{aiToast.msg}</div>}
       <div className="chrome">
         <button className="nav-btn" onClick={handleBack} title="Back" aria-label="Back">
           ←

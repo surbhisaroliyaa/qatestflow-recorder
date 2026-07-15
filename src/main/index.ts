@@ -6,7 +6,8 @@ import {
   WebContentsView,
   dialog,
   webFrameMain,
-  session
+  session,
+  nativeImage
 } from 'electron'
 import { join, basename, dirname } from 'path'
 import { writeFile, mkdir, copyFile, readFile, readdir, rm } from 'fs/promises'
@@ -176,6 +177,53 @@ function parseMaskSelectors(text?: string): string[] {
 //   • mask — paint an opaque box over each masked selector's rect (same colour
 //     on both sides), excluding dynamic regions (clock/ad/carousel) from the diff.
 // The injected nodes are removed after the shot, so the page is left untouched.
+// True FULL-PAGE screenshot: the entire scrollable document, not just the visible
+// viewport that capturePage() gives. This makes visual snapshots scroll-independent
+// — baseline and replay both photograph the whole page, so where either happens to
+// be scrolled no longer matters and content anywhere (top, middle, below the fold)
+// is verified. Done via CDP Page.captureScreenshot with captureBeyondViewport.
+// The app also attaches the CDP debugger for HAR capture, so REUSE an existing
+// session when one's attached (attaching twice throws) and only detach if we opened
+// it. Any CDP failure (DevTools open, page too tall) falls back to the viewport.
+async function captureFullPage(wc: Electron.WebContents): Promise<Electron.NativeImage> {
+  const alreadyAttached = wc.debugger.isAttached()
+  try {
+    if (!alreadyAttached) wc.debugger.attach('1.3')
+  } catch {
+    return wc.capturePage()
+  }
+  try {
+    const metrics = (await wc.debugger.sendCommand('Page.getLayoutMetrics')) as {
+      contentSize?: { width: number; height: number }
+      cssContentSize?: { width: number; height: number }
+    }
+    const size = metrics.cssContentSize || metrics.contentSize
+    if (!size || size.width <= 0 || size.height <= 0) return wc.capturePage()
+    const shot = (await wc.debugger.sendCommand('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: true,
+      clip: {
+        x: 0,
+        y: 0,
+        width: Math.ceil(size.width),
+        height: Math.ceil(size.height),
+        scale: 1
+      }
+    })) as { data: string }
+    return nativeImage.createFromBuffer(Buffer.from(shot.data, 'base64'))
+  } catch {
+    return wc.capturePage()
+  } finally {
+    if (!alreadyAttached && wc.debugger.isAttached()) {
+      try {
+        wc.debugger.detach()
+      } catch {
+        // already gone
+      }
+    }
+  }
+}
+
 async function captureStabilized(
   wc: Electron.WebContents,
   maskSelectors?: string,
@@ -183,18 +231,32 @@ async function captureStabilized(
 ): Promise<Electron.NativeImage> {
   const selectors = parseMaskSelectors(maskSelectors)
   const freeze = freezeAnimations !== false // default ON (undefined = on)
-  const injected = freeze || selectors.length > 0
-  if (injected) {
-    await wc
-      .executeJavaScript(
-        `(() => {
+  // Always inject: even with no freeze/mask we must reset scroll to the top before
+  // capturing. capturePage() photographs only the CURRENT viewport, so a baseline
+  // taken at the top and a replay capture left scrolled by earlier steps would show
+  // different slices of the page and diff ~100% with nothing actually changed. Reset
+  // scroll first (smooth-scroll off so it jumps instantly), THEN measure the masks —
+  // they're viewport-fixed, so they must be positioned at this same scroll offset.
+  await wc
+    .executeJavaScript(
+      `(() => {
           const D = (window.__qaflowVisual = { freeze: null, masks: [] });
+          const de = document.documentElement;
+          const prevBehavior = de.style.scrollBehavior;
+          de.style.scrollBehavior = 'auto';
+          window.scrollTo(0, 0);
+          de.style.scrollBehavior = prevBehavior;
           if (${freeze ? 'true' : 'false'}) {
             const s = document.createElement('style');
             s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;}html{scroll-behavior:auto!important;}';
             document.head.appendChild(s);
             D.freeze = s;
           }
+          // Full-page capture covers the whole document, so masks are positioned in
+          // DOCUMENT coordinates (absolute = viewport rect + scroll offset), not the
+          // viewport-fixed coords a viewport-only capture used — otherwise a mask
+          // below the fold would sit at the wrong place in the tall stitched image.
+          const sx = window.scrollX, sy = window.scrollY;
           for (const sel of ${JSON.stringify(selectors)}) {
             let els; try { els = document.querySelectorAll(sel); } catch { continue; }
             for (const el of els) {
@@ -202,31 +264,28 @@ async function captureStabilized(
               if (r.width === 0 || r.height === 0) continue;
               const o = document.createElement('div');
               o.setAttribute('data-qaflow-mask', '1');
-              o.style.cssText = 'position:fixed;z-index:2147483647;background:#FF00FF;pointer-events:none;left:'+r.left+'px;top:'+r.top+'px;width:'+r.width+'px;height:'+r.height+'px;';
+              o.style.cssText = 'position:absolute;z-index:2147483647;background:#FF00FF;pointer-events:none;left:'+(r.left+sx)+'px;top:'+(r.top+sy)+'px;width:'+r.width+'px;height:'+r.height+'px;';
               document.body.appendChild(o);
               D.masks.push(o);
             }
           }
         })()`,
-        true
-      )
-      .catch(() => {})
-    await wait(120) // let the freeze + overlays paint
-  }
-  const image = await wc.capturePage()
-  if (injected) {
-    await wc
-      .executeJavaScript(
-        `(() => {
+      true
+    )
+    .catch(() => {})
+  await wait(120) // let the scroll reset + freeze + overlays settle and paint
+  const image = await captureFullPage(wc)
+  await wc
+    .executeJavaScript(
+      `(() => {
           const D = window.__qaflowVisual; if (!D) return;
           if (D.freeze) D.freeze.remove();
           for (const m of D.masks) m.remove();
           window.__qaflowVisual = null;
         })()`,
-        true
-      )
-      .catch(() => {})
-  }
+      true
+    )
+    .catch(() => {})
   return image
 }
 
@@ -297,6 +356,13 @@ const CHROME_HEIGHT = 60
 // condition, so the React strip and the native view line up exactly. MUST match
 // the .tab-strip height in main.css.
 const TAB_STRIP_HEIGHT = 34
+
+// F15: default absolute changed-pixel floor for a visual snapshot. A % threshold
+// alone dilutes a small localized change (a recoloured button, a badge) on a large
+// full-page image below the bar, so we also fail past this raw count. Small on
+// purpose — an identical re-render changes ~0 pixels (the diff's colour tolerance
+// filters anti-aliasing) — so it catches real changes without flaky failures.
+const DEFAULT_MAX_DIFF_PIXELS = 200
 
 // Width in pixels reserved on the RIGHT for our React "steps" panel (the live
 // recording list). Once the user has navigated, the embedded browser shrinks
@@ -764,24 +830,6 @@ function createWindow(): void {
       } catch {
         // view mid-teardown — skip it
       }
-    }
-  }
-
-  // Some modals hide the browser (overlayOpen) yet still need to READ the page:
-  // F15 re-captures a baseline and F18 measures the page's interactive elements.
-  // A hidden view is zero-sized, so capturePage() returns an empty image and
-  // every element lays out 0×0 (F18's visibility filter would drop them all).
-  // Restore the real bounds for the duration of the read, then hide it again.
-  const withBrowserShown = async <T>(fn: () => Promise<T>): Promise<T> => {
-    if (!overlayOpen) return fn()
-    overlayOpen = false
-    resizeEmbedded()
-    await wait(150) // let the view resize and the page re-layout at full size
-    try {
-      return await fn()
-    } finally {
-      overlayOpen = true
-      resizeEmbedded()
     }
   }
 
@@ -2990,7 +3038,20 @@ function createWindow(): void {
               const result = diffImages(baseline, image)
               const thresholdPct = Math.max(0, parseFloat(step.value ?? '1') || 0)
               const ratioPct = result.ratio * 100
-              if (result.sizeMismatch || ratioPct > thresholdPct) {
+              // Absolute changed-pixel floor. A % threshold alone dilutes a small
+              // localized change (a recoloured button, a badge) on a large full-page
+              // image below the bar — so ALSO fail past a raw pixel count. Default is
+              // deliberately small: an identical re-render changes ~0 pixels (color
+              // tolerance filters anti-aliasing), so this catches real changes without
+              // flaky failures. Per-step overridable via maxDiffPixels.
+              const maxDiffPixels = Math.max(
+                0,
+                Math.round(Number((step as { maxDiffPixels?: number }).maxDiffPixels)) ||
+                  DEFAULT_MAX_DIFF_PIXELS
+              )
+              const overPixelFloor = result.changedPixels > maxDiffPixels
+              const overPct = ratioPct > thresholdPct
+              if (result.sizeMismatch || overPct || overPixelFloor) {
                 const dir = join(libraryDir(), '_failures')
                 await mkdir(dir, { recursive: true })
                 const stamp = Date.now()
@@ -3011,7 +3072,9 @@ function createWindow(): void {
                 throw new Error(
                   result.sizeMismatch
                     ? `Visual snapshot: the page size changed (${result.baseSize?.width}×${result.baseSize?.height} → ${result.curSize?.width}×${result.curSize?.height})`
-                    : `Visual snapshot differs by ${ratioPct.toFixed(2)}% (allowed ${thresholdPct}%)`
+                    : overPct
+                      ? `Visual snapshot differs by ${ratioPct.toFixed(2)}% (allowed ${thresholdPct}%)`
+                      : `Visual snapshot: ${result.changedPixels.toLocaleString()} pixels changed (over the ${maxDiffPixels.toLocaleString()}-pixel limit) — a localized change too small to show as ${ratioPct.toFixed(2)}%`
                 )
               }
             }
@@ -3526,6 +3589,20 @@ function createWindow(): void {
             // Day 19: a visual-snapshot failure — the DIFF image is the evidence
             // (changed pixels in red), so don't annotate/capture the page.
             screenshotPath = pendingVisual.diffPath ?? pendingVisual.currentPath
+            // F15: feed that diff to the trace as THIS step's screenshot. The trace
+            // filmstrip AND the HTML report both render step.screenshotFile, and
+            // captureTraceStep would otherwise grab a fresh PLAIN capturePage() of
+            // the page after the diff ran — so a reviewer opening the report or the
+            // recording saw a normal page, not where it changed. Loading the diff
+            // here surfaces the red highlight in both, not just the front panel.
+            if (screenshotPath) {
+              try {
+                const diffImg = nativeImage.createFromPath(screenshotPath)
+                if (!diffImg.isEmpty()) annotatedImage = diffImg
+              } catch {
+                // couldn't load it — the trace falls back to a plain capture
+              }
+            }
           } else {
             try {
               // Day 12.9: annotate the evidence first — red error banner, plus
@@ -3838,12 +3915,18 @@ function createWindow(): void {
     ): Promise<boolean> => {
       if (!isSafeBaselineId(baselineId)) return false
       try {
-        // The snapshot editor is a modal, so the browser is hidden — show it for
-        // the capture or we'd save a blank baseline every future compare differs from.
-        const image = await withBrowserShown(async () => {
-          await waitForVisualStable(activeWC())
-          return captureStabilized(activeWC(), maskSelectors, freeze)
-        })
+        // The renderer closes the snapshot editor modal right before calling this,
+        // so the browser should end up VISIBLE. Show it (if still hidden), capture,
+        // and deliberately LEAVE it shown — restoring the hidden state would flash
+        // the browser off then on again as the modal-close independently un-hides
+        // it. Both paths converge on "shown", so there's no race and no double-flash.
+        // (A hidden view is zero-sized and its capturePage() returns a blank
+        // baseline, so it must be full-size here.)
+        overlayOpen = false
+        resizeEmbedded()
+        await wait(150) // let the view resize and the page re-layout at full size
+        await waitForVisualStable(activeWC())
+        const image = await captureStabilized(activeWC(), maskSelectors, freeze)
         await saveBaseline(baselineId, image.toPNG())
         return true
       } catch {
@@ -4082,11 +4165,17 @@ function createWindow(): void {
         candidates: Array<Record<string, unknown>>
       }>
       try {
-        // The prompt modal is open (browser hidden). Measure the page at its real
-        // size — at zero size every element is 0×0 and the filter drops them all.
-        captured = (await withBrowserShown(() =>
-          activeWC().executeJavaScript(AI_CAPTURE_JS, true)
-        )) as typeof captured
+        // The renderer closes the prompt modal right before calling this (so the
+        // native browser doesn't flash up over it while we read the page), which
+        // means the browser should end up VISIBLE. Show it (if still hidden),
+        // measure at real size, and LEAVE it shown — mirrors visual:recaptureBaseline.
+        // Both this and the modal-close converge on "browser shown", so there's no
+        // race and no double-flash. (At zero size every element is 0×0 and the
+        // visibility filter would drop them all.)
+        overlayOpen = false
+        resizeEmbedded()
+        await wait(150) // let the view resize and the page re-layout at full size
+        captured = (await activeWC().executeJavaScript(AI_CAPTURE_JS, true)) as typeof captured
       } catch {
         captured = []
       }

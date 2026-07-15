@@ -855,6 +855,11 @@ declare global {
     // frame doesn't cause diff noise. Maps to `animations: 'disabled'`. Default
     // on (undefined = on) to match Playwright.
     freezeAnimations?: boolean
+    // F15: also fail past this many changed pixels, not just the % threshold — a
+    // % alone dilutes a small localized change (a recoloured button, a badge) on a
+    // large full-page image below the bar. Maps to Playwright's `maxDiffPixels`.
+    // Default 200 (undefined = default).
+    maxDiffPixels?: number
     selector?: string
     candidates?: SelectorCandidate[]
     // Day 15: set when the element lives inside an <iframe> — tells replay

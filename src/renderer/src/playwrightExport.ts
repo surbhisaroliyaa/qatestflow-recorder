@@ -896,7 +896,10 @@ function actionFor(
     // compared) — a clean 1:1 mapping for our visual snapshot.
     // F15: mask dynamic regions + control animations, mapping to Playwright's
     // own toHaveScreenshot options.
-    const opts: string[] = []
+    // The app captures the FULL scrollable page (scroll-independent), so the
+    // exported test must too — Playwright's toHaveScreenshot is viewport-only by
+    // default. Keep them in lockstep or the exported baseline won't match the app.
+    const opts: string[] = ['fullPage: true']
     const masks = (step.maskSelectors ?? '')
       .split(/[\n,]/)
       .map((s) => s.trim())
@@ -907,6 +910,16 @@ function actionFor(
     // Playwright disables animations by default; only emit when the user turned
     // freeze OFF (wants animations to render).
     if (step.freezeAnimations === false) opts.push(`animations: 'allow'`)
+    // Absolute changed-pixel floor — the app fails past this many pixels so a small
+    // localized change on a big full-page image isn't diluted below the % bar. Emit
+    // it as Playwright's maxDiffPixels so the exported test matches the app. (The %
+    // threshold maps to maxDiffPixelRatio.)
+    const maxDiffPixels = Number(step.maxDiffPixels)
+    opts.push(`maxDiffPixels: ${Number.isFinite(maxDiffPixels) && maxDiffPixels >= 0 ? maxDiffPixels : 200}`)
+    const thresholdPct = parseFloat(step.value ?? '1')
+    if (Number.isFinite(thresholdPct) && thresholdPct > 0) {
+      opts.push(`maxDiffPixelRatio: ${+(thresholdPct / 100).toFixed(4)}`)
+    }
     return `await expect(${pageVar}).toHaveScreenshot(${opts.length ? `{ ${opts.join(', ')} }` : ''})`
   }
 

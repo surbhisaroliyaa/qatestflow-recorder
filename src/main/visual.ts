@@ -55,6 +55,10 @@ export async function deleteBaseline(id: string): Promise<void> {
 export interface DiffResult {
   // Fraction of pixels that differ (0–1). 1 when the dimensions don't match.
   ratio: number
+  // Absolute count of differing pixels. A % threshold alone dilutes a small
+  // localized change (a recoloured button, a badge) on a large full-page image
+  // below the bar — so callers also gate on this raw count. 0 on a size mismatch.
+  changedPixels: number
   // The baseline and the current capture were different SIZES — always a fail
   // (the page/viewport changed shape), and we can't pixel-diff across sizes.
   sizeMismatch?: boolean
@@ -112,7 +116,7 @@ export function diffImages(
   const bSize = base.getSize()
   const cSize = current.getSize()
   if (bSize.width !== cSize.width || bSize.height !== cSize.height) {
-    return { ratio: 1, sizeMismatch: true, baseSize: bSize, curSize: cSize }
+    return { ratio: 1, changedPixels: 0, sizeMismatch: true, baseSize: bSize, curSize: cSize }
   }
   const b = base.toBitmap() // BGRA
   const c = current.toBitmap()
@@ -141,6 +145,7 @@ export function diffImages(
   }
   return {
     ratio: changed / total,
+    changedPixels: changed,
     diffPng: nativeImage.createFromBitmap(diff, { width, height }).toPNG()
   }
 }
