@@ -594,8 +594,8 @@ function createWindow(): void {
   type CdpListener = (event: unknown, method: string, params: Record<string, unknown>) => void
   let harCapture: { wc: Electron.WebContents; onMessage: CdpListener } | null = null
 
-  const startHarCapture = (wc: Electron.WebContents): void => {
-    if (harCapture) return // already capturing
+  const startHarCapture = (wc: Electron.WebContents): Promise<void> => {
+    if (harCapture) return Promise.resolve() // already capturing
     const log = newHarLog()
     // Per-requestId scratch: the request facts, and the response meta, joined
     // when the body arrives (loadingFinished).
@@ -623,7 +623,7 @@ function createWindow(): void {
     try {
       if (!d.isAttached()) d.attach('1.3')
     } catch {
-      return // can't attach (DevTools open?) — capture silently unavailable
+      return Promise.resolve() // can't attach (DevTools open?) — capture unavailable
     }
     const onMessage = (_e: unknown, method: string, params: Record<string, unknown>): void => {
       if (method === 'Network.requestWillBeSent') {
@@ -694,9 +694,14 @@ function createWindow(): void {
       }
     }
     d.on('message', onMessage)
-    d.sendCommand('Network.enable').catch(() => {})
     harCapture = { wc, onMessage }
     lastCapturedHar = log // grows live; finalized (kept or discarded) on stop
+    // Resolve once Network events are actually flowing, so the caller can reload
+    // the page to capture its load and know the reload's requests will be seen.
+    return d
+      .sendCommand('Network.enable')
+      .catch(() => {})
+      .then(() => undefined)
   }
 
   const stopHarCapture = (): number => {
@@ -1242,7 +1247,22 @@ function createWindow(): void {
     if (isRecording) {
       if (harCaptureEnabled && !resume) {
         lastCapturedHar = null
-        startHarCapture(activeWC())
+        // The page the user is already on loaded BEFORE capture started (on the
+        // welcome-screen navigation), so it isn't in the HAR. Once capture is live,
+        // reload it — its full load lands in the HAR, matching the "Go to <url>"
+        // step replay will run. A real user just does Net ON → Record; no manual
+        // reload needed. did-navigate records no step, so the reload adds no junk.
+        const wc = activeWC()
+        startHarCapture(wc).then(() => {
+          const u = wc.getURL()
+          if (u && !u.startsWith('data:')) {
+            try {
+              wc.reload()
+            } catch {
+              // view gone mid-start — nothing to capture
+            }
+          }
+        })
       }
     } else if (harCapture) {
       const count = stopHarCapture()
