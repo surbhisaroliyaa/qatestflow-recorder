@@ -2545,6 +2545,10 @@ function App(): React.JSX.Element {
       } else {
         // Show this test in the panel while it runs (steps + live marks).
         editSteps(data.steps)
+        // Also surface its data table — else a data-driven test shows 0 rows in the
+        // 🧪 Data panel during/after a suite run (the rows still ran; only the panel
+        // was stale), which reads as "my rows vanished".
+        setDataRows(data.dataRows ?? [])
         setTestName(data.name)
         setTestFileName(t.fileName)
         setTestSuite(suite)
@@ -2557,13 +2561,77 @@ function App(): React.JSX.Element {
         // {{env:}} creds + re-point its navigations (its OWN recorded base is the
         // anchor). No active env → unchanged. This is the scale win: one Run All,
         // every test against staging/prod in one click.
-        const listSuite = await applyEnv(
-          flatSuite,
-          data.baseURL || deriveBaseURL(flatSuite),
-          suiteNoEnv
-        )
-        // F1: each test in the suite replays against its own saved HAR, if any.
-        const result = await runOnce(listSuite, t.fileName, false, data.storageState, data.har)
+        // Day 20 fix: a DATA-DRIVEN test (its steps use {{column}} tokens AND it
+        // carries saved rows) must run EVERY row here too. The suite path used to
+        // substitute only {{env:}} against an EMPTY row, so data tokens reached the
+        // page as literal text ("{{expectedError}}") and the test failed for the
+        // wrong reason. Expand it into one run per row and aggregate to a single
+        // suite result — the suite cousin of handleRunData.
+        const suiteCols = dataColumns(flatSuite)
+        const suiteRows = data.dataRows ?? []
+        let result: Awaited<ReturnType<typeof runOnce>>
+        if (suiteCols.length > 0 && suiteRows.length > 0) {
+          const envMap = await window.api.recorder.resolveEnv(envVarNames(flatSuite, suiteRows))
+          const rowOutcomes: { label: string; r: Awaited<ReturnType<typeof runOnce>> }[] = []
+          let rowAborted = false
+          for (let r = 0; r < suiteRows.length; r++) {
+            // Show ROW progress in the suite header — a data-driven test runs many
+            // times, so "test 1 of 1" alone hid that 6 rows were running.
+            setSuiteRun((prev) =>
+              prev
+                ? { ...prev, currentName: `${data.name} — row ${r + 1}/${suiteRows.length}` }
+                : prev
+            )
+            let list = substituteSteps(flatSuite, resolveRow(suiteRows[r], envMap), envMap)
+            if (activeEnv?.baseURL && !suiteNoEnv) {
+              list = retargetSteps(list, data.baseURL || deriveBaseURL(flatSuite), activeEnv.baseURL)
+            }
+            // fileName null: don't stamp a run per row — record ONE aggregate below.
+            const rr = await runOnce(list, null, false, data.storageState, data.har)
+            if (rr.aborted) {
+              rowAborted = true
+              break
+            }
+            rowOutcomes.push({ label: rowLabel(suiteRows[r], r), r: rr })
+          }
+          if (rowAborted) {
+            setSuiteRun((prev) => (prev ? { ...prev, running: false } : prev))
+            return
+          }
+          const failedRows = rowOutcomes.filter((x) => !x.r.ok)
+          const firstF = failedRows[0]
+          // A data-driven test in a suite is ONE entry: green only if every row
+          // passed, else red with an "N/M rows failed — e.g. …" summary.
+          result = {
+            ...rowOutcomes[0].r,
+            ok: failedRows.length === 0,
+            failedAt: firstF?.r.failedAt,
+            error: failedRows.length
+              ? `${failedRows.length}/${rowOutcomes.length} rows failed — e.g. ${firstF!.label}: ${firstF!.r.error}`
+              : undefined,
+            screenshotPath: firstF?.r.screenshotPath,
+            category: firstF?.r.category,
+            aiHealed: rowOutcomes.reduce((n, x) => n + (x.r.aiHealed ?? 0), 0) || undefined,
+            healable: rowOutcomes.find((x) => x.r.healable)?.r.healable
+          }
+          // Per-row runs passed fileName null, so stamp ONE aggregate run for the file.
+          await window.api.library.recordRun(t.fileName, {
+            status: failedRows.length ? 'failed' : 'passed',
+            at: new Date().toISOString(),
+            failedAt: firstF?.r.failedAt,
+            error: result.error,
+            screenshotPath: firstF?.r.screenshotPath,
+            category: firstF?.r.category
+          })
+        } else {
+          const listSuite = await applyEnv(
+            flatSuite,
+            data.baseURL || deriveBaseURL(flatSuite),
+            suiteNoEnv
+          )
+          // F1: each test in the suite replays against its own saved HAR, if any.
+          result = await runOnce(listSuite, t.fileName, false, data.storageState, data.har)
+        }
         entry = {
           fileName: t.fileName,
           name: data.name,
