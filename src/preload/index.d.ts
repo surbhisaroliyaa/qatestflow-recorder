@@ -97,7 +97,8 @@ interface RecorderAPI {
     // '__last' for the just-captured (unsaved) one. Absent = hit live network.
     harFile?: string,
     // F29 (chaos): replay under adverse conditions (e.g. throttled network).
-    chaos?: { slowNetwork?: boolean }
+    // F28: `locale` replays under a browser locale for the localization sweep.
+    chaos?: { slowNetwork?: boolean; locale?: string }
   ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
@@ -201,6 +202,31 @@ interface AiAPI {
   generateSteps: (
     intent: string
   ) => Promise<{ steps: RecorderStep[]; note: string } | null>
+  // F21: bug repro + expected result → reproduce steps + a verification assertion.
+  generateRegressionTest: (
+    repro: string,
+    expected: string
+  ) => Promise<{ steps: RecorderStep[]; note: string } | null>
+}
+
+// F31: acceptance-criteria checklist — persist ACs + AI-map them to covering tests.
+interface AcAPI {
+  load: () => Promise<string>
+  save: (text: string) => Promise<void>
+  map: (
+    acs: string[],
+    tests: { name: string; summary: string }[]
+  ) => Promise<{ ac: string; tests: string[] }[] | null>
+}
+
+// F28: localization sweep — inspect the current page for i18n issues.
+interface I18nAPI {
+  inspect: () => Promise<{
+    dir: string
+    overflow: string[]
+    overflowCount: number
+    texts: string[]
+  }>
 }
 
 interface VisualAPI {
@@ -315,6 +341,8 @@ interface API {
   blocks: BlocksAPI
   visual: VisualAPI
   ai: AiAPI
+  ac: AcAPI
+  i18n: I18nAPI
   a11y: A11yAPI
   perf: PerfAPI
   har: HarAPI
@@ -838,6 +866,9 @@ declare global {
     // run, so a broken test still deletes the data it created (an orphaned record
     // poisons the environment for every later test). API steps only.
     teardown?: boolean
+    // F27: this step CREATES persistent data (label = the entity). Tracked so a
+    // suite can flag a test that creates data with no teardown to remove it.
+    createsData?: string
     url?: string
     // Day 16(+): a `download` step's saved file path (for "Show in folder" and
     // the on-replay file check). The step's `value` holds the EXPECTED filename

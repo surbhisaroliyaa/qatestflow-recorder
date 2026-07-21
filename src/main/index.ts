@@ -48,9 +48,12 @@ import {
   categorizeFailure,
   deepRcaFailure,
   generateAiSteps,
+  mapAcCoverage,
+  type AcCoverage,
   type FailureEvidence,
   type FailureCategory
 } from './translator'
+import { loadAcs, saveAcs } from './acStore'
 import { diffSnapshots, type PageSnapshot, type DomDiff } from './domDiff'
 import {
   baselineKeyFor,
@@ -1759,7 +1762,7 @@ function createWindow(): void {
       // F29 (chaos): replay under adverse conditions to test resilience / surface
       // timing flakiness. `slowNetwork` throttles via CDP emulateNetworkConditions
       // (the STABLE path — unlike F1's Fetch interception which crashed the view).
-      chaos?: { slowNetwork?: boolean }
+      chaos?: { slowNetwork?: boolean; locale?: string }
     ): Promise<{
       ok: boolean
       failedAt?: number
@@ -2198,6 +2201,20 @@ function createWindow(): void {
                 downloadThroughput: (400 * 1024) / 8, // ~400 kbps
                 uploadThroughput: (400 * 1024) / 8
               }).catch(() => {})
+            }
+            // F28: run the flow under a browser locale — sets the language the page
+            // reads (navigator.language via setLocaleOverride) AND the Accept-Language
+            // header (what the server localizes on). Stable CDP commands, best-effort.
+            // The else-branch CLEARS a previous sweep's override so a later normal
+            // replay isn't stuck in, say, Arabic.
+            if (chaos?.locale) {
+              d.sendCommand('Emulation.setLocaleOverride', { locale: chaos.locale }).catch(() => {})
+              d.sendCommand('Network.setExtraHTTPHeaders', {
+                headers: { 'Accept-Language': `${chaos.locale},${chaos.locale.split('-')[0]};q=0.9` }
+              }).catch(() => {})
+            } else {
+              d.sendCommand('Emulation.setLocaleOverride', {}).catch(() => {})
+              d.sendCommand('Network.setExtraHTTPHeaders', { headers: {} }).catch(() => {})
             }
             // F1: with a HAR loaded, intercept the API calls (XHR/fetch) and
             // serve the saved response when we have one; otherwise let it hit the
@@ -3862,6 +3879,63 @@ function createWindow(): void {
   )
   ipcMain.handle('env:forgetRetarget', () => forgetRetargetChoices())
 
+  // === F31 AC checklist: persist ACs + map them to covering tests ====
+  ipcMain.handle('ac:load', () => loadAcs())
+  ipcMain.handle('ac:save', (_event, text: string) => saveAcs(text))
+  ipcMain.handle(
+    'ac:map',
+    (
+      _event,
+      acs: string[],
+      tests: { name: string; summary: string }[]
+    ): Promise<AcCoverage[] | null> => mapAcCoverage(acs, tests, libraryDir())
+  )
+
+  // === F28 localization sweep: inspect the CURRENT page for i18n issues ==========
+  // Text OVERFLOW (a leaf whose content is wider than its box → clipped in this
+  // locale), the layout DIRECTION (rtl?), and the visible strings (so the renderer
+  // can flag strings that DIDN'T change from the base locale = likely untranslated).
+  ipcMain.handle('i18n:inspect', async (): Promise<{
+    dir: string
+    overflow: string[]
+    overflowCount: number
+    texts: string[]
+  }> => {
+    try {
+      return (await activeWC().executeJavaScript(
+        `(() => {
+          const dir = document.documentElement.getAttribute('dir')
+            || getComputedStyle(document.body).direction || 'ltr';
+          const overflow = [];
+          let checked = 0;
+          // Skip form/replaced/interactive controls: a <select>'s dropdown arrow or a
+          // button's padding makes scrollWidth exceed clientWidth even when NO text is
+          // clipped — a false positive that flagged Mozilla's language picker in EVERY
+          // locale (incl. the English base). Only genuinely clipped TEXT should count.
+          const SKIP = new Set(['SELECT','OPTION','INPUT','TEXTAREA','BUTTON','IMG','SVG','VIDEO','CANVAS','IFRAME','OBJECT']);
+          for (const el of document.querySelectorAll('body *')) {
+            if (checked++ > 4000) break;
+            if (SKIP.has(el.tagName)) continue;
+            // ...and skip text that merely lives inside such a control.
+            if (el.closest('select, button, input, textarea')) continue;
+            // a leaf whose content is wider than its box = clipped/overflowing text
+            if (el.children.length === 0 && el.clientWidth > 0
+                && el.scrollWidth > el.clientWidth + 2) {
+              const t = (el.textContent || '').trim().slice(0, 40);
+              if (t) overflow.push(t);
+            }
+          }
+          const texts = (document.body.innerText || '').split('\\n')
+            .map(s => s.trim()).filter(Boolean).slice(0, 400);
+          return { dir, overflow: overflow.slice(0, 15), overflowCount: overflow.length, texts };
+        })()`,
+        true
+      )) as { dir: string; overflow: string[]; overflowCount: number; texts: string[] }
+    } catch {
+      return { dir: 'ltr', overflow: [], overflowCount: 0, texts: [] }
+    }
+  })
+
   // === Cross-browser replay (F17) ====================================
   // Chromium is the embedded engine; WebKit/Firefox can only run via REAL
   // Playwright, shelled out. `check` reports whether it's installed; `run`
@@ -4184,57 +4258,96 @@ function createWindow(): void {
   // intent onto those elements by index, then build replayable steps from the
   // candidates WE own — so the model never invents a selector. Returns the draft
   // steps for the renderer to insert + review, or null if Claude is unavailable.
+  // Shared by F18 (ai:generateSteps) and F21 (ai:generateRegressionTest): expose the
+  // page, list its interactive elements, ask the LLM which to act on for `intent`,
+  // and map each pick back to the element's OWN candidates (the model never invents
+  // a selector). Returns draft steps for the renderer to insert + review, or null if
+  // Claude is unavailable.
+  const aiStepsFromIntent = async (
+    intent: string
+  ): Promise<{ steps: unknown[]; note: string } | null> => {
+    let captured: Array<{
+      index: number
+      tag: string
+      type: string
+      label: string
+      candidates: Array<Record<string, unknown>>
+    }>
+    try {
+      // The renderer closes the prompt modal right before calling this (so the
+      // native browser doesn't flash up over it while we read the page), which
+      // means the browser should end up VISIBLE. Show it (if still hidden), measure
+      // at real size, and LEAVE it shown — mirrors visual:recaptureBaseline. Both
+      // this and the modal-close converge on "browser shown", so there's no race and
+      // no double-flash. (At zero size every element is 0×0 and the filter drops all.)
+      overlayOpen = false
+      resizeEmbedded()
+      await wait(150) // let the view resize and the page re-layout at full size
+      captured = (await activeWC().executeJavaScript(AI_CAPTURE_JS, true)) as typeof captured
+    } catch {
+      captured = []
+    }
+    const slim = captured.map((e) => ({
+      index: e.index,
+      tag: e.tag,
+      type: e.type,
+      label: e.label
+    }))
+    const result = await generateAiSteps(intent, slim, libraryDir())
+    if (result == null) return null
+    const steps = result.actions
+      .map((a) => {
+        const el = captured[a.element]
+        if (!el || !el.candidates.length) return null
+        const primary = (el.candidates.find((c) => c.css) ?? el.candidates[0]) as {
+          css?: string | null
+        }
+        const base = {
+          label: el.label,
+          selector: primary.css ?? undefined,
+          candidates: el.candidates
+        }
+        if (a.action === 'type') return { type: 'type', ...base, value: a.value ?? '' }
+        if (a.action === 'select') return { type: 'select', ...base, value: a.value ?? '' }
+        return { type: 'click', ...base }
+      })
+      .filter(Boolean)
+    return { steps, note: result.note }
+  }
+
   ipcMain.handle(
     'ai:generateSteps',
-    async (_event, intent: string): Promise<{ steps: unknown[]; note: string } | null> => {
-      let captured: Array<{
-        index: number
-        tag: string
-        type: string
-        label: string
-        candidates: Array<Record<string, unknown>>
-      }>
-      try {
-        // The renderer closes the prompt modal right before calling this (so the
-        // native browser doesn't flash up over it while we read the page), which
-        // means the browser should end up VISIBLE. Show it (if still hidden),
-        // measure at real size, and LEAVE it shown — mirrors visual:recaptureBaseline.
-        // Both this and the modal-close converge on "browser shown", so there's no
-        // race and no double-flash. (At zero size every element is 0×0 and the
-        // visibility filter would drop them all.)
-        overlayOpen = false
-        resizeEmbedded()
-        await wait(150) // let the view resize and the page re-layout at full size
-        captured = (await activeWC().executeJavaScript(AI_CAPTURE_JS, true)) as typeof captured
-      } catch {
-        captured = []
+    async (_event, intent: string): Promise<{ steps: unknown[]; note: string } | null> =>
+      aiStepsFromIntent(intent)
+  )
+
+  // F21: paste a bug's plain-English repro + expected result → reproduce it with the
+  // AI (same page-grounding as F18), then append a plain-English `nl` assertion of
+  // the EXPECTED behaviour. Result: a test that reproduces the bug AND verifies the
+  // fix — replay it before the fix (fails on the assertion), after the fix (passes).
+  ipcMain.handle(
+    'ai:generateRegressionTest',
+    async (
+      _event,
+      repro: string,
+      expected: string
+    ): Promise<{ steps: unknown[]; note: string } | null> => {
+      const base = await aiStepsFromIntent(repro)
+      if (base == null) return null
+      const exp = (expected ?? '').trim()
+      if (!exp) {
+        return {
+          steps: base.steps,
+          note: `${base.note} — no expected result given, so no verification was added. Add an "expected result" to make it a true regression test.`
+        }
       }
-      const slim = captured.map((e) => ({
-        index: e.index,
-        tag: e.tag,
-        type: e.type,
-        label: e.label
-      }))
-      const result = await generateAiSteps(intent, slim, libraryDir())
-      if (result == null) return null
-      const steps = result.actions
-        .map((a) => {
-          const el = captured[a.element]
-          if (!el || !el.candidates.length) return null
-          const primary = (el.candidates.find((c) => c.css) ?? el.candidates[0]) as {
-            css?: string | null
-          }
-          const base = {
-            label: el.label,
-            selector: primary.css ?? undefined,
-            candidates: el.candidates
-          }
-          if (a.action === 'type') return { type: 'type', ...base, value: a.value ?? '' }
-          if (a.action === 'select') return { type: 'select', ...base, value: a.value ?? '' }
-          return { type: 'click', ...base }
-        })
-        .filter(Boolean)
-      return { steps, note: result.note }
+      const assertStep = {
+        type: 'assert',
+        assertKind: 'nl',
+        value: exp,
+        label: `Expected: ${exp.length > 60 ? exp.slice(0, 57) + '…' : exp}`
+      }
+      return { steps: [...base.steps, assertStep], note: base.note }
     }
   )
 

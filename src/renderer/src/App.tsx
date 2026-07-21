@@ -156,6 +156,32 @@ function stabilityClass(score: number | undefined): string {
   return 'low'
 }
 
+// F28: locales the localization sweep can run the flow under. en-US is the base
+// everything else is compared against (a string that DIDN'T change from base is a
+// likely-untranslated candidate). ar is included to exercise RTL layout.
+const LOCALE_PRESETS: { code: string; label: string; rtl?: boolean }[] = [
+  { code: 'en-US', label: 'English (US) — base' },
+  { code: 'es-ES', label: 'Spanish' },
+  { code: 'de-DE', label: 'German (long words)' },
+  { code: 'fr-FR', label: 'French' },
+  { code: 'ja-JP', label: 'Japanese' },
+  { code: 'ar', label: 'Arabic (RTL)', rtl: true }
+]
+
+interface LocaleResult {
+  locale: string
+  ok: boolean
+  error?: string
+  failedAt?: number // which step failed — so the report says WHY, not just "failed"
+  screenshotPath?: string
+  traceId?: string
+  dir: string
+  overflowCount: number
+  overflow: string[]
+  unchanged: number // strings identical to the base locale (likely untranslated)
+  totalTexts: number
+}
+
 function App(): React.JSX.Element {
   const [urlInput, setUrlInput] = useState('')
   const [hasNavigated, setHasNavigated] = useState(false)
@@ -322,6 +348,9 @@ function App(): React.JSX.Element {
     retargetSuppress: {}
   })
   const [envManagerOpen, setEnvManagerOpen] = useState(false)
+  // F25+: switch the active environment straight from the workspace chip, so you
+  // never have to go Home (which drops an unsaved recording) just to change it.
+  const [envSwitchOpen, setEnvSwitchOpen] = useState(false)
   // The environment being edited in the manager (null = the list view).
   const [envDraft, setEnvDraft] = useState<Environment | null>(null)
   // F20 (edge-case explosion): the picker (choose fields + families to explode),
@@ -388,14 +417,43 @@ function App(): React.JSX.Element {
   const [aiPromptOpen, setAiPromptOpen] = useState(false)
   const [aiPromptText, setAiPromptText] = useState('')
   const [aiPromptNote, setAiPromptNote] = useState('')
+  // F21 (bug → regression test): paste a bug's repro + expected result; AI reproduces
+  // it and appends a plain-English assertion of the expected behaviour.
+  const [bugPromptOpen, setBugPromptOpen] = useState(false)
+  const [bugReproText, setBugReproText] = useState('')
+  const [bugExpectedText, setBugExpectedText] = useState('')
   // Generation runs AFTER the modal closes (so the native browser we must show to
   // read the page doesn't flash up over it), so its progress/result shows in a
   // top-right toast instead of inside the modal.
   const [aiToast, setAiToast] = useState<{ tone: 'progress' | 'ok' | 'warn' | 'fail'; msg: string } | null>(null)
+  // F27 (creates-data): which step is being labelled, and the draft label. Electron
+  // does not implement window.prompt() — it shows nothing and returns null — so the
+  // label has to be collected by a real modal like every other dialog here.
+  const [createsDataIndex, setCreatesDataIndex] = useState<number | null>(null)
+  const [createsDataDraft, setCreatesDataDraft] = useState('')
   // F31 (living docs): a generated plain-English doc of the current test.
   const [docOpen, setDocOpen] = useState(false)
   const [docContent, setDocContent] = useState('')
   const [docSavedPath, setDocSavedPath] = useState<string | null>(null)
+  // F31 (AC checklist): acceptance criteria (one per line) + their AI coverage map.
+  const [acOpen, setAcOpen] = useState(false)
+  const [acText, setAcText] = useState('')
+  const [acResult, setAcResult] = useState<{ ac: string; tests: string[] }[] | null>(null)
+  const [acBusy, setAcBusy] = useState(false)
+  const [acFailed, setAcFailed] = useState(false) // Claude was unavailable
+  // F28 (localization sweep): the picker, selected locales, and the run + report.
+  const [localeOpen, setLocaleOpen] = useState(false)
+  const [localeSel, setLocaleSel] = useState<Set<string>>(
+    () => new Set(['en-US', 'es-ES', 'de-DE', 'ar'])
+  )
+  const [localeRun, setLocaleRun] = useState<{
+    total: number
+    current: number
+    currentLabel: string
+    running: boolean
+    results: LocaleResult[]
+  } | null>(null)
+  const [localeReportOpen, setLocaleReportOpen] = useState(false)
   const [xbResult, setXbResult] = useState<Awaited<
     ReturnType<typeof window.api.xbrowser.run>
   > | null>(null)
@@ -1046,6 +1104,10 @@ function App(): React.JSX.Element {
         historyOpen ||
         envManagerOpen ||
         edgeModalOpen ||
+        // F28: hide the browser behind the locale picker + the finished sweep report
+        // (but NOT while the sweep runs — capturePage/inspect need the page visible).
+        localeOpen ||
+        (localeRun !== null && !localeRun.running && localeReportOpen) ||
         // F20: hide the browser only while the finished report modal is OPEN.
         // While the batch RUNS, keep the browser visible (like a data-driven run)
         // so you can watch each variant AND so capturePage() works — a hidden view
@@ -1066,6 +1128,12 @@ function App(): React.JSX.Element {
         apiDraft !== null ||
         snapDraft !== null ||
         aiPromptOpen ||
+        // F21 / F27 / F31: the newest modals. Same rule as every entry above —
+        // without this the dialog renders under the native pane and the app just
+        // looks black and frozen.
+        bugPromptOpen ||
+        createsDataIndex !== null ||
+        acOpen ||
         apiPanelIndex !== null
     )
   }, [
@@ -1081,12 +1149,18 @@ function App(): React.JSX.Element {
     edgeModalOpen,
     edgeRun,
     edgeReportOpen,
+    localeOpen,
+    localeRun,
+    localeReportOpen,
     xbOpen,
     docOpen,
     envWarn,
     apiDraft,
     snapDraft,
     aiPromptOpen,
+    bugPromptOpen,
+    createsDataIndex,
+    acOpen,
     apiPanelIndex
   ])
 
@@ -1402,7 +1476,10 @@ function App(): React.JSX.Element {
     // shown in the report modal instead. `traceOverride` forces a retain policy
     // (edge cases keep a recording for EVERY variant regardless of the setting).
     silent = false,
-    traceOverride?: 'always' | 'failure' | 'off'
+    traceOverride?: 'always' | 'failure' | 'off',
+    // F28: replay the whole flow under this browser locale (Accept-Language +
+    // Emulation.setLocaleOverride), for the localization sweep.
+    localeOverride?: string
   ): Promise<{
     ok: boolean
     failedAt?: number
@@ -1458,7 +1535,10 @@ function App(): React.JSX.Element {
           testName: testName || undefined
         },
         harFile,
-        chaosSlowNet ? { slowNetwork: true } : undefined // F29
+        // F29 slow-net + F28 locale override travel in the same run-options arg.
+        chaosSlowNet || localeOverride
+          ? { slowNetwork: chaosSlowNet || undefined, locale: localeOverride }
+          : undefined
       )
     } catch (err) {
       result = { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -1771,6 +1851,73 @@ function App(): React.JSX.Element {
   // the happy-path baseline first (the reference), then each hostile variant.
   // Nothing is saved — variants are transient (fileName null), like the env
   // retarget. Outcomes stream into `edgeRun`; the report interprets them.
+  // F28: replay the whole flow once per selected locale, then flag localization
+  // issues — text overflow, RTL direction, and strings unchanged from the base
+  // locale (likely untranslated). Mirrors the edge-case batch (silent + always-trace).
+  const handleRunLocaleSweep = async (): Promise<void> => {
+    const locales = LOCALE_PRESETS.filter((l) => localeSel.has(l.code)).map((l) => l.code)
+    if (!locales.length) return
+    setLocaleOpen(false)
+    const { flat, map } = await buildRunPlan(steps)
+    runPlanRef.current = map
+    // F25: the SAME host-mismatch warning a normal replay shows. The locale sweep
+    // used to retarget to the active environment SILENTLY — a test recorded on
+    // mozilla.org would be quietly sent to the SauceDemo env's host and every locale
+    // "failed to translate", with no hint why. Warn first, and honour the choice.
+    const localeChoice = await confirmRetarget(baseURL || deriveBaseURL(flat), flat)
+    if (localeChoice === 'cancel') return
+    const localeNoEnv = localeChoice === 'noenv'
+    // Resolve creds + retarget once — the same steps run under every locale.
+    // A data-driven test carries {{column}} tokens (e.g. {{username}}) that only
+    // get values when a ROW is bound; applyEnv alone binds an empty row, so those
+    // tokens would stay literal and every locale would "fail" at the same step
+    // (the exact bug data-driven login tests hit). A localization sweep only needs
+    // ONE representative logged-in pass per locale (the UI language is the same
+    // whichever user logs in), so bind the first row — mirroring the data runner.
+    let listBase: RecorderStep[]
+    if (isDataDriven && dataRows.length > 0) {
+      const envMap = await window.api.recorder.resolveEnv(envVarNames(flat, dataRows))
+      listBase = substituteSteps(flat, resolveRow(dataRows[0], envMap), envMap)
+      if (activeEnv?.baseURL && !localeNoEnv) {
+        listBase = retargetSteps(listBase, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
+      }
+    } else {
+      listBase = await applyEnv(flat, baseURL || deriveBaseURL(flat), localeNoEnv)
+    }
+    setLocaleReportOpen(false)
+    setLocaleRun({ total: locales.length, current: 0, currentLabel: '', running: true, results: [] })
+    let baseTexts: Set<string> | null = null // the first locale's visible strings
+    const results: LocaleResult[] = []
+    for (let i = 0; i < locales.length; i++) {
+      const loc = locales[i]
+      setLocaleRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: loc } : prev))
+      const res = await runOnce(listBase, null, false, undefined, undefined, true, 'always', loc)
+      if (res.aborted) {
+        setLocaleRun(null)
+        return
+      }
+      const insp = await window.api.i18n.inspect()
+      if (baseTexts === null) baseTexts = new Set(insp.texts) // base = the first run
+      const unchanged = insp.texts.filter((t) => baseTexts!.has(t)).length
+      results.push({
+        locale: loc,
+        ok: res.ok,
+        error: res.error,
+        failedAt: res.failedAt,
+        screenshotPath: res.screenshotPath,
+        traceId: res.traceId,
+        dir: insp.dir,
+        overflowCount: insp.overflowCount,
+        overflow: insp.overflow,
+        unchanged,
+        totalTexts: insp.texts.length
+      })
+      setLocaleRun((prev) => (prev ? { ...prev, results: [...results] } : prev))
+    }
+    setLocaleRun((prev) => (prev ? { ...prev, running: false } : prev))
+    setLocaleReportOpen(true)
+  }
+
   const handleRunEdgeCases = async (): Promise<void> => {
     const cases = generateEdgeCases(edgeFlat, [...edgeFields], edgeGroups)
     if (cases.length <= 1) return // nothing but the baseline
@@ -2059,6 +2206,47 @@ function App(): React.JSX.Element {
         .slice(0, 50) || 'test'
     const path = await window.api.translator.saveReport(docContent, `${slug}-docs.md`)
     if (path) setDocSavedPath(path)
+  }
+
+  // F31 (AC checklist): open the panel, restoring the saved acceptance criteria.
+  const handleOpenAcChecklist = async (): Promise<void> => {
+    setAcResult(null)
+    setAcText(await window.api.ac.load())
+    setAcOpen(true)
+  }
+  const closeAcChecklist = (): void => {
+    window.api.ac.save(acText) // remember the ACs across restarts
+    setAcOpen(false)
+  }
+  // Ask the AI which saved tests cover each acceptance criterion; uncovered = a gap.
+  const handleMatchAcs = async (): Promise<void> => {
+    const acs = acText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+    if (!acs.length) return
+    setAcBusy(true)
+    setAcResult(null)
+    setAcFailed(false)
+    try {
+      await window.api.ac.save(acText)
+      // Summarize each saved test (its actions + checks) for the matcher.
+      const tests: { name: string; summary: string }[] = []
+      for (const t of savedTests) {
+        const data = await window.api.library.load(t.fileName)
+        if (!data) continue
+        const { flat } = await buildRunPlan(data.steps as RecorderStep[])
+        tests.push({
+          name: data.name,
+          summary: flat.map((s) => stepText(s)).join('; ').slice(0, 600)
+        })
+      }
+      const res = await window.api.ac.map(acs, tests)
+      if (res === null) setAcFailed(true)
+      else setAcResult(res)
+    } finally {
+      setAcBusy(false)
+    }
   }
 
   // === Day 12: recovery — answer a paused replay ====================
@@ -2921,6 +3109,29 @@ function App(): React.JSX.Element {
     editSteps(steps.map((s, idx) => (idx === i ? { ...s, disabled: !s.disabled } : s)))
   }
 
+  // F27: mark/unmark a step as one that CREATES persistent data. Prompts for the
+  // entity label so a suite can later flag "creates data but has no teardown" —
+  // orphan-data risk. Informational only; changes nothing at replay.
+  const handleToggleCreatesData = (i: number): void => {
+    // Already marked → clear it outright; asking again would be a pointless dialog.
+    if (steps[i].createsData) {
+      editSteps(steps.map((x, idx) => (idx === i ? { ...x, createsData: undefined } : x)))
+      return
+    }
+    setCreatesDataDraft('')
+    setCreatesDataIndex(i)
+  }
+
+  const handleSaveCreatesData = (): void => {
+    const label = createsDataDraft.trim()
+    if (createsDataIndex === null || !label) return
+    editSteps(
+      steps.map((x, idx) => (idx === createsDataIndex ? { ...x, createsData: label } : x))
+    )
+    setCreatesDataIndex(null)
+    setCreatesDataDraft('')
+  }
+
   // F26: mark a step optional / required. An OPTIONAL step runs when its element
   // is present but is SKIPPED (not failed) when it's absent — for things that
   // may or may not appear, like a cookie banner or a promo popup.
@@ -3351,6 +3562,39 @@ function App(): React.JSX.Element {
       }
     } finally {
       window.setTimeout(() => setAiToast(null), 6000)
+    }
+  }
+
+  // F21: reproduce a bug from its plain-English repro steps (AI, grounded to the page
+  // like F18), then append a plain-English assertion of the EXPECTED behaviour — so
+  // the test FAILS before the fix (assertion red) and PASSES after. Same modal-close-
+  // first + toast pattern as F18 (the browser draws over any HTML modal while we read).
+  const handleGenerateRegressionTest = async (): Promise<void> => {
+    const repro = bugReproText.trim()
+    if (!repro) return
+    const expected = bugExpectedText.trim()
+    setBugPromptOpen(false)
+    setBugReproText('')
+    setBugExpectedText('')
+    setAiToast({ tone: 'progress', msg: '🐛 Building a check for this page…' })
+    try {
+      const res = await window.api.ai.generateRegressionTest(repro, expected)
+      if (res === null) {
+        setAiToast({
+          tone: 'fail',
+          msg: '⚠ The AI is unavailable (needs the Claude CLI). Try again, or add steps manually.'
+        })
+      } else if (res.steps.length) {
+        editSteps([...stepsRef.current, ...(res.steps as RecorderStep[])])
+        setAiToast({
+          tone: 'ok',
+          msg: `✓ Added ${res.steps.length} step${res.steps.length === 1 ? '' : 's'} (repro + a check). Review + Replay to verify.${res.note ? ' ' + res.note : ''}`
+        })
+      } else {
+        setAiToast({ tone: 'warn', msg: res.note || 'The AI produced no steps for this page.' })
+      }
+    } finally {
+      window.setTimeout(() => setAiToast(null), 7000)
     }
   }
 
@@ -4302,6 +4546,118 @@ function App(): React.JSX.Element {
     </div>
   )
 
+  // F21: paste a bug's repro + expected result → a regression test (repro steps + a
+  // plain-English check of the expected behaviour). Same close-first + toast flow.
+  const bugPromptModal = bugPromptOpen && (
+    <div className="modal-backdrop" onClick={() => setBugPromptOpen(false)}>
+      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">🐛 Bug check — this page</span>
+          <button className="modal-close" onClick={() => setBugPromptOpen(false)} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="api-editor-body">
+          <label className="api-field">
+            <span>Steps to reproduce (plain English)</span>
+            <textarea
+              className="api-body"
+              rows={4}
+              placeholder={
+                'e.g. log in as standard_user, add the backpack to the cart, then open the cart'
+              }
+              value={bugReproText}
+              onChange={(e) => setBugReproText(e.target.value)}
+              autoFocus
+            />
+          </label>
+          <label className="api-field">
+            <span>Expected result (what SHOULD happen)</span>
+            <textarea
+              className="api-body"
+              rows={2}
+              placeholder={'e.g. the cart shows 1 item and the backpack is listed'}
+              value={bugExpectedText}
+              onChange={(e) => setBugExpectedText(e.target.value)}
+            />
+          </label>
+          <p className="api-hint">
+            Adds a smart check for <strong>the page you’re on right now</strong>. The AI reproduces
+            your steps (grounded to real elements on THIS page, so it can’t invent selectors), then
+            adds a plain-English check of the expected result — one it reasons about like a human,
+            not a rigid selector match. Replay it BEFORE the fix — the check fails; AFTER the fix —
+            it passes. It only covers this one page: for a bug that spans several pages, record the
+            navigation to reach each page, then run this on the page where the check belongs. Always
+            review + Replay.
+          </p>
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={() => setBugPromptOpen(false)}>
+            Close
+          </button>
+          <button
+            className="modal-btn primary"
+            onClick={handleGenerateRegressionTest}
+            disabled={!bugReproText.trim()}
+          >
+            🐛 Build check
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // F27: name the data a step creates. Enter saves, Esc/backdrop cancels.
+  const createsDataModal = createsDataIndex !== null && (
+    <div className="modal-backdrop" onClick={() => setCreatesDataIndex(null)}>
+      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">🗃️ What does this step create?</span>
+          <button
+            className="modal-close"
+            onClick={() => setCreatesDataIndex(null)}
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="api-editor-body">
+          <label className="api-field">
+            <span>Data created by this step</span>
+            <input
+              type="text"
+              placeholder='e.g. "user account", "order"'
+              value={createsDataDraft}
+              onChange={(e) => setCreatesDataDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSaveCreatesData()
+                if (e.key === 'Escape') setCreatesDataIndex(null)
+              }}
+              autoFocus
+            />
+          </label>
+          <p className="api-hint">
+            Tracked so a suite can flag it if nothing cleans it up. A test that creates data but has
+            no 🧹 teardown step is an orphan — its records pile up in the environment run after run,
+            and eventually a later run fails on data its own suite left behind.
+          </p>
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={() => setCreatesDataIndex(null)}>
+            Cancel
+          </button>
+          <button
+            className="modal-btn primary"
+            onClick={handleSaveCreatesData}
+            disabled={!createsDataDraft.trim()}
+          >
+            🗃️ Save
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
   // F31: the living-docs modal, opened by 📖 Suite docs on the library screen.
   // It's declared here (above both returns) but only rendered in the welcome
   // branch, which is the sole screen that can open it.
@@ -4333,12 +4689,90 @@ function App(): React.JSX.Element {
     </div>
   )
 
+  // F31: acceptance-criteria checklist — enter ACs, AI maps them to covering tests.
+  const acModal = acOpen && (
+    <div className="modal-backdrop" onClick={closeAcChecklist}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">✅ AC checklist — which tests cover each requirement</span>
+          <button className="modal-close" onClick={closeAcChecklist} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="ac-body">
+          <label className="api-field">
+            <span>Acceptance criteria — one per line</span>
+            <textarea
+              className="api-body"
+              rows={5}
+              placeholder={
+                'e.g. A user can log in with valid credentials\nInvalid login shows an error message\nThe cart shows the number of items added'
+              }
+              value={acText}
+              onChange={(e) => setAcText(e.target.value)}
+            />
+          </label>
+          <p className="api-hint">
+            The AI reads your {savedTests.length} saved test{savedTests.length === 1 ? '' : 's'} and
+            marks which cover each criterion — an <strong>uncovered AC is a real coverage gap</strong>.
+            It judges coverage (needs the Claude CLI), so sanity-check the matches. Your criteria are
+            saved between sessions.
+          </p>
+          {acFailed && (
+            <p className="api-hint" style={{ color: '#f0b232' }}>
+              ⚠ The AI is unavailable (needs the Claude CLI). Try again.
+            </p>
+          )}
+          {acResult &&
+            (() => {
+              const covered = acResult.filter((r) => r.tests.length).length
+              const gaps = acResult.length - covered
+              return (
+                <div className="ac-results">
+                  <div className="ac-summary">
+                    {covered} of {acResult.length} covered
+                    {gaps > 0 ? ` · ${gaps} gap${gaps === 1 ? '' : 's'} ⚠` : ' · full coverage ✓'}
+                  </div>
+                  <ul className="ac-list">
+                    {acResult.map((r, i) => (
+                      <li key={i} className={`ac-row ${r.tests.length ? 'covered' : 'uncovered'}`}>
+                        <span className="ac-mark">{r.tests.length ? '✓' : '⚠'}</span>
+                        <span className="ac-text">{r.ac}</span>
+                        <span className="ac-tests">
+                          {r.tests.length
+                            ? `covered by ${r.tests.join(', ')}`
+                            : 'NOT covered by any test'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )
+            })()}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={closeAcChecklist}>
+            Close
+          </button>
+          <button
+            className="modal-btn primary"
+            onClick={handleMatchAcs}
+            disabled={acBusy || !acText.trim()}
+          >
+            {acBusy ? 'Matching…' : '🤖 Match to tests'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
   // === Welcome view — shown before any navigation ===
   if (!hasNavigated) {
     return (
       <div className="welcome">
         {envManagerModal}
         {docsModal}
+        {acModal}
         {/* Run All is launched from here; its host-mismatch warning must render
             on this screen too, before the suite navigates to the workspace. */}
         {envWarnModal}
@@ -4531,6 +4965,15 @@ function App(): React.JSX.Element {
                     📖 Suite docs
                   </button>
                 )}
+                {/* F31: acceptance-criteria checklist — enter ACs, see coverage gaps. */}
+                <button
+                  type="button"
+                  className="env-bar-manage"
+                  onClick={handleOpenAcChecklist}
+                  title="AC checklist: enter your acceptance criteria and see which tests cover each — an uncovered AC is a coverage gap"
+                >
+                  ✅ AC checklist
+                </button>
               </div>
 
               {/* A1 (scalable library): search + status filters, so a big library
@@ -5043,6 +5486,19 @@ function App(): React.JSX.Element {
         >
           🪄 AI step
         </button>
+        {/* F21: paste a bug's repro + expected → a regression test (repro + a check). */}
+        <button
+          className="snapshot-btn"
+          onClick={() => {
+            setBugReproText('')
+            setBugExpectedText('')
+            setBugPromptOpen(true)
+          }}
+          disabled={isReplaying || isPicking}
+          title="Turn a bug's repro + expected result into steps + a smart AI check for the page you're on. Covers this one page — for a multi-page bug, run it on each page."
+        >
+          🐛 Bug check (this page)
+        </button>
         {/* Day 19: capture the current page as a visual baseline. */}
         <button
           className="snapshot-btn"
@@ -5155,12 +5611,18 @@ function App(): React.JSX.Element {
       <div className="workspace">
         <div className="browser-area" />
         <aside className="steps-panel">
-          {/* === Day 11: current test identity (name + editable base URL) === */}
-          {testName && (
+          {/* === Day 11: current test identity (name + editable base URL) ===
+              Show for an UNSAVED recording too (any steps) — otherwise the env
+              switcher / base URL below are unreachable until you save, which is the
+              one time you most need to point a fresh recording at an environment. */}
+          {(testName || steps.length > 0) && (
             <div className="test-bar">
               {testSuite && <span className="test-suite-tag">{testSuite}</span>}
-              <span className="test-name" title={testName}>
-                {testName}
+              <span
+                className={`test-name${testName ? '' : ' unnamed'}`}
+                title={testName || 'Unsaved recording — save to give it a name'}
+              >
+                {testName || 'Untitled recording'}
               </span>
               {editingBase ? (
                 <input
@@ -5189,23 +5651,73 @@ function App(): React.JSX.Element {
                 </button>
               )}
               {/* F25: a live badge of the environment this test will run against.
-                  Click to switch or manage. Green when an env is active so it's
-                  obvious you're NOT running the recorded URLs. */}
-              <button
-                type="button"
-                className={`test-env-chip${activeEnv ? ' active' : ''}`}
-                onClick={() => {
-                  setEnvDraft(null)
-                  setEnvManagerOpen(true)
-                }}
-                title={
-                  activeEnv
-                    ? `Running against "${activeEnv.name}" (${activeEnv.baseURL || 'no base URL'}). Click to switch or manage environments.`
-                    : 'Running against the recorded URLs. Click to set up dev / staging / prod environments.'
-                }
-              >
-                🌐 {activeEnv ? activeEnv.name : 'recorded URLs'}
-              </button>
+                  Click to SWITCH the active environment right here — no trip to the
+                  welcome screen (which would drop an unsaved recording). Green when an
+                  env is active so it's obvious you're NOT running the recorded URLs. */}
+              <div className="test-env-switch">
+                <button
+                  type="button"
+                  className={`test-env-chip${activeEnv ? ' active' : ''}`}
+                  onClick={() => setEnvSwitchOpen((v) => !v)}
+                  title={
+                    activeEnv
+                      ? `Running against "${activeEnv.name}" (${activeEnv.baseURL || 'no base URL'}). Click to switch environment.`
+                      : 'Running against the recorded URLs. Click to switch environment.'
+                  }
+                >
+                  🌐 {activeEnv ? activeEnv.name : 'recorded URLs'} ▾
+                </button>
+                {envSwitchOpen && (
+                  <>
+                    <div
+                      className="env-switch-backdrop"
+                      onClick={() => setEnvSwitchOpen(false)}
+                    />
+                    <div className="env-switch-menu" role="menu">
+                      <button
+                        type="button"
+                        className={`env-switch-item${!activeEnv ? ' current' : ''}`}
+                        onClick={() => {
+                          setActiveEnv(null)
+                          setEnvSwitchOpen(false)
+                        }}
+                      >
+                        <span className="env-switch-check">{!activeEnv ? '✓' : ''}</span>
+                        Recorded URLs (default)
+                      </button>
+                      {envState.environments.map((env) => (
+                        <button
+                          key={env.id}
+                          type="button"
+                          className={`env-switch-item${activeEnv?.id === env.id ? ' current' : ''}`}
+                          onClick={() => {
+                            setActiveEnv(env.id)
+                            setEnvSwitchOpen(false)
+                          }}
+                          title={env.baseURL || 'no base URL'}
+                        >
+                          <span className="env-switch-check">
+                            {activeEnv?.id === env.id ? '✓' : ''}
+                          </span>
+                          {env.name}
+                        </button>
+                      ))}
+                      <div className="env-switch-sep" />
+                      <button
+                        type="button"
+                        className="env-switch-item manage"
+                        onClick={() => {
+                          setEnvSwitchOpen(false)
+                          setEnvDraft(null)
+                          setEnvManagerOpen(true)
+                        }}
+                      >
+                        ⚙ Manage environments…
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           )}
           <div className="steps-header">
@@ -5284,6 +5796,15 @@ function App(): React.JSX.Element {
                   title="Edge cases: auto-generate empty / boundary / invalid / injection variants of your inputs and run them — negative testing without hand-writing 20 cases"
                 >
                   🧨 Edge cases
+                </button>
+                {/* F28: run the flow under several locales; flag overflow / RTL / untranslated */}
+                <button
+                  className="data-btn"
+                  onClick={() => setLocaleOpen(true)}
+                  disabled={isReplaying || isRecording || steps.length === 0}
+                  title="Localization sweep: replay the flow under several languages and flag text overflow, RTL layout, and strings that never got translated"
+                >
+                  🌐 Locales
                 </button>
                 {/* F17: run the current test on real WebKit / Firefox / Chromium */}
                 <button
@@ -5366,6 +5887,13 @@ function App(): React.JSX.Element {
             <div className="replay-status running">
               🧨 Edge case {edgeRun.current} of {edgeRun.total}
               {edgeRun.currentLabel ? `: ${edgeRun.currentLabel}` : ''}
+            </div>
+          )}
+          {/* F28: localization sweep progress. */}
+          {localeRun?.running && (
+            <div className="replay-status running">
+              🌐 Locale {localeRun.current} of {localeRun.total}
+              {localeRun.currentLabel ? `: ${localeRun.currentLabel}` : ''}
             </div>
           )}
           {/* F20 (Option 2): past edge-case batches for this test — re-open the
@@ -6706,6 +7234,15 @@ function App(): React.JSX.Element {
                           🧹 teardown
                         </span>
                       )}
+                      {/* F27: this step creates persistent data — tracked for orphan risk. */}
+                      {step.createsData && (
+                        <span
+                          className="createsdata-badge"
+                          title={`Creates data: ${step.createsData}. A suite flags this test if nothing (a 🧹 teardown) cleans it up.`}
+                        >
+                          🗃️ creates: {step.createsData}
+                        </span>
+                      )}
                       {/* F24.2: this step enforces a contract. Without a badge, a contract
                           was invisible from the list — you had to open each response modal
                           one at a time to find out which steps had one, which is how one
@@ -7001,6 +7538,19 @@ function App(): React.JSX.Element {
                             🧹
                           </button>
                         )}
+                        {/* F27: mark a step that creates persistent data (orphan tracking). */}
+                        <button
+                          className={`step-action${step.createsData ? ' creates-data-on' : ''}`}
+                          onClick={() => handleToggleCreatesData(i)}
+                          title={
+                            step.createsData
+                              ? `Creates data: ${step.createsData} — click to clear`
+                              : 'Mark as "creates data": a suite flags tests that create data but have no teardown to clean it up'
+                          }
+                          aria-label={step.createsData ? 'Clear creates-data marker' : 'Mark as creates data'}
+                        >
+                          🗃️
+                        </button>
                         <button
                           className="step-action"
                           onClick={() => handleToggleDisabled(i)}
@@ -7876,6 +8426,173 @@ function App(): React.JSX.Element {
 
       {/* F18: the AI-prompt step composer. */}
       {aiPromptModal}
+      {bugPromptModal}
+      {/* F27: name the data a step creates (replaces window.prompt, which
+          Electron does not implement — it silently returned null). */}
+      {createsDataModal}
+      {/* F28: localization sweep — locale picker. */}
+      {localeOpen && (
+        <div className="modal-backdrop" onClick={() => setLocaleOpen(false)}>
+          <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">🌐 Localization sweep</span>
+              <button className="modal-close" onClick={() => setLocaleOpen(false)} aria-label="Close">
+                ✕
+              </button>
+            </div>
+            <div className="api-editor-body">
+              <p className="api-hint">
+                Replays this flow under each language and flags <strong>text overflow</strong>,{' '}
+                <strong>RTL layout</strong>, and strings that never changed from the base (likely{' '}
+                <strong>untranslated</strong>). The first selected locale is the base for comparison.
+              </p>
+              <div className="edge-section">
+                <span className="env-field-label">Languages</span>
+                {LOCALE_PRESETS.map((l) => (
+                  <label key={l.code} className="edge-check">
+                    <input
+                      type="checkbox"
+                      checked={localeSel.has(l.code)}
+                      onChange={(e) => {
+                        const next = new Set(localeSel)
+                        if (e.target.checked) next.add(l.code)
+                        else next.delete(l.code)
+                        setLocaleSel(next)
+                      }}
+                    />
+                    {l.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="modal-btn" onClick={() => setLocaleOpen(false)}>
+                Close
+              </button>
+              <button
+                className="modal-btn primary"
+                onClick={handleRunLocaleSweep}
+                disabled={localeSel.size === 0}
+              >
+                ▶ Run on {localeSel.size} locale{localeSel.size === 1 ? '' : 's'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* F28: localization sweep — per-locale results. */}
+      {localeRun && !localeRun.running && localeReportOpen && (
+        <div className="modal-backdrop" onClick={() => setLocaleReportOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">
+                🌐 Localization sweep — {localeRun.results.length} locale
+                {localeRun.results.length === 1 ? '' : 's'}
+              </span>
+              <button
+                className="modal-close"
+                onClick={() => setLocaleReportOpen(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="ac-body">
+              <p className="api-hint">
+                Each language replays your test, then checks three things: did the text
+                actually <strong>translate</strong>, did the <strong>layout hold</strong>{' '}
+                (no text cut off that fit fine in the base language), and did
+                right-to-left languages like Arabic <strong>flip direction</strong>{' '}
+                correctly. A green ✓ means all three are fine. Hover a row for the raw
+                numbers.
+              </p>
+              {(() => {
+                const rows = localeRun.results.map((r, i) => {
+                  const preset = LOCALE_PRESETS.find((l) => l.code === r.locale)
+                  const rtlIssue = !!preset?.rtl && r.dir !== 'rtl'
+                  const untr =
+                    i > 0 ? Math.round((r.unchanged / Math.max(1, r.totalTexts)) * 100) : null
+                  // Overflow RELATIVE TO THE BASE locale — a site trims the same
+                  // footer/menu bits in every language (even the base) by design, so
+                  // only overflow the TRANSLATION adds is a real finding. Text can't be
+                  // matched across locales (it's translated), so compare counts.
+                  const baseOverflow = localeRun.results[0]?.overflowCount ?? 0
+                  const extraOverflow = i === 0 ? 0 : Math.max(0, r.overflowCount - baseOverflow)
+                  // Only flag "unchanged" when a locale is BARELY translated (≥85%
+                  // identical to base = the site likely ignored the language). A normal
+                  // page keeps brand names/URLs identical, so a 60% cutoff cried wolf.
+                  const clean =
+                    r.ok && extraOverflow === 0 && !rtlIssue && (untr === null || untr < 85)
+                  return { r, i, rtlIssue, untr, baseOverflow, extraOverflow, clean }
+                })
+                const good = rows.filter((x) => x.clean).length
+                const issues = rows.length - good
+                return (
+                  <>
+                    <div className="ac-summary">
+                      {good} of {rows.length} language{rows.length === 1 ? '' : 's'} look good
+                      {issues > 0 ? ` · ${issues} need${issues === 1 ? 's' : ''} a look ⚠` : ' ✓'}
+                    </div>
+                    <ul className="ac-list">
+                      {rows.map(({ r, i, rtlIssue, untr, baseOverflow, extraOverflow, clean }) => {
+                        // Plain-English verdict. The raw dir/overflow/% live in the
+                        // hover title for anyone who wants the exact numbers.
+                        const plain = i === 0
+                          ? 'Baseline — every other language is compared against this one.'
+                          : extraOverflow > 0
+                            ? `After translating, text was cut off in ${extraOverflow} spot${extraOverflow === 1 ? '' : 's'} that fit fine in the base language — the layout may break here${r.overflow.length ? ` (e.g. “${r.overflow.slice(0, 2).join('”, “')}”)` : ''}.`
+                            : rtlIssue
+                              ? 'This language should read right-to-left, but the page stayed left-to-right.'
+                              : untr !== null && untr >= 85
+                                ? `Hardly translated — ${untr}% of the on-screen text is still the base language.`
+                                : r.dir === 'rtl'
+                                  ? 'Translated, the layout held up, and it correctly switched to right-to-left.'
+                                  : 'Translated and the layout held up — no text overflowed.'
+                        const raw = `dir=${r.dir} · overflow ${r.overflowCount} (base ${baseOverflow})${untr !== null ? ` · ${untr}% unchanged from base` : ''}`
+                        return (
+                          <li key={r.locale} className={`ac-row ${clean ? 'covered' : 'uncovered'}`}>
+                            <span className="ac-mark">{clean ? '✓' : '⚠'}</span>
+                            <span className="ac-text">
+                              <strong>{r.locale}</strong>
+                              {i === 0 ? ' (base)' : ''}
+                              {r.screenshotPath && (
+                                <button
+                                  className="ac-shot"
+                                  onClick={() =>
+                                    window.api.library.openScreenshot(r.screenshotPath!)
+                                  }
+                                >
+                                  📷
+                                </button>
+                              )}
+                            </span>
+                            {r.ok ? (
+                              <span className="ac-tests" title={raw}>
+                                {plain}
+                              </span>
+                            ) : (
+                              <span className="ac-tests" title={r.error || undefined}>
+                                Couldn’t finish the run
+                                {r.failedAt != null ? ` — stopped at step ${r.failedAt + 1}` : ''}
+                                {r.error ? `: ${r.error}` : ''}
+                              </span>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </>
+                )
+              })()}
+            </div>
+            <div className="modal-footer">
+              <button className="modal-btn primary" onClick={() => setLocaleReportOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* === F13: accessibility scan panel — WCAG A/AA violations for the
            current page, grouped by rule, each expandable to the offending

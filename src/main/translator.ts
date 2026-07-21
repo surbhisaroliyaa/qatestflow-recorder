@@ -859,3 +859,71 @@ export async function generateAiSteps(
     : 'The AI couldn’t turn that into steps from the elements on this page. Try being more specific, or make sure the right page is loaded.'
   return { actions, note }
 }
+
+// === F31 (AC checklist): map acceptance criteria → the tests that cover them =====
+export interface AcCoverage {
+  ac: string
+  tests: string[] // names of tests that genuinely cover this AC (empty = uncovered)
+}
+
+function buildAcPrompt(acs: string[], tests: { name: string; summary: string }[]): string {
+  const acList = acs.map((a, i) => `${i} — ${a}`).join('\n')
+  const testList = tests.map((t, i) => `${i} — "${t.name}": ${t.summary}`).join('\n')
+  return [
+    'You are a QA lead mapping ACCEPTANCE CRITERIA to the automated tests that verify',
+    'them. A test COVERS an AC only if it actually EXERCISES and CHECKS that behaviour',
+    '— not merely touches the same page. Be strict: if no test really verifies an AC,',
+    'leave it uncovered (that gap is the whole point of this checklist).',
+    '',
+    'ACCEPTANCE CRITERIA (index — text):',
+    acList || '(none)',
+    '',
+    'TESTS (index — name: what it does + the checks it makes):',
+    testList || '(none)',
+    '',
+    'Return ONLY a JSON array — no prose, no markdown fences. One item per AC, in',
+    'order: { "ac": <ac index>, "tests": [<test index>, ...] }. Use only test indices',
+    'that genuinely cover that AC; use [] when none do.'
+  ].join('\n')
+}
+
+function parseAcMapping(text: string, acs: string[], tests: { name: string }[]): AcCoverage[] {
+  const start = text.indexOf('[')
+  const end = text.lastIndexOf(']')
+  const byAc = new Map<number, string[]>()
+  if (start >= 0 && end > start) {
+    try {
+      const arr = JSON.parse(text.slice(start, end + 1))
+      if (Array.isArray(arr)) {
+        for (const raw of arr) {
+          if (!raw || typeof raw !== 'object') continue
+          const o = raw as Record<string, unknown>
+          const ac = Number(o.ac)
+          if (!Number.isInteger(ac) || ac < 0 || ac >= acs.length) continue
+          const ids = Array.isArray(o.tests) ? o.tests : []
+          const names = ids
+            .map((x) => Number(x))
+            .filter((n) => Number.isInteger(n) && n >= 0 && n < tests.length)
+            .map((n) => tests[n].name)
+          byAc.set(ac, [...new Set(names)])
+        }
+      }
+    } catch {
+      // malformed output — everything reads as uncovered
+    }
+  }
+  return acs.map((ac, i) => ({ ac, tests: byAc.get(i) ?? [] }))
+}
+
+export async function mapAcCoverage(
+  acs: string[],
+  tests: { name: string; summary: string }[],
+  cwd: string
+): Promise<AcCoverage[] | null> {
+  const list = acs.map((a) => a.trim()).filter(Boolean)
+  if (!list.length) return []
+  if (!tests.length) return list.map((ac) => ({ ac, tests: [] }))
+  const out = await runClaude(buildAcPrompt(list, tests), cwd).catch(() => null)
+  if (out == null) return null // Claude unavailable — caller surfaces it
+  return parseAcMapping(out, list, tests)
+}

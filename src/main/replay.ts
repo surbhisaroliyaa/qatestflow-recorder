@@ -45,6 +45,10 @@ export interface ReplayStep {
   // F24.4: a CLEANUP step — it runs even when an earlier step failed and ended
   // the run, so a broken test still deletes the data it created. API steps only.
   teardown?: boolean
+  // F27: this step CREATES persistent data (label = the entity, e.g. "user account").
+  // Tracked so a suite can flag a test that creates data but has no teardown to
+  // remove it — an orphan-data risk. Purely informational at replay (no behaviour).
+  createsData?: string
   baselineId?: string // Day 19: a `snapshot` step's baseline image id
   maskSelectors?: string // F15: CSS selectors whose rects are masked out of the diff
   freezeAnimations?: boolean // F15: disable animations before capture (default on)

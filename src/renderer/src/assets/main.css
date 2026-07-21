@@ -1462,7 +1462,10 @@ body {
 
 .library-name {
   flex: 1;
-  min-width: 0;
+  /* Floor so the name never collapses to zero when a row is crowded with
+     badges (NOW FAILING + trust + fails count) — it always shows at least a
+     few characters + ellipsis instead of vanishing. */
+  min-width: 6em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2528,8 +2531,17 @@ body {
 .trace-mode:disabled {
   opacity: 0.5;
 }
+/* Recording / report links show on EVERY run (pass or fail), so they must NOT
+   inherit .shot-link's red failure styling — that made a green run look broken.
+   Neutral blue-grey = "utility link", clearly distinct from the red failure ones. */
 .trace-link {
-  color: #f0a0c0;
+  color: #9fb4cc;
+  border-color: #3a4a5e;
+}
+.trace-link:hover {
+  border-color: #58a6ff;
+  background: #1c2732;
+  color: #cce4ff;
 }
 
 .trace-modal {
@@ -3980,7 +3992,9 @@ body {
 .env-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  row-gap: 8px;
   margin: 0 0 12px;
   padding: 8px 10px;
   background: #171b22;
@@ -4017,6 +4031,7 @@ body {
 
 .env-bar-manage {
   margin-left: auto;
+  flex: none;
   height: 28px;
   padding: 0 12px;
   background: #26303c;
@@ -4025,7 +4040,14 @@ body {
   color: #cce4ff;
   font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
+}
+
+/* Once the auto-margin has pushed the first manage button to the right, the
+   rest of the group should sit flush beside it, not each grab new free space. */
+.env-bar-manage ~ .env-bar-manage {
+  margin-left: 0;
 }
 
 .env-bar-manage:hover {
@@ -4056,6 +4078,74 @@ body {
   background: #1c3324;
   border-color: #2f6b43;
   color: #7fd39a;
+}
+
+/* F25+: quick environment switcher hung off the workspace chip. Anchored to the
+   chip's right edge and kept inside the steps panel so it never slides under the
+   native browser pane. */
+.test-name.unnamed {
+  color: #7a889a;
+  font-weight: 500;
+  font-style: italic;
+}
+
+.test-env-switch {
+  position: relative;
+  display: inline-flex;
+}
+.env-switch-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+.env-switch-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 61;
+  min-width: 190px;
+  max-width: 260px;
+  padding: 4px;
+  background: #1e242c;
+  border: 1px solid #3a4a5e;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+.env-switch-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #cdd9e6;
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.env-switch-item:hover {
+  background: #2a3542;
+}
+.env-switch-item.current {
+  color: #7fd39a;
+  font-weight: 600;
+}
+.env-switch-item.manage {
+  color: #8aa3c0;
+}
+.env-switch-check {
+  flex: none;
+  width: 12px;
+  color: #7fd39a;
+}
+.env-switch-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: #313c49;
 }
 
 /* The manager modal — a touch narrower than the code modals. */
@@ -4776,6 +4866,91 @@ body {
   color: #4ade80;
   font-size: 10.5px;
   white-space: nowrap;
+}
+/* F27: this step creates persistent data (orphan tracking). Amber = watch it. */
+.step-action.creates-data-on {
+  color: #f0b232;
+  opacity: 1;
+}
+.createsdata-badge {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: #3a2f14;
+  color: #f0b232;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+/* F31: AC checklist — coverage rows. */
+.ac-body {
+  padding: 14px;
+  overflow-y: auto;
+  max-height: 62vh;
+}
+.ac-summary {
+  font-weight: 600;
+  margin: 12px 0 6px;
+  font-size: 13px;
+}
+.ac-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ac-row {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 3px 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #1c1c22;
+}
+.ac-row.uncovered {
+  background: #2a2114;
+}
+.ac-mark {
+  grid-row: span 2;
+  font-weight: 700;
+}
+.ac-row.covered .ac-mark {
+  color: #4ade80;
+}
+.ac-row.uncovered .ac-mark {
+  color: #f0b232;
+}
+.ac-text {
+  font-size: 13px;
+}
+.ac-tests {
+  grid-column: 2;
+  font-size: 11.5px;
+  opacity: 0.75;
+}
+.ac-row.uncovered .ac-tests {
+  color: #f0b232;
+  opacity: 1;
+}
+.ac-shot {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+/* F28: localization sweep progress banner. */
+.locale-sweep-progress {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: #17324a;
+  color: #7cc5ff;
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 /* 📐 this api step enforces a response contract. Same shape as the teardown badge,

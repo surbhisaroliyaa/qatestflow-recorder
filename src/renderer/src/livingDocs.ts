@@ -181,6 +181,7 @@ export function generateSuiteDoc(
   }
   let noCheckTotal = 0
   let deadTestTotal = 0
+  let orphanTotal = 0 // F27: tests that create data but have no teardown to remove it
   for (const [suite, tests] of bySuite) {
     lines.push(`## ${suite}`)
     lines.push('')
@@ -190,10 +191,20 @@ export function generateSuiteDoc(
       const dead = checks.length - real.length
       if (real.length === 0) noCheckTotal++
       if (dead > 0) deadTestTotal++
+      // F27: what this test creates, and whether anything cleans it up.
+      const created = t.flat
+        .filter((s) => !s.disabled && s.createsData)
+        .map((s) => s.createsData as string)
+      const hasTeardown = t.flat.some((s) => !s.disabled && s.teardown)
+      const orphan = created.length > 0 && !hasTeardown
+      if (orphan) orphanTotal++
       lines.push(
         `- **${t.name}** — ${plural(actions.length, 'action')}, ${plural(real.length, 'check')}` +
           (dead > 0 ? ` _(${dead} dead)_` : '') +
-          (real.length === 0 ? ' ⚠ _(verifies nothing)_' : '')
+          (real.length === 0 ? ' ⚠ _(verifies nothing)_' : '') +
+          (created.length
+            ? ` 🗃️ _(creates ${created.join(', ')}${orphan ? ' — ⚠ no teardown!' : ' — cleaned up ✓'})_`
+            : '')
       )
       // The counts alone can't answer "is this outcome covered?" — listing each
       // check under its test turns the index into a coverage map you can scan.
@@ -210,6 +221,12 @@ export function generateSuiteDoc(
   if (deadTestTotal > 0) {
     lines.push(
       `> ⚠ ${deadTestTotal} test${deadTestTotal === 1 ? ' has' : 's have'} dead checks that always pass regardless of the app.`
+    )
+    lines.push('')
+  }
+  if (orphanTotal > 0) {
+    lines.push(
+      `> 🗃️ ${orphanTotal} test${orphanTotal === 1 ? '' : 's'} create data but have **no teardown** to remove it — orphaned records will pile up in the environment.`
     )
     lines.push('')
   }

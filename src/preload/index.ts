@@ -133,7 +133,7 @@ const api = {
       storageState?: string,
       traceOpts?: unknown,
       harFile?: string,
-      chaos?: { slowNetwork?: boolean }
+      chaos?: { slowNetwork?: boolean; locale?: string }
     ): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
       ipcRenderer.invoke(
         'recorder:replay',
@@ -277,7 +277,32 @@ const api = {
   // F18: turn a plain-English intent into draft steps grounded to the current page.
   ai: {
     generateSteps: (intent: string): Promise<{ steps: unknown[]; note: string } | null> =>
-      ipcRenderer.invoke('ai:generateSteps', intent)
+      ipcRenderer.invoke('ai:generateSteps', intent),
+    // F21: bug repro + expected result → reproduce steps + a verification assertion.
+    generateRegressionTest: (
+      repro: string,
+      expected: string
+    ): Promise<{ steps: unknown[]; note: string } | null> =>
+      ipcRenderer.invoke('ai:generateRegressionTest', repro, expected)
+  },
+  // F31: acceptance-criteria checklist — persist the ACs + map them to tests.
+  ac: {
+    load: (): Promise<string> => ipcRenderer.invoke('ac:load'),
+    save: (text: string): Promise<void> => ipcRenderer.invoke('ac:save', text),
+    map: (
+      acs: string[],
+      tests: { name: string; summary: string }[]
+    ): Promise<{ ac: string; tests: string[] }[] | null> =>
+      ipcRenderer.invoke('ac:map', acs, tests)
+  },
+  // F28: inspect the current page for localization issues (overflow / dir / text).
+  i18n: {
+    inspect: (): Promise<{
+      dir: string
+      overflow: string[]
+      overflowCount: number
+      texts: string[]
+    }> => ipcRenderer.invoke('i18n:inspect')
   },
   visual: {
     updateBaseline: (baselineId: string, currentPath: string): Promise<boolean> =>
