@@ -167,7 +167,59 @@ interface XBrowserAPI {
   // Is @playwright/test installed in the project? (root = where it was found)
   check: () => Promise<{ installed: boolean; root: string | null }>
   // Run the exported spec across the selected browsers; resolves per-browser.
-  run: (specCode: string, browsers: BrowserName[]) => Promise<CrossBrowserResult>
+  // envOverride (F32): a monitor's pinned env vars — bypasses the active env.
+  // sessionFile (F32): a saved session so a "starts logged in" test runs headless.
+  run: (
+    specCode: string,
+    browsers: BrowserName[],
+    envOverride?: Record<string, string>,
+    sessionFile?: string
+  ) => Promise<CrossBrowserResult>
+}
+
+// === Scheduled monitors (F32) — MIRROR: src/main/monitors.ts ===
+interface MonitorRun {
+  at: string
+  status: 'passed' | 'failed' | 'error'
+  detail?: string
+}
+interface Monitor {
+  id: string
+  fileName: string
+  name: string
+  intervalMin: number
+  enabled: boolean
+  alertOnFail: boolean
+  envId?: string | null
+  lastRunAt: string | null
+  runs: MonitorRun[]
+}
+interface MonitorsAPI {
+  list: () => Promise<Monitor[]>
+  save: (mon: Monitor) => Promise<Monitor[]>
+  delete: (id: string) => Promise<Monitor[]>
+  recordRun: (id: string, run: MonitorRun) => Promise<Monitor[]>
+}
+interface NotifyAPI {
+  show: (title: string, body: string) => Promise<void>
+}
+
+// === Coverage gap map (F23) ===
+interface CrawlPage {
+  path: string
+  url: string
+  title: string
+  depth: number
+}
+interface CrawlResult {
+  pages: CrawlPage[]
+  origin: string
+  startPath: string
+  capped: boolean
+}
+interface CoverageAPI {
+  crawl: () => Promise<CrawlResult>
+  onProgress: (cb: (data: { found: number }) => void) => () => void
 }
 
 // === Accessibility scan (F13) ===
@@ -348,6 +400,9 @@ interface API {
   har: HarAPI
   environments: EnvironmentsAPI
   xbrowser: XBrowserAPI
+  monitors: MonitorsAPI
+  notify: NotifyAPI
+  coverage: CoverageAPI
 }
 
 declare global {

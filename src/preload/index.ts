@@ -242,8 +242,39 @@ const api = {
   xbrowser: {
     check: (): Promise<{ installed: boolean; root: string | null }> =>
       ipcRenderer.invoke('xbrowser:check'),
-    run: (specCode: string, browsers: string[]): Promise<unknown> =>
-      ipcRenderer.invoke('xbrowser:run', specCode, browsers)
+    run: (
+      specCode: string,
+      browsers: string[],
+      envOverride?: Record<string, string>,
+      sessionFile?: string
+    ): Promise<unknown> =>
+      ipcRenderer.invoke('xbrowser:run', specCode, browsers, envOverride, sessionFile)
+  },
+
+  // === Scheduled monitors (F32) ===
+  // Persisted monitor config/history + a native failure alert. The scheduler
+  // itself runs in the renderer (App.tsx) using xbrowser.run.
+  monitors: {
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('monitors:list'),
+    save: (mon: unknown): Promise<unknown[]> => ipcRenderer.invoke('monitors:save', mon),
+    delete: (id: string): Promise<unknown[]> => ipcRenderer.invoke('monitors:delete', id),
+    recordRun: (id: string, run: unknown): Promise<unknown[]> =>
+      ipcRenderer.invoke('monitors:recordRun', id, run)
+  },
+  notify: {
+    show: (title: string, body: string): Promise<void> =>
+      ipcRenderer.invoke('notify:show', title, body)
+  },
+
+  // === Coverage gap map (F23) ===
+  // Crawl the app from the current page; onProgress streams the running count.
+  coverage: {
+    crawl: (): Promise<unknown> => ipcRenderer.invoke('coverage:crawl'),
+    onProgress: (cb: (data: { found: number }) => void): (() => void) => {
+      const listener = (_e: unknown, data: { found: number }): void => cb(data)
+      ipcRenderer.on('coverage:progress', listener)
+      return () => ipcRenderer.removeListener('coverage:progress', listener)
+    }
   },
 
   // === Accessibility scan (F13) ===

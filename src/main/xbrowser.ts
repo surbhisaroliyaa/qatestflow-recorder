@@ -16,7 +16,7 @@
 
 import { app } from 'electron'
 import { spawn } from 'child_process'
-import { mkdir, writeFile, rm } from 'fs/promises'
+import { mkdir, writeFile, rm, copyFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
 
@@ -69,7 +69,7 @@ export function checkPlaywright(): { installed: boolean; root: string | null } {
 // The temp Playwright config for a run: one project per requested browser, all
 // headless, pointed at our temp spec. Kept minimal — the spec carries its own
 // test.use({ baseURL }).
-function runConfig(browsers: BrowserName[], specDir: string): string {
+function runConfig(browsers: BrowserName[], specDir: string, storageStatePath?: string): string {
   const DEVICE: Record<BrowserName, string> = {
     chromium: 'Desktop Chrome',
     firefox: 'Desktop Firefox',
@@ -80,12 +80,18 @@ function runConfig(browsers: BrowserName[], specDir: string): string {
       (b) => `    { name: '${b}', use: { ...devices['${DEVICE[b]}'] } }`
     )
     .join(',\n')
+  // F32: a session-dependent test starts already logged in — point storageState at
+  // the copied session file by ABSOLUTE path so there's no relative-resolution
+  // ambiguity. Config-level use is overridden by any test.use in the spec, but the
+  // monitor spec carries none, so this wins.
+  const useProps = ['headless: true']
+  if (storageStatePath) useProps.push(`storageState: ${JSON.stringify(storageStatePath)}`)
   return `import { defineConfig, devices } from '@playwright/test'
 export default defineConfig({
   testDir: ${JSON.stringify(specDir)},
   fullyParallel: true,
   reporter: 'null',
-  use: { headless: true },
+  use: { ${useProps.join(', ')} },
   projects: [
 ${projects}
   ]
@@ -150,7 +156,10 @@ export async function runCrossBrowser(
   browsers: BrowserName[],
   // F25 bridge: the active environment's variables (+ BASE_URL) so a spec that
   // reads process.env.USERNAME / process.env.BASE_URL runs against it here too.
-  envVars: Record<string, string> = {}
+  envVars: Record<string, string> = {},
+  // F32: a saved session to start the run already logged in. `srcPath` is copied
+  // into the run dir and its absolute path is fed to the config's storageState.
+  session?: { name: string; srcPath: string }
 ): Promise<CrossBrowserResult> {
   const { installed, root } = checkPlaywright()
   if (!installed || !root) {
@@ -171,7 +180,25 @@ export async function runCrossBrowser(
     await rm(workDir, { recursive: true, force: true })
     await mkdir(specDir, { recursive: true })
     await writeFile(join(specDir, 'crossbrowser.spec.ts'), specCode, 'utf-8')
-    await writeFile(join(workDir, 'playwright.config.ts'), runConfig(browsers, specDir), 'utf-8')
+    // F32: copy the saved session in and pass its ABSOLUTE path to storageState so
+    // a "starts logged in" test isn't kicked back to the login page (→ timeout).
+    let storageStatePath: string | undefined
+    if (session) {
+      const dst = join(workDir, 'sessions', session.name)
+      await mkdir(join(workDir, 'sessions'), { recursive: true })
+      try {
+        await copyFile(session.srcPath, dst)
+        storageStatePath = dst
+      } catch {
+        // session file missing — run without it (test will fail honestly, as it
+        // would in the app if the session were gone)
+      }
+    }
+    await writeFile(
+      join(workDir, 'playwright.config.ts'),
+      runConfig(browsers, specDir, storageStatePath),
+      'utf-8'
+    )
 
     const json = await new Promise<string>((resolve, reject) => {
       let out = ''

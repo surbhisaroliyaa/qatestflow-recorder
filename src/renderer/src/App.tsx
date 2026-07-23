@@ -351,6 +351,36 @@ function App(): React.JSX.Element {
   // F25+: switch the active environment straight from the workspace chip, so you
   // never have to go Home (which drops an unsaved recording) just to change it.
   const [envSwitchOpen, setEnvSwitchOpen] = useState(false)
+  // F32 — scheduled monitors. The list, the dashboard modal, a busy-guard so two
+  // headless runs never overlap, and the "promote a test" form. The scheduler
+  // itself ticks in an effect further down (it reuses xbrowser.run).
+  const [monitors, setMonitors] = useState<Awaited<ReturnType<typeof window.api.monitors.list>>>(
+    []
+  )
+  const [monitorsOpen, setMonitorsOpen] = useState(false)
+  const monitorBusyRef = useRef(false)
+  const [monTestSel, setMonTestSel] = useState('') // fileName to promote
+  const [monInterval, setMonInterval] = useState(15) // minutes
+  const [monAlert, setMonAlert] = useState(true)
+  const [monEnvId, setMonEnvId] = useState('') // pinned env for a NEW monitor ('' = recorded URLs)
+  const [monHistoryFor, setMonHistoryFor] = useState<string | null>(null) // expanded monitor id
+  const [monRunningId, setMonRunningId] = useState<string | null>(null) // a run in progress (UI)
+  // F23 — coverage gap map: the crawl result + which pages the saved tests cover.
+  const [coverageOpen, setCoverageOpen] = useState(false)
+  const [coverageRun, setCoverageRun] = useState<{
+    running: boolean
+    found: number
+    result: Awaited<ReturnType<typeof window.api.coverage.crawl>> | null
+    coveredExact: Set<string>
+    // each url-contains assert remembers the origin(s) of the test it came from,
+    // so coverage credit is scoped to the site actually crawled (not cross-site).
+    coveredContains: { value: string; origins: string[] }[]
+  } | null>(null)
+  // Normalise a URL path for coverage matching (drop query/hash + trailing slash).
+  const normCovPath = (p: string): string => {
+    const q = (p || '/').split('?')[0].split('#')[0].replace(/\/+$/, '')
+    return q || '/'
+  }
   // The environment being edited in the manager (null = the list view).
   const [envDraft, setEnvDraft] = useState<Environment | null>(null)
   // F20 (edge-case explosion): the picker (choose fields + families to explode),
@@ -764,6 +794,12 @@ function App(): React.JSX.Element {
     window.api.environments.list().then(setEnvState)
   }, [])
 
+  // F32: load monitors once (app-wide, so the scheduler runs even while a test is
+  // open in the workspace, not just on the welcome screen).
+  useEffect(() => {
+    window.api.monitors.list().then(setMonitors)
+  }, [])
+
   // The active environment (null = run against each test's recorded URLs +
   // process.env — the pre-F25 behavior).
   const activeEnv = envState.environments.find((e) => e.id === envState.activeId) ?? null
@@ -1134,6 +1170,8 @@ function App(): React.JSX.Element {
         bugPromptOpen ||
         createsDataIndex !== null ||
         acOpen ||
+        monitorsOpen || // F32 dashboard
+        coverageOpen || // F23 coverage map
         apiPanelIndex !== null
     )
   }, [
@@ -1161,6 +1199,8 @@ function App(): React.JSX.Element {
     bugPromptOpen,
     createsDataIndex,
     acOpen,
+    monitorsOpen,
+    coverageOpen,
     apiPanelIndex
   ])
 
@@ -3263,6 +3303,194 @@ function App(): React.JSX.Element {
     }
     return { flat, map }
   }
+
+  // === F32: run one monitor NOW (headless, via the same Playwright path as F17
+  // cross-browser) and stamp the outcome. Never throws — a broken setup is
+  // recorded as 'error' (distinct from a real 'failed'), and an alert fires on
+  // anything that isn't a clean pass. Called by the scheduler tick and "Run now".
+  const runMonitorNow = async (
+    mon: Awaited<ReturnType<typeof window.api.monitors.list>>[number]
+  ): Promise<void> => {
+    // Self-guard: one headless run at a time (a manual click during a scheduled
+    // run used to be silently swallowed). monRunningId drives the UI spinner.
+    if (monitorBusyRef.current) return
+    monitorBusyRef.current = true
+    setMonRunningId(mon.id)
+    try {
+      await doMonitorRun(mon)
+    } finally {
+      monitorBusyRef.current = false
+      setMonRunningId(null)
+    }
+  }
+  const doMonitorRun = async (
+    mon: Awaited<ReturnType<typeof window.api.monitors.list>>[number]
+  ): Promise<void> => {
+    const at = new Date().toISOString()
+    let run: { at: string; status: 'passed' | 'failed' | 'error'; detail?: string }
+    const test = await window.api.library.load(mon.fileName)
+    if (!test) {
+      run = { at, status: 'error', detail: 'The saved test no longer exists.' }
+    } else {
+      try {
+        const flat = await expandForRun(test.steps)
+        // A data-driven test carries {{column}} tokens (e.g. {{username}}) that only
+        // resolve when the DATA TABLE is handed to the generator — without it the
+        // exported spec types nothing and login fails. (Same trap as the F28 fix.)
+        const cols = dataColumns(flat)
+        const rows = test.dataRows ?? []
+        const code = generatePlaywrightTest(flat, {
+          name: test.name || 'monitored flow',
+          baseURL: test.baseURL || deriveBaseURL(flat),
+          viewport: test.viewport,
+          data: cols.length > 0 && rows.length > 0 ? { columns: cols, rows } : undefined
+        })
+        // F32: run against the monitor's PINNED environment (its baseURL + vars),
+        // NOT the global "Run against" selection — so a monitor's target is stable.
+        // Always pass an explicit override (possibly {}) so the active env can't
+        // silently retarget it.
+        const pinned = mon.envId
+          ? envState.environments.find((e) => e.id === mon.envId)
+          : null
+        const envVars: Record<string, string> = {}
+        if (pinned) {
+          for (const v of pinned.vars) if (v.name) envVars[v.name] = v.value
+          if (pinned.baseURL) envVars.BASE_URL = pinned.baseURL
+        }
+        // The export blanks secret fields to process.env.PASSWORD so a SHARED test
+        // never leaks a password. But a monitor re-runs YOUR OWN saved test on YOUR
+        // machine — the secret is already on disk — so use it, matching what the
+        // individual replay does. A pinned env's PASSWORD still takes precedence.
+        if (envVars.PASSWORD === undefined) {
+          const secretStep = flat.find(
+            (s) => s.type === 'type' && s.secret && s.value && !s.value.includes('{{')
+          )
+          if (secretStep?.value) envVars.PASSWORD = secretStep.value
+        }
+        // F32: a test that "starts logged in" carries a saved session — hand it to
+        // the headless run so it isn't bounced to the login page (→ timeout).
+        const res = await window.api.xbrowser.run(
+          code,
+          ['chromium'],
+          envVars,
+          test.storageState || undefined
+        )
+        if (!res.installed)
+          run = { at, status: 'error', detail: 'Playwright is not installed — monitor runs need it.' }
+        else if (!res.ran)
+          run = { at, status: 'error', detail: res.message || 'The run did not start.' }
+        else {
+          const bad = res.results.find((r) => !r.ok)
+          run = bad
+            ? { at, status: 'failed', detail: bad.error || bad.failingTest || 'A step failed.' }
+            : { at, status: 'passed' }
+        }
+      } catch (e) {
+        run = { at, status: 'error', detail: e instanceof Error ? e.message : String(e) }
+      }
+    }
+    setMonitors(await window.api.monitors.recordRun(mon.id, run))
+    if (run.status !== 'passed' && mon.alertOnFail) {
+      window.api.notify.show(
+        run.status === 'failed' ? `Monitor failed: ${mon.name}` : `Monitor couldn't run: ${mon.name}`,
+        run.detail || 'A monitored test just failed.'
+      )
+    }
+  }
+
+  // F32: run EVERY monitor once, in order — a one-click "are they all still
+  // green?" check so you never have to click each row. Sequential (runMonitorNow
+  // self-guards), so headless runs never overlap.
+  const runAllMonitorsNow = async (): Promise<void> => {
+    for (const m of monitors) await runMonitorNow(m)
+  }
+
+  // F23: crawl the app from the current page, then overlay which discovered pages
+  // the saved tests actually visit (navigate) or verify (url-contains assert).
+  const handleCoverageCrawl = async (): Promise<void> => {
+    setCoverageOpen(true)
+    setCoverageRun({
+      running: true,
+      found: 0,
+      result: null,
+      coveredExact: new Set(),
+      coveredContains: []
+    })
+    const off = window.api.coverage.onProgress(({ found }) =>
+      setCoverageRun((prev) => (prev ? { ...prev, found } : prev))
+    )
+    try {
+      // What the saved tests cover: paths they navigate to + url-contains checks.
+      const coveredExact = new Set<string>()
+      const coveredContains: { value: string; origins: string[] }[] = []
+      for (const t of savedTests) {
+        const test = await window.api.library.load(t.fileName)
+        if (!test) continue
+        // Which site(s) this test drives — the origins of its navigations. A
+        // url-contains assert is credited only when the crawl is on one of these,
+        // so an assertion written for site A can't cover site B's pages.
+        const testOrigins = new Set<string>()
+        for (const s of test.steps) {
+          if (s.type === 'navigate' && s.url) {
+            try {
+              testOrigins.add(new URL(s.url).origin)
+            } catch {
+              /* skip a malformed url */
+            }
+          }
+        }
+        for (const s of test.steps) {
+          if (s.type === 'navigate' && s.url) {
+            try {
+              // origin + path (not path alone): a test on ANOTHER site that
+              // happens to share a path (e.g. /login) must NOT mark this site's
+              // page as covered — that false green was hiding real gaps.
+              const u = new URL(s.url)
+              coveredExact.add(u.origin + normCovPath(u.pathname))
+            } catch {
+              /* skip a malformed url */
+            }
+          } else if (s.type === 'assert' && s.assertKind === 'url-contains' && s.value) {
+            coveredContains.push({ value: s.value, origins: [...testOrigins] })
+          }
+        }
+      }
+      const result = await window.api.coverage.crawl()
+      setCoverageRun({ running: false, found: result.pages.length, result, coveredExact, coveredContains })
+    } catch {
+      setCoverageRun({
+        running: false,
+        found: 0,
+        result: null,
+        coveredExact: new Set(),
+        coveredContains: []
+      })
+    } finally {
+      off()
+    }
+  }
+
+  // The scheduler: every 30s, run the FIRST monitor that's due (enabled + its
+  // interval has elapsed since lastRunAt). One at a time — the busy-guard stops a
+  // slow headless run from overlapping the next tick. HONEST LIMIT: this only
+  // fires while the app is open. Skips while the user is mid-record/replay/pick so
+  // a background run can't fight their foreground work.
+  useEffect(() => {
+    const tick = async (): Promise<void> => {
+      if (monitorBusyRef.current || isRecording || isReplaying || isPicking) return
+      const now = Date.now()
+      const due = monitors.find(
+        (m) =>
+          m.enabled &&
+          (!m.lastRunAt || now - new Date(m.lastRunAt).getTime() >= m.intervalMin * 60000)
+      )
+      if (due) await runMonitorNow(due) // self-guards + drives the spinner
+    }
+    const id = window.setInterval(tick, 30000)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monitors, isRecording, isReplaying, isPicking])
+
   // Save a 1-based range of the current steps as a named block (default: all).
   // The range is FLATTENED first (any linked block inside it becomes its steps)
   // so a saved block is always plain steps — no nested references to resolve.
@@ -4766,6 +4994,333 @@ function App(): React.JSX.Element {
     </div>
   )
 
+  // F32: the monitors dashboard — promote a saved test to a scheduled monitor,
+  // see each one's status/last result, toggle/run/remove, and read its history.
+  const monitorsModal = monitorsOpen && (
+    <div className="modal-backdrop" onClick={() => setMonitorsOpen(false)}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">📡 Monitors — scheduled re-runs + failure alerts</span>
+          <button className="modal-close" onClick={() => setMonitorsOpen(false)} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="ac-body">
+          <p className="api-hint">
+            A monitor re-runs a saved test on a schedule (headless) and pops a desktop alert when it
+            fails — catching regressions between your manual runs.{' '}
+            <strong>It only runs while this app is open</strong> (there's no background service), and
+            it needs Playwright installed (same as cross-browser).
+          </p>
+          {monRunningId && (
+            <p className="api-hint" style={{ color: '#7fd39a' }}>
+              ⏳ A monitor run is in progress (headless, ~10–30s)… the row updates when it finishes.
+            </p>
+          )}
+          <div className="mon-add">
+            <select
+              className="env-bar-select"
+              value={monTestSel}
+              onChange={(e) => setMonTestSel(e.target.value)}
+            >
+              <option value="">Pick a test to monitor…</option>
+              {savedTests.map((t) => (
+                <option key={t.fileName} value={t.fileName}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+            <select
+              className="env-bar-select"
+              value={monInterval}
+              onChange={(e) => setMonInterval(Number(e.target.value))}
+            >
+              <option value={5}>every 5 min</option>
+              <option value={15}>every 15 min</option>
+              <option value={30}>every 30 min</option>
+              <option value={60}>every hour</option>
+              <option value={240}>every 4 hours</option>
+            </select>
+            <select
+              className="env-bar-select"
+              value={monEnvId}
+              onChange={(e) => setMonEnvId(e.target.value)}
+              title="Which environment this monitor always runs against (independent of the global Run-against selection)"
+            >
+              <option value="">against recorded URLs</option>
+              {envState.environments.map((env) => (
+                <option key={env.id} value={env.id}>
+                  against {env.name}
+                </option>
+              ))}
+            </select>
+            <label className="mon-alert-toggle" title="Fire a desktop notification when a run fails">
+              <input
+                type="checkbox"
+                checked={monAlert}
+                onChange={(e) => setMonAlert(e.target.checked)}
+              />{' '}
+              alert on fail
+            </label>
+            <button
+              className="modal-btn primary"
+              disabled={!monTestSel}
+              onClick={async () => {
+                const t = savedTests.find((s) => s.fileName === monTestSel)
+                if (!t) return
+                setMonitors(
+                  await window.api.monitors.save({
+                    id: `mon-${Date.now()}`,
+                    fileName: t.fileName,
+                    name: t.name,
+                    intervalMin: monInterval,
+                    enabled: true,
+                    alertOnFail: monAlert,
+                    envId: monEnvId || null,
+                    lastRunAt: null,
+                    runs: []
+                  })
+                )
+                setMonTestSel('')
+              }}
+            >
+              + Add monitor
+            </button>
+          </div>
+          {monitors.length === 0 ? (
+            <p className="api-hint">No monitors yet — pick a test above to start watching it.</p>
+          ) : (
+            <>
+              <div className="mon-runall">
+                <button
+                  className="mon-btn primary"
+                  disabled={monRunningId !== null}
+                  onClick={runAllMonitorsNow}
+                >
+                  {monRunningId ? '⏳ running…' : `▶ Run all ${monitors.length} now`}
+                </button>
+                <span className="mon-runall-hint">
+                  Runs every monitor once, in order — a one-click health check.
+                </span>
+              </div>
+              <ul className="mon-list">
+              {monitors.map((m) => {
+                const last = m.runs[0]
+                // One obvious status per monitor, so it's never a mystery whether
+                // it's running, healthy, broken, or off.
+                const running = monRunningId === m.id
+                const status = running
+                  ? { cls: 'running', label: '⏳ Running…' }
+                  : !m.enabled
+                    ? { cls: 'paused', label: '⏸ Paused' }
+                    : !last
+                      ? { cls: 'new', label: '• Never run' }
+                      : last.status === 'passed'
+                        ? { cls: 'pass', label: '✓ Passing' }
+                        : last.status === 'failed'
+                          ? { cls: 'fail', label: '✗ Failing' }
+                          : { cls: 'err', label: '⚠ Can’t run' }
+                const everyText =
+                  m.intervalMin < 60
+                    ? `${m.intervalMin} minutes`
+                    : m.intervalMin === 60
+                      ? 'hour'
+                      : `${m.intervalMin / 60} hours`
+                const envName = m.envId
+                  ? (envState.environments.find((e) => e.id === m.envId)?.name ?? 'a deleted env')
+                  : 'recorded URLs'
+                return (
+                  <li key={m.id} className={`mon-card ${status.cls}`}>
+                    <div className="mon-card-head">
+                      <span className={`mon-status ${status.cls}`}>{status.label}</span>
+                      <span className="mon-title">{m.name}</span>
+                      <div className="mon-actions">
+                        <button
+                          className="mon-btn"
+                          onClick={async () =>
+                            setMonitors(await window.api.monitors.save({ ...m, enabled: !m.enabled }))
+                          }
+                          title={m.enabled ? 'Pause this monitor' : 'Resume this monitor'}
+                        >
+                          {m.enabled ? '⏸ pause' : '▶ resume'}
+                        </button>
+                        <button
+                          className="mon-btn primary"
+                          disabled={monRunningId !== null}
+                          title={
+                            monRunningId && !running
+                              ? 'Another monitor is running — one headless run at a time'
+                              : 'Run this test headless right now (~10–30s)'
+                          }
+                          onClick={() => runMonitorNow(m)}
+                        >
+                          {running ? '⏳ running…' : '▶ run now'}
+                        </button>
+                        <button
+                          className="mon-btn"
+                          onClick={() => setMonHistoryFor(monHistoryFor === m.id ? null : m.id)}
+                        >
+                          {monHistoryFor === m.id ? 'hide history' : `history (${m.runs.length})`}
+                        </button>
+                        <button
+                          className="mon-btn danger"
+                          onClick={async () => setMonitors(await window.api.monitors.delete(m.id))}
+                        >
+                          remove
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mon-meta">
+                      Runs every {everyText} · against <strong>{envName}</strong>
+                      {m.alertOnFail ? ' · 🔔 alerts on failure' : ''} ·{' '}
+                      {last
+                        ? `last run ${last.status} at ${new Date(last.at).toLocaleTimeString()}`
+                        : 'not run yet'}
+                    </div>
+                    {monHistoryFor === m.id && (
+                      <div className="mon-history">
+                        {m.runs.length === 0 ? (
+                          <div className="mon-history-empty">No runs yet — hit “run now”.</div>
+                        ) : (
+                          m.runs.map((r, i) => (
+                            <div key={i} className={`mon-history-row ${r.status}`}>
+                              <span className="mon-history-mark">
+                                {r.status === 'passed' ? '✓' : r.status === 'failed' ? '✗' : '⚠'}
+                              </span>
+                              <span className="mon-history-when">
+                                {new Date(r.at).toLocaleString()}
+                              </span>
+                              <span className="mon-history-detail">{r.detail || 'passed'}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
+              </ul>
+            </>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn primary" onClick={() => setMonitorsOpen(false)}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // F23: the coverage gap map — crawl progress, then the tested/untested overlay.
+  const coverageModal = coverageOpen && (
+    <div
+      className="modal-backdrop"
+      onClick={() => {
+        if (!coverageRun?.running) setCoverageOpen(false)
+      }}
+    >
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">🗺️ Coverage gap map</span>
+          <button className="modal-close" onClick={() => setCoverageOpen(false)} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="ac-body">
+          {coverageRun?.running ? (
+            <p className="api-hint">
+              ⏳ Crawling from your current page… found <strong>{coverageRun.found}</strong> page
+              {coverageRun.found === 1 ? '' : 's'} so far. The browser is walking the links — it
+              returns to where you were when it's done.
+            </p>
+          ) : !coverageRun?.result || coverageRun.result.pages.length === 0 ? (
+            <p className="api-hint">
+              Nothing to map. Open your app in the browser first (navigate, and log in if it needs a
+              session), then run 🗺️ Coverage from that page — it crawls outward from wherever you are.
+            </p>
+          ) : (
+            (() => {
+              const { result, coveredExact, coveredContains } = coverageRun
+              const isCov = (path: string): boolean => {
+                // Navigate coverage is scoped to THIS crawled site (origin+path),
+                // so a same-path test on a different site isn't credited here.
+                const full = result.origin + normCovPath(path)
+                if (coveredExact.has(full)) return true
+                // url-contains: matched against the PATH only (matching the full
+                // URL would let a value like "https" cover everything), AND only
+                // when the assert's own test drives this site, AND the value is
+                // specific enough — a lone "/" or "" is too loose to be coverage.
+                const p = normCovPath(path)
+                return coveredContains.some(
+                  (c) =>
+                    c.value.replace(/\/+$/, '').length > 1 &&
+                    c.origins.includes(result.origin) &&
+                    p.includes(c.value)
+                )
+              }
+              const seen = new Set<string>()
+              const pages = result.pages.filter((p) => {
+                const k = normCovPath(p.path)
+                if (seen.has(k)) return false
+                seen.add(k)
+                return true
+              })
+              const coveredCount = pages.filter((p) => isCov(p.path)).length
+              const gaps = pages.length - coveredCount
+              const pct = Math.round((coveredCount / Math.max(1, pages.length)) * 100)
+              const ordered = [...pages].sort(
+                (a, b) => Number(isCov(a.path)) - Number(isCov(b.path))
+              )
+              return (
+                <>
+                  <p className="api-hint">
+                    Crawled <strong>{pages.length}</strong> page{pages.length === 1 ? '' : 's'} from{' '}
+                    <code>{result.origin}</code>
+                    {result.capped ? ' (stopped at the 40-page cap)' : ''}. A page counts as tested
+                    when a saved test <strong>navigates</strong> to it or <strong>asserts its URL</strong>
+                    — one reached only by clicking through can still show as a gap, which is a nudge to
+                    add an explicit check there.
+                  </p>
+                  <div className="ac-summary">
+                    {coveredCount} of {pages.length} pages covered ({pct}%)
+                    {gaps ? ` · ${gaps} gap${gaps === 1 ? '' : 's'} ⚠` : ' · full coverage ✓'}
+                  </div>
+                  <ul className="ac-list">
+                    {ordered.map((p) => {
+                      const cov = isCov(p.path)
+                      return (
+                        <li key={p.path} className={`ac-row ${cov ? 'covered' : 'uncovered'}`}>
+                          <span className="ac-mark">{cov ? '✓' : '⚠'}</span>
+                          <span className="ac-text">
+                            <strong>{p.path}</strong>
+                            <span className="mon-sub">
+                              {cov ? 'covered by a test' : 'no test visits or verifies this page'}
+                              {p.title && p.title !== p.path ? ` · ${p.title}` : ''}
+                            </span>
+                          </span>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </>
+              )
+            })()
+          )}
+        </div>
+        <div className="modal-footer">
+          <button
+            className="modal-btn primary"
+            onClick={() => setCoverageOpen(false)}
+            disabled={coverageRun?.running}
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
   // === Welcome view — shown before any navigation ===
   if (!hasNavigated) {
     return (
@@ -4773,6 +5328,7 @@ function App(): React.JSX.Element {
         {envManagerModal}
         {docsModal}
         {acModal}
+        {monitorsModal}
         {/* Run All is launched from here; its host-mismatch warning must render
             on this screen too, before the suite navigates to the workspace. */}
         {envWarnModal}
@@ -4973,6 +5529,19 @@ function App(): React.JSX.Element {
                   title="AC checklist: enter your acceptance criteria and see which tests cover each — an uncovered AC is a coverage gap"
                 >
                   ✅ AC checklist
+                </button>
+                {/* F32: promote saved tests to scheduled monitors + failure alerts. */}
+                <button
+                  type="button"
+                  className={`env-bar-manage${monitors.some((m) => m.enabled) ? ' monitoring' : ''}`}
+                  onClick={() => {
+                    setMonTestSel('')
+                    setMonHistoryFor(null)
+                    setMonitorsOpen(true)
+                  }}
+                  title="Monitors: re-run a saved test on a schedule and get a desktop alert when it fails (runs while the app is open)"
+                >
+                  📡 Monitors{monitors.length ? ` (${monitors.length})` : ''}
                 </button>
               </div>
 
@@ -5525,6 +6094,15 @@ function App(): React.JSX.Element {
           title="Performance: measure this page's Core Web Vitals (load speed, layout stability)"
         >
           ⚡ {perfMeasuring ? 'Measuring…' : 'Perf'}
+        </button>
+        {/* F23: crawl the app from here and overlay tested vs untested pages. */}
+        <button
+          className="a11y-btn"
+          onClick={handleCoverageCrawl}
+          disabled={isReplaying || isPicking || isRecording || coverageRun?.running}
+          title="Coverage map: crawl the app from this page and show which pages your tests cover — untested pages are gaps. It walks the links (moving the browser around) then returns you here."
+        >
+          🗺️ {coverageRun?.running ? 'Crawling…' : 'Coverage'}
         </button>
         {/* F1: capture network into a HAR while recording (opt-in flake-killer). */}
         <button
@@ -8052,6 +8630,8 @@ function App(): React.JSX.Element {
       {/* F25: environment / config manager — defined once above (opened from the
           library AND this workspace), rendered here for the workspace screen. */}
       {envManagerModal}
+      {/* F23: coverage gap map — crawled from the workspace's live browser. */}
+      {coverageModal}
 
       {/* === F20: edge-case picker — choose which text fields and which families
            (empty / boundary / invalid / injection) to explode, then run. === */}

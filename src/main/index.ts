@@ -6,8 +6,17 @@ import {
   WebContentsView,
   dialog,
   webFrameMain,
-  nativeImage
+  nativeImage,
+  Notification
 } from 'electron'
+import {
+  listMonitors,
+  saveMonitor,
+  deleteMonitor,
+  recordMonitorRun,
+  type Monitor,
+  type MonitorRun
+} from './monitors'
 import { join, basename, dirname } from 'path'
 import { writeFile, mkdir, copyFile, readFile, readdir, rm } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -3936,20 +3945,139 @@ function createWindow(): void {
     }
   })
 
+  // === F23: coverage crawl ===========================================
+  // Breadth-first walk of the app from the CURRENT page, driving the embedded
+  // browser (so it renders JS and uses the live session — logged-in pages are
+  // reachable). Same host only, capped hard so it always terminates. Restores the
+  // page it started on. Returns the discovered pages; the renderer overlays which
+  // ones the saved tests actually visit.
+  ipcMain.handle(
+    'coverage:crawl',
+    async (): Promise<{
+      pages: { path: string; url: string; title: string; depth: number }[]
+      origin: string
+      startPath: string
+      capped: boolean
+    }> => {
+      const wc = activeWC()
+      const startUrl = wc.getURL()
+      let startOrigin = ''
+      try {
+        startOrigin = new URL(startUrl).origin
+      } catch {
+        return { pages: [], origin: '', startPath: '', capped: false }
+      }
+      if (!startOrigin.startsWith('http'))
+        return { pages: [], origin: startOrigin, startPath: '', capped: false }
+
+      const MAX_PAGES = 40
+      const MAX_DEPTH = 3
+      const norm = (u: string): string | null => {
+        try {
+          const x = new URL(u)
+          if (x.origin !== startOrigin) return null
+          const p = x.pathname.replace(/\/+$/, '') || '/'
+          return startOrigin + p
+        } catch {
+          return null
+        }
+      }
+      const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 600))
+      const queue: { url: string; depth: number }[] = [{ url: startUrl, depth: 0 }]
+      const seen = new Set<string>()
+      const pages: { path: string; url: string; title: string; depth: number }[] = []
+      let capped = false
+
+      while (queue.length) {
+        if (pages.length >= MAX_PAGES) {
+          capped = queue.length > 0
+          break
+        }
+        const { url, depth } = queue.shift()!
+        const key = norm(url)
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        await loadUrlTolerantly(url, wc)
+        await settle()
+        let info: { title: string; links: string[] } = { title: '', links: [] }
+        try {
+          info = (await wc.executeJavaScript(
+            `(() => {
+              const origin = location.origin
+              const out = new Set()
+              for (const a of document.querySelectorAll('a[href]')) {
+                try { const u = new URL(a.href, location.href)
+                  if (u.origin === origin) out.add(u.origin + u.pathname) } catch {}
+              }
+              return { title: document.title, links: [...out].slice(0, 200) }
+            })()`,
+            true
+          )) as { title: string; links: string[] }
+        } catch {
+          // a page we can't read — still counts as discovered
+        }
+        let path = '/'
+        try {
+          path = new URL(url).pathname || '/'
+        } catch {
+          /* keep '/' */
+        }
+        pages.push({ path, url, title: info.title || path, depth })
+        mainWindow?.webContents.send('coverage:progress', { found: pages.length })
+        if (depth < MAX_DEPTH) {
+          for (const link of info.links) {
+            const k = norm(link)
+            if (k && !seen.has(k)) queue.push({ url: link, depth: depth + 1 })
+          }
+        }
+      }
+      // Put the browser back where the user left it.
+      await loadUrlTolerantly(startUrl, wc)
+      let startPath = '/'
+      try {
+        startPath = new URL(startUrl).pathname || '/'
+      } catch {
+        /* keep */
+      }
+      return { pages, origin: startOrigin, startPath, capped }
+    }
+  )
+
   // === Cross-browser replay (F17) ====================================
   // Chromium is the embedded engine; WebKit/Firefox can only run via REAL
   // Playwright, shelled out. `check` reports whether it's installed; `run`
   // exports the current test to a temp spec and runs it per selected browser.
   ipcMain.handle('xbrowser:check', () => checkPlaywright())
-  ipcMain.handle('xbrowser:run', async (_event, specCode: string, browsers: BrowserName[]) => {
-    // Bridge the active F25 environment: its vars feed process.env.* in the spec,
-    // and its base URL feeds process.env.BASE_URL (the export reads that).
-    const env = await activeEnvironment()
-    const envVars: Record<string, string> = {}
-    for (const v of env?.vars ?? []) if (v.name) envVars[v.name] = v.value
-    if (env?.baseURL) envVars.BASE_URL = env.baseURL
-    return runCrossBrowser(specCode, browsers, envVars)
-  })
+  ipcMain.handle(
+    'xbrowser:run',
+    async (
+      _event,
+      specCode: string,
+      browsers: BrowserName[],
+      // F32: a monitor passes its PINNED environment's vars here (possibly {} for
+      // "recorded URLs"), so its run ignores the global "Run against" selection.
+      // undefined = the pre-F32 behaviour: use whatever env is currently active.
+      envOverride?: Record<string, string>,
+      // F32: a saved session filename so a "starts logged in" test runs headless
+      // without being bounced to login. Resolved against the _sessions store.
+      sessionFile?: string
+    ) => {
+      let envVars: Record<string, string> = {}
+      if (envOverride) {
+        envVars = envOverride
+      } else {
+        // Bridge the active F25 environment: its vars feed process.env.* in the
+        // spec, and its base URL feeds process.env.BASE_URL (the export reads it).
+        const env = await activeEnvironment()
+        for (const v of env?.vars ?? []) if (v.name) envVars[v.name] = v.value
+        if (env?.baseURL) envVars.BASE_URL = env.baseURL
+      }
+      const session = sessionFile
+        ? { name: sessionFile, srcPath: join(libraryDir(), '_sessions', sessionFile) }
+        : undefined
+      return runCrossBrowser(specCode, browsers, envVars, session)
+    }
+  )
   ipcMain.handle('library:list', () => listTests())
   ipcMain.handle('library:listSuites', () => listSuites())
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))
@@ -3957,6 +4085,19 @@ function createWindow(): void {
   ipcMain.handle('library:recordRun', (_event, fileName: string, run: RunInfo) =>
     recordRun(fileName, run)
   )
+  // F32 — scheduled monitors: the persisted store + a native failure alert. The
+  // scheduler lives in the renderer (it owns spec generation + xbrowser.run); main
+  // just keeps the config/history and rings the OS notification bell.
+  ipcMain.handle('monitors:list', () => listMonitors())
+  ipcMain.handle('monitors:save', (_event, mon: Monitor) => saveMonitor(mon))
+  ipcMain.handle('monitors:delete', (_event, id: string) => deleteMonitor(id))
+  ipcMain.handle('monitors:recordRun', (_event, id: string, run: MonitorRun) =>
+    recordMonitorRun(id, run)
+  )
+  ipcMain.handle('notify:show', (_event, title: string, body: string) => {
+    if (!Notification.isSupported()) return
+    new Notification({ title, body }).show()
+  })
   // F20 (Option 2): persist / list / re-open edge-case batches (negative-testing
   // evidence), kept separate from the pass/fail run history above.
   ipcMain.handle(
@@ -4457,9 +4598,13 @@ function createWindow(): void {
 // If the user types "google.com" we turn it into "https://google.com"
 function normalizeUrl(input: string): string {
   const trimmed = input.trim()
-  // Already has a scheme we support (http/https, or file:// for a local page,
-  // e.g. a test fixture) — leave it alone. Otherwise assume a bare domain.
-  if (/^(https?|file):\/\//i.test(trimmed)) return trimmed
+  // Leave ANY explicit scheme alone — http(s)://, file://, chrome://, about:,
+  // data:, etc. Only a bare domain like "example.com" or "localhost:5173" gets
+  // https:// prepended. A `host:port` is NOT a scheme (no `//` after the colon),
+  // so it still gets the prefix. (The old whitelist mangled `chrome://version`
+  // into `https://chrome://version` because chrome wasn't on the list.)
+  if (/^[a-zA-Z][\w+.-]*:\/\//.test(trimmed) || /^(about|data|blob|view-source):/i.test(trimmed))
+    return trimmed
   return `https://${trimmed}`
 }
 

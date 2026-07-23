@@ -1861,6 +1861,10 @@ body {
   border-color: #e0524d;
   background: #2a1715;
 }
+.shot-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 
 /* Day 11.5: suite-run summary modal list */
 .suite-summary {
@@ -4146,6 +4150,192 @@ body {
   height: 1px;
   margin: 4px 2px;
   background: #313c49;
+}
+
+/* F32 — monitors dashboard */
+.env-bar-manage.monitoring {
+  border-color: #2f6b43;
+  color: #7fd39a;
+}
+.mon-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+.mon-alert-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #9db4d0;
+  cursor: pointer;
+}
+.mon-runall {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 4px;
+}
+.mon-runall-hint {
+  font-size: 11.5px;
+  color: #8a97a8;
+}
+/* Muted sub-line under a title (coverage rows, etc.) — its own line, dimmed. */
+.mon-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #8a97a8;
+}
+.mon-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Each monitor is a card with a coloured left rail = its health at a glance. */
+.mon-card {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #1c1c22;
+  border: 1px solid #2a3542;
+  border-left: 3px solid #3a4a5e;
+}
+.mon-card.pass {
+  border-left-color: #2f6b43;
+}
+.mon-card.fail,
+.mon-card.err {
+  border-left-color: #a33;
+}
+.mon-card.running {
+  border-left-color: #58a6ff;
+}
+.mon-card.paused {
+  opacity: 0.72;
+}
+.mon-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.mon-status {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.mon-status.pass {
+  background: #16351f;
+  color: #7ee0a0;
+}
+.mon-status.fail,
+.mon-status.err {
+  background: #3a1414;
+  color: #ff8a80;
+}
+.mon-status.running {
+  background: #12283f;
+  color: #7fbfff;
+}
+.mon-status.paused,
+.mon-status.new {
+  background: #26303c;
+  color: #9db4d0;
+}
+.mon-title {
+  flex: 1;
+  min-width: 120px;
+  font-weight: 700;
+  font-size: 13px;
+  color: #e6ecf3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mon-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.mon-btn {
+  padding: 2px 10px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid #3a4a5e;
+  background: #26303c;
+  color: #cce4ff;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.mon-btn:hover {
+  background: #303c4a;
+}
+.mon-btn.primary {
+  background: #2f4664;
+  border-color: #3f6b8f;
+  color: #dbeaff;
+}
+.mon-btn.danger {
+  color: #ffb3ae;
+  border-color: #5a3a3a;
+}
+.mon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.mon-meta {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: #8a97a8;
+}
+.mon-history {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #14171d;
+  border: 1px solid #2a3542;
+  border-radius: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.mon-history-empty {
+  font-size: 12px;
+  color: #8a97a8;
+}
+.mon-history-row {
+  display: grid;
+  grid-template-columns: 16px 160px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 11.5px;
+}
+.mon-history-mark {
+  font-weight: 700;
+}
+.mon-history-row.passed .mon-history-mark {
+  color: #7ee0a0;
+}
+.mon-history-row.failed .mon-history-mark,
+.mon-history-row.error .mon-history-mark {
+  color: #ff8a80;
+}
+.mon-history-when {
+  color: #8a97a8;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+.mon-history-detail {
+  color: #c3cddb;
+  overflow-wrap: anywhere;
 }
 
 /* The manager modal — a touch narrower than the code modals. */
