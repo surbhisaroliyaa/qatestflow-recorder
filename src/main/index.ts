@@ -18,6 +18,7 @@ import {
   type MonitorRun
 } from './monitors'
 import { join, basename, dirname } from 'path'
+import { execFile } from 'child_process'
 import { writeFile, mkdir, copyFile, readFile, readdir, rm } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -58,6 +59,7 @@ import {
   deepRcaFailure,
   generateAiSteps,
   mapAcCoverage,
+  draftTestFromStory,
   type AcCoverage,
   type FailureEvidence,
   type FailureCategory
@@ -359,7 +361,10 @@ const AI_CAPTURE_JS = `(() => {
 // Height in pixels reserved at the top of the window for our React chrome
 // (URL bar + back/forward/reload buttons). Everything below this is the
 // embedded browser showing the website under test.
-const CHROME_HEIGHT = 60
+// NOTE: two-row toolbar — this MUST equal the `.chrome` height in main.css
+// (row 1 = browser bar, row 2 = QA tool belt), or the native browser view
+// won't line up with the empty browser area beneath the toolbar.
+const CHROME_HEIGHT = 104
 
 // Day 17 (multiple windows): height reserved for the tab strip, shown ONLY when
 // more than one tab is open. When visible, the embedded browser starts this
@@ -4256,6 +4261,64 @@ function createWindow(): void {
   // reload, to re-show the badge).
   ipcMain.handle('har:lastCount', (): number => lastCapturedHar?.log.entries.length ?? 0)
 
+  // F35 (Mock Studio): hand the renderer the MOCKABLE responses from the last HAR
+  // capture — the API calls (XHR/Fetch) with a text body — so it can edit one into
+  // a scenario (force a 500, empty a list, flip a flag) and emit a Playwright
+  // route/fulfill. Binary/base64 bodies and the page Document are skipped (you don't
+  // hand-edit an image or the HTML shell). Bodies are capped so a huge payload can't
+  // bloat the IPC message.
+  const MOCK_BODY_CAP = 200_000
+  ipcMain.handle(
+    'har:mockList',
+    (): {
+      available: boolean
+      entries: Array<{
+        index: number
+        method: string
+        url: string
+        status: number
+        statusText: string
+        mimeType: string
+        resourceType: string
+        body: string
+        bodyTruncated: boolean
+      }>
+    } => {
+      const har = lastCapturedHar
+      if (!har || !har.log.entries.length) return { available: false, entries: [] }
+      const entries: Array<{
+        index: number
+        method: string
+        url: string
+        status: number
+        statusText: string
+        mimeType: string
+        resourceType: string
+        body: string
+        bodyTruncated: boolean
+      }> = []
+      har.log.entries.forEach((e, index) => {
+        const rt = e._resourceType ?? ''
+        if (rt === 'Document') return // the HTML shell — not a data mock target
+        const content = e.response.content
+        if (content.encoding === 'base64') return // binary — not text-editable
+        const raw = content.text ?? ''
+        entries.push({
+          index,
+          method: e.request.method,
+          url: e.request.url,
+          status: e.response.status,
+          statusText: e.response.statusText,
+          mimeType: (content.mimeType || '').split(';')[0].trim(),
+          resourceType: rt,
+          body: raw.length > MOCK_BODY_CAP ? raw.slice(0, MOCK_BODY_CAP) : raw,
+          bodyTruncated: raw.length > MOCK_BODY_CAP
+        })
+      })
+      return { available: true, entries }
+    }
+  )
+
   // Open a failure screenshot in the OS image viewer. Only paths inside the
   // library folder are allowed — this is a viewer, not a general file opener.
   ipcMain.handle('library:openScreenshot', (_event, path: string) => {
@@ -4489,6 +4552,124 @@ function createWindow(): void {
         label: `Expected: ${exp.length > 60 ? exp.slice(0, 57) + '…' : exp}`
       }
       return { steps: [...base.steps, assertStep], note: base.note }
+    }
+  )
+
+  // F22: draft a whole test from a user story (+ optional PR diff). No live page,
+  // so the model can't ground selectors — actions become MANUAL steps (a pause +
+  // instruction the tester grounds by recording over them) and checks become real
+  // `nl` assertions that run at replay. navigate paths are resolved against the
+  // page the user is currently on, so a bare "/inventory" becomes a full URL.
+  const resolveDraftUrl = (text: string, baseUrl?: string): string => {
+    const t = (text || '').trim()
+    // The model is asked for a bare path/URL, but often wraps it in prose
+    // ("Open the login page at /login"). Extract the real target rather than
+    // storing the sentence — an un-navigable URL would fail at replay.
+    // 1. A full URL anywhere in the text wins (stop at whitespace or a ")").
+    const urlInProse = t.match(/https?:\/\/[^\s)]+/i)
+    if (urlInProse) return urlInProse[0].replace(/[.,]+$/, '') // drop trailing punctuation
+    if (baseUrl) {
+      try {
+        const base = new URL(baseUrl)
+        // 2. The whole thing is already a clean path.
+        if (t.startsWith('/')) return base.origin + '/' + t.replace(/^\/+|\/+$/g, '')
+        // 3. A /path token embedded in prose — require it to start a word so we
+        //    don't grab the slash inside things like "and/or".
+        const pathInProse = t.match(/(?:^|\s)(\/[^\s)]+)/)
+        if (pathInProse && pathInProse[1].length > 1) {
+          return base.origin + '/' + pathInProse[1].replace(/^\/+|[.,/]+$/g, '')
+        }
+        // 4. A single bare word like "login" -> a path under the current origin.
+        if (t && !t.includes(' ')) return base.origin + '/' + t.replace(/^\/+|\/+$/g, '')
+        // 5. Prose with no path at all -> just open the current site's root.
+        return base.origin + '/'
+      } catch {
+        /* fall through */
+      }
+    }
+    return t // no base to resolve against — leave it for the step editor
+  }
+  const trunc = (s: string, n = 60): string => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+  ipcMain.handle(
+    'ai:draftFromStory',
+    async (
+      _event,
+      story: string,
+      diff: string | undefined,
+      baseUrl: string | undefined
+    ): Promise<{ title: string; steps: unknown[]; note: string } | null> => {
+      const res = await draftTestFromStory(story, diff, libraryDir())
+      if (res == null) return null // Claude unavailable — renderer surfaces it
+      const steps = res.steps.map((d) => {
+        if (d.kind === 'navigate') {
+          return { type: 'navigate', url: resolveDraftUrl(d.text, baseUrl), label: `Go to ${trunc(d.text)}` }
+        }
+        if (d.kind === 'check') {
+          return { type: 'assert', assertKind: 'nl', value: d.text, label: `Check: ${trunc(d.text)}` }
+        }
+        // action → a manual pause with the instruction, for the tester to ground.
+        return { type: 'wait', waitKind: 'manual', value: d.text, label: `Do: ${trunc(d.text)}` }
+      })
+      return { title: res.title, steps, note: res.note }
+    }
+  )
+
+  // F22: let the user point at a local git repo and pull a diff to draft from —
+  // the "leverages sitting next to the local repo" half. Prefers uncommitted work
+  // (git diff HEAD); if the tree is clean, falls back to the last commit's diff.
+  // Returns null if the user cancels; an ok:false payload if the folder isn't a repo.
+  const gitText = (dir: string, args: string[]): Promise<string> =>
+    new Promise((resolve, reject) => {
+      execFile(
+        'git',
+        ['-C', dir, ...args],
+        { maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+        (err, stdout) => (err ? reject(err) : resolve(stdout))
+      )
+    })
+  ipcMain.handle(
+    'repo:pickDiff',
+    async (): Promise<{ ok: boolean; path: string; diff: string; summary: string; note: string } | null> => {
+      const picked = await dialog.showOpenDialog(mainWindow, {
+        title: 'Choose the app’s local git repo to draft from',
+        properties: ['openDirectory']
+      })
+      if (picked.canceled || !picked.filePaths.length) return null
+      const dir = picked.filePaths[0]
+      try {
+        await gitText(dir, ['rev-parse', '--is-inside-work-tree'])
+      } catch {
+        return { ok: false, path: dir, diff: '', summary: '', note: 'That folder isn’t a git repo (or git isn’t installed).' }
+      }
+      // Uncommitted work first; fall back to the last commit if the tree is clean.
+      let diff = ''
+      let scope = ''
+      try {
+        diff = (await gitText(dir, ['diff', 'HEAD'])).trim()
+        scope = 'uncommitted changes'
+      } catch {
+        diff = ''
+      }
+      if (!diff) {
+        try {
+          diff = (await gitText(dir, ['diff', 'HEAD~1', 'HEAD'])).trim()
+          scope = 'the last commit'
+        } catch {
+          diff = ''
+        }
+      }
+      if (!diff) {
+        return { ok: false, path: dir, diff: '', summary: '', note: 'No changes found (clean tree, no prior commit to diff).' }
+      }
+      let stat = ''
+      try {
+        stat = (await gitText(dir, scope === 'the last commit' ? ['diff', '--stat', 'HEAD~1', 'HEAD'] : ['diff', '--stat', 'HEAD'])).trim()
+      } catch {
+        /* stat is optional */
+      }
+      const files = (stat.match(/\n/g)?.length ?? 0) || (stat ? 1 : 0)
+      const summary = `${basename(dir)} — ${scope}${files ? ` (${files} file${files === 1 ? '' : 's'})` : ''}`
+      return { ok: true, path: dir, diff, summary, note: '' }
     }
   )
 

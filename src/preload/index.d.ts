@@ -246,6 +246,21 @@ interface HarAPI {
   lastCount: () => Promise<number>
   // Recording stopped → the count captured. Returns an unsubscribe fn.
   onCaptured: (callback: (info: { count: number }) => void) => () => void
+  // F35 (Mock Studio): the mockable API responses from the last HAR capture.
+  mockList: () => Promise<{ available: boolean; entries: MockEntry[] }>
+}
+
+// F35: one editable captured response, as Mock Studio shows it.
+interface MockEntry {
+  index: number
+  method: string
+  url: string
+  status: number
+  statusText: string
+  mimeType: string
+  resourceType: string
+  body: string
+  bodyTruncated: boolean
 }
 
 // === Visual regression (Day 19) ===
@@ -259,6 +274,24 @@ interface AiAPI {
     repro: string,
     expected: string
   ) => Promise<{ steps: RecorderStep[]; note: string } | null>
+  // F22: a user story (+ optional PR diff) → a draft test (navigate + manual
+  // actions + real nl checks). baseUrl resolves bare navigate paths.
+  draftFromStory: (
+    story: string,
+    diff: string | undefined,
+    baseUrl: string | undefined
+  ) => Promise<{ title: string; steps: RecorderStep[]; note: string } | null>
+}
+
+// F22: pick a local git repo and pull its diff to draft a test from.
+interface RepoAPI {
+  pickDiff: () => Promise<{
+    ok: boolean
+    path: string
+    diff: string
+    summary: string
+    note: string
+  } | null>
 }
 
 // F31: acceptance-criteria checklist — persist ACs + AI-map them to covering tests.
@@ -393,6 +426,7 @@ interface API {
   blocks: BlocksAPI
   visual: VisualAPI
   ai: AiAPI
+  repo: RepoAPI
   ac: AcAPI
   i18n: I18nAPI
   a11y: A11yAPI

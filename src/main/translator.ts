@@ -927,3 +927,118 @@ export async function mapAcCoverage(
   if (out == null) return null // Claude unavailable — caller surfaces it
   return parseAcMapping(out, list, tests)
 }
+
+// === F22: draft a test from a user story / PR diff ====================
+// Turn a feature's user story (and, optionally, the code diff that implements
+// it — we sit next to the local repo) into a DRAFT end-to-end test: an ordered
+// list of steps + the checks that prove the story works. Unlike F18/F21 there is
+// NO live page, so the model CANNOT know real selectors — each action is plain
+// English that a human grounds afterward (by recording over it). The checks are
+// the gold: they map straight to real `nl` assertions that run at replay.
+export interface DraftStep {
+  kind: 'navigate' | 'action' | 'check'
+  text: string // navigate: a path/URL; action: a plain-English action; check: a claim
+}
+export interface DraftResult {
+  title: string
+  steps: DraftStep[]
+  note: string // '' on success; a human note otherwise
+}
+
+const DIFF_PROMPT_CAP = 16_000 // keep the diff from blowing up the prompt
+
+function buildDraftPrompt(story: string, diff?: string): string {
+  const lines: string[] = [
+    'You are a senior QA engineer. Turn the USER STORY below (and the optional',
+    'code DIFF) into a DRAFT end-to-end UI test: the ordered steps a tester would',
+    'perform, plus the checks that PROVE the story works.',
+    '',
+    'You are NOT looking at the live app, so you CANNOT know real button/field',
+    'selectors — describe each ACTION in plain English (a human grounds it against',
+    'the real page afterward). The CHECKS are the most important part: make each one',
+    'concrete and observable (text shown, a count, the URL, a message).',
+    '',
+    'USER STORY:',
+    '"""',
+    story.trim().slice(0, 6000),
+    '"""'
+  ]
+  if (diff && diff.trim()) {
+    lines.push(
+      '',
+      'RELEVANT CODE CHANGES (a git diff — use it to infer what to test: new fields,',
+      'routes, validation, edge cases the change introduces):',
+      '"""',
+      diff.trim().slice(0, DIFF_PROMPT_CAP),
+      '"""'
+    )
+  }
+  lines.push(
+    '',
+    'Return ONLY JSON (no markdown fences, no prose), shaped EXACTLY:',
+    '{',
+    '  "title": "<a short test name>",',
+    '  "steps": [',
+    '    { "kind": "navigate", "text": "/login" },',
+    '    { "kind": "action",   "text": "<one user action, e.g. Enter \\"standard_user\\" in the username field>" },',
+    '    { "kind": "check",    "text": "<one thing to verify, e.g. the inventory page shows 6 products>" }',
+    '  ]',
+    '}',
+    'Rules: start with a navigate step if the story implies a starting page (else omit',
+    'it); ONE action or check per step, in performed order; prefer 4-12 steps; END with',
+    'at least one check that proves the story’s main outcome. For a navigate step,',
+    '"text" MUST be ONLY the path or full URL (e.g. "/login" or',
+    '"https://site.com/login") — never a sentence, never words like "Open".'
+  )
+  return lines.join('\n')
+}
+
+// Pull the first top-level JSON object out of the model output (tolerant of a
+// stray sentence or a ```json fence), then validate its shape.
+function parseDraft(text: string): { title: string; steps: DraftStep[] } | null {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  let obj: unknown
+  try {
+    obj = JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return null
+  }
+  if (!obj || typeof obj !== 'object') return null
+  const o = obj as Record<string, unknown>
+  const title = typeof o.title === 'string' ? o.title.trim() : ''
+  const rawSteps = Array.isArray(o.steps) ? o.steps : []
+  const steps: DraftStep[] = []
+  for (const raw of rawSteps) {
+    if (!raw || typeof raw !== 'object') continue
+    const s = raw as Record<string, unknown>
+    const kind = String(s.kind ?? '')
+    const stepText = typeof s.text === 'string' ? s.text.trim() : ''
+    if (!['navigate', 'action', 'check'].includes(kind) || !stepText) continue
+    steps.push({ kind: kind as DraftStep['kind'], text: stepText })
+    if (steps.length >= 40) break // hard cap — a draft is a starting point, not a novel
+  }
+  if (!steps.length) return null
+  return { title: title || 'Drafted test', steps }
+}
+
+export async function draftTestFromStory(
+  story: string,
+  diff: string | undefined,
+  cwd: string
+): Promise<DraftResult | null> {
+  const s = (story || '').trim()
+  if (!s) return { title: '', steps: [], note: 'Paste a user story first — the draft was empty.' }
+  const out = await runClaude(buildDraftPrompt(s, diff), cwd).catch(() => null)
+  if (out == null) return null // Claude unavailable — caller surfaces it
+  const parsed = parseDraft(out)
+  if (!parsed) {
+    return { title: '', steps: [], note: 'The AI didn’t return a usable draft — try rephrasing the story.' }
+  }
+  const checks = parsed.steps.filter((s) => s.kind === 'check').length
+  const note = checks
+    ? ''
+    : 'Heads-up: the draft has no verification checks — add at least one so it can prove the outcome.'
+  return { title: parsed.title, steps: parsed.steps, note }
+}

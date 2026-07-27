@@ -301,7 +301,22 @@ const api = {
       const listener = (_e: unknown, info: { count: number }): void => callback(info)
       ipcRenderer.on('har:captured', listener)
       return () => ipcRenderer.removeListener('har:captured', listener)
-    }
+    },
+    // F35 (Mock Studio): the mockable API responses from the last capture.
+    mockList: (): Promise<{
+      available: boolean
+      entries: Array<{
+        index: number
+        method: string
+        url: string
+        status: number
+        statusText: string
+        mimeType: string
+        resourceType: string
+        body: string
+        bodyTruncated: boolean
+      }>
+    }> => ipcRenderer.invoke('har:mockList')
   },
 
   // === Visual regression (Day 19) ===
@@ -314,7 +329,25 @@ const api = {
       repro: string,
       expected: string
     ): Promise<{ steps: unknown[]; note: string } | null> =>
-      ipcRenderer.invoke('ai:generateRegressionTest', repro, expected)
+      ipcRenderer.invoke('ai:generateRegressionTest', repro, expected),
+    // F22: a user story (+ optional PR diff) → a draft test (navigate + manual
+    // actions + real nl checks). baseUrl resolves bare navigate paths.
+    draftFromStory: (
+      story: string,
+      diff: string | undefined,
+      baseUrl: string | undefined
+    ): Promise<{ title: string; steps: unknown[]; note: string } | null> =>
+      ipcRenderer.invoke('ai:draftFromStory', story, diff, baseUrl)
+  },
+  // F22: pick a local git repo and pull its diff to draft a test from.
+  repo: {
+    pickDiff: (): Promise<{
+      ok: boolean
+      path: string
+      diff: string
+      summary: string
+      note: string
+    } | null> => ipcRenderer.invoke('repo:pickDiff')
   },
   // F31: acceptance-criteria checklist — persist the ACs + map them to tests.
   ac: {

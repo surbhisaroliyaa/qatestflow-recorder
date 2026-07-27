@@ -192,15 +192,51 @@ body {
   height: 100vh;
 }
 
+/* Two-row toolbar: row 1 is the browser (nav + URL + Record), row 2 is the QA
+   tool belt grouped by job. The TOTAL height is fixed and MUST equal
+   CHROME_HEIGHT in src/main/index.ts — the native browser view is painted just
+   below it, so the two numbers have to stay in lock-step (like .tab-strip). */
 .chrome {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  justify-content: center;
   gap: 8px;
-  height: 60px;
+  height: 104px;
   flex: none;
   padding: 0 12px;
   background: #2c2c2c;
   border-bottom: 1px solid #444;
+  overflow: hidden;
+}
+
+/* One horizontal row inside the toolbar. */
+.chrome-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chrome-row.tools {
+  gap: 6px;
+}
+
+/* A cluster of related tools; clusters are separated by a subtle divider so the
+   eye can group them (Author · Analyze · Network). */
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tool-group + .tool-group {
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid #444;
+}
+
+/* Every toolbar button stays on ONE line at its natural width — long labels
+   never wrap and overflow. Scoped to .chrome so future buttons inherit it. */
+.chrome button {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* Day 17 (multiple windows): the tab strip. Height (34px) MUST match
@@ -5082,6 +5118,137 @@ body {
   font-weight: 600;
   margin: 12px 0 6px;
   font-size: 13px;
+}
+/* F22: the "load PR diff" row + the loaded-diff chip in the draft modal. */
+.draft-diff-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 4px 0 2px;
+}
+.draft-diff-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(126, 231, 135, 0.12);
+  border: 1px solid rgba(126, 231, 135, 0.35);
+  color: #7ee787;
+  font-size: 12px;
+}
+.draft-diff-clear {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+.draft-diff-clear:hover {
+  opacity: 1;
+}
+/* F35: Mock Studio — the response list, verb chips, editor + snippet. */
+.mock-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+/* NOTE: must be .ac-row.mock-row (not just .mock-row) — .ac-row is defined
+   LATER in this file with equal specificity, so a bare .mock-row loses the tie
+   and .ac-row's `display: grid` wins. Two classes raises specificity so this
+   wins regardless of source order. */
+.ac-row.mock-row {
+  /* Override .ac-row's 18px/1fr grid (meant for an icon + text): a mock row is
+     a wide verb badge + text, so lay it out as flex or the 46px badge overflows
+     its 18px grid cell and paints over the path. */
+  display: flex;
+  gap: 8px;
+  cursor: pointer;
+  align-items: center;
+}
+/* Let the path/status text take the remaining width and truncate cleanly
+   instead of pushing the row wider than the list. */
+.ac-row.mock-row .ac-text {
+  flex: 1;
+  min-width: 0;
+}
+.mock-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.mock-row.selected {
+  outline: 1px solid #4c8bf5;
+  background: rgba(76, 139, 245, 0.12);
+}
+.mock-verb {
+  flex: none;
+  min-width: 46px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #cdd9e5;
+}
+.mock-verb.verb-get {
+  color: #7ee787;
+}
+.mock-verb.verb-post,
+.mock-verb.verb-put,
+.mock-verb.verb-patch {
+  color: #f0b232;
+}
+.mock-verb.verb-delete {
+  color: #ff7b72;
+}
+.mock-editor {
+  margin-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 10px;
+}
+.mock-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.mock-status-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.mock-status-input {
+  width: 68px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+  font-size: 13px;
+}
+.mock-quick {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mock-body {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.mock-snippet {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
 }
 .ac-list {
   list-style: none;

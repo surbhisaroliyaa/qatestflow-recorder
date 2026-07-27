@@ -447,6 +447,32 @@ function App(): React.JSX.Element {
   const [aiPromptOpen, setAiPromptOpen] = useState(false)
   const [aiPromptText, setAiPromptText] = useState('')
   const [aiPromptNote, setAiPromptNote] = useState('')
+  // F22 (draft from story / PR diff): the story text, an optional loaded repo diff,
+  // busy/note state, and the generated draft (title + steps) shown for review before
+  // it's inserted into the test.
+  const [draftOpen, setDraftOpen] = useState(false)
+  const [draftStory, setDraftStory] = useState('')
+  const [draftDiff, setDraftDiff] = useState<{ text: string; summary: string } | null>(null)
+  const [draftBusy, setDraftBusy] = useState(false)
+  const [draftNote, setDraftNote] = useState('')
+  const [draftResult, setDraftResult] = useState<{
+    title: string
+    steps: RecorderStep[]
+  } | null>(null)
+  // F35 (Mock Studio): edit a captured API response into a scenario mock (force a
+  // 500, empty a list, flip a flag) and export the Playwright route/fulfill. The
+  // entries come from the last HAR capture; mockSel indexes into mockEntries.
+  const [mockOpen, setMockOpen] = useState(false)
+  const [mockEntries, setMockEntries] = useState<
+    Awaited<ReturnType<typeof window.api.har.mockList>>['entries']
+  >([])
+  const [mockSel, setMockSel] = useState<number | null>(null)
+  const [mockStatus, setMockStatus] = useState('200')
+  const [mockBody, setMockBody] = useState('')
+  const [mockNote, setMockNote] = useState('')
+  // F35: brief "✓ Copied!" flash ON the copy button (the old note rendered at the
+  // bottom of the modal, below the fold, so the click felt dead).
+  const [mockCopied, setMockCopied] = useState(false)
   // F21 (bug → regression test): paste a bug's repro + expected result; AI reproduces
   // it and appends a plain-English assertion of the expected behaviour.
   const [bugPromptOpen, setBugPromptOpen] = useState(false)
@@ -1172,6 +1198,8 @@ function App(): React.JSX.Element {
         acOpen ||
         monitorsOpen || // F32 dashboard
         coverageOpen || // F23 coverage map
+        draftOpen || // F22 draft-from-story
+        mockOpen || // F35 mock studio
         apiPanelIndex !== null
     )
   }, [
@@ -1201,6 +1229,8 @@ function App(): React.JSX.Element {
     acOpen,
     monitorsOpen,
     coverageOpen,
+    draftOpen,
+    mockOpen,
     apiPanelIndex
   ])
 
@@ -3826,6 +3856,134 @@ function App(): React.JSX.Element {
     }
   }
 
+  // F22: pick a local git repo and load its diff as extra context for the draft.
+  const handleLoadDiff = async (): Promise<void> => {
+    const res = await window.api.repo.pickDiff()
+    if (!res) return // user cancelled the folder picker
+    if (!res.ok) {
+      setDraftDiff(null)
+      setDraftNote(`⚠ ${res.note}`)
+      return
+    }
+    setDraftDiff({ text: res.diff, summary: res.summary })
+    setDraftNote(`✓ Loaded diff from ${res.summary} — it’ll steer the draft.`)
+  }
+
+  // F22: turn the story (+ any loaded diff) into a draft test, shown for review.
+  // Unlike F18/F21 there's no page to read, so the modal STAYS open and renders the
+  // draft; the user reviews it and clicks Insert. baseUrl = the address bar, so a
+  // bare navigate path like "/inventory" becomes a full URL.
+  const handleGenerateDraft = async (): Promise<void> => {
+    const story = draftStory.trim()
+    if (!story && !draftDiff) return
+    setDraftBusy(true)
+    setDraftNote('')
+    setDraftResult(null)
+    try {
+      const res = await window.api.ai.draftFromStory(story, draftDiff?.text, urlInput || undefined)
+      if (res === null) {
+        setDraftNote('⚠ The AI is unavailable (needs the Claude CLI). Try again.')
+      } else if (res.steps.length) {
+        setDraftResult({ title: res.title, steps: res.steps as RecorderStep[] })
+        setDraftNote(
+          res.note ? `⚠ ${res.note}` : `✓ Drafted ${res.steps.length} steps — review, then Insert.`
+        )
+      } else {
+        setDraftNote(`⚠ ${res.note || 'The AI produced no draft for that story.'}`)
+      }
+    } finally {
+      setDraftBusy(false)
+    }
+  }
+
+  // F22: append the reviewed draft to the current test, and adopt its title if the
+  // test is still unnamed. Manual (⏸) steps are the ones to ground by recording over.
+  const handleInsertDraft = (): void => {
+    if (!draftResult) return
+    const n = draftResult.steps.length
+    editSteps([...stepsRef.current, ...draftResult.steps])
+    if (draftResult.title && !testName.trim()) setTestName(draftResult.title)
+    setDraftOpen(false)
+    setDraftStory('')
+    setDraftDiff(null)
+    setDraftResult(null)
+    setDraftNote('')
+    setAiToast({
+      tone: 'ok',
+      msg: `✓ Inserted ${n} draft step${n === 1 ? '' : 's'}. Ground the ⏸ actions (record over them), then Replay.`
+    })
+    window.setTimeout(() => setAiToast(null), 7000)
+  }
+
+  // F35 (Mock Studio): pull the mockable API responses from the last capture and
+  // open the studio. Nothing captured → a hint that tells you how to get some.
+  const openMockStudio = async (): Promise<void> => {
+    const res = await window.api.har.mockList()
+    setMockEntries(res.entries)
+    setMockSel(null)
+    setMockStatus('200')
+    setMockBody('')
+    setMockCopied(false)
+    setMockNote(
+      res.available && res.entries.length
+        ? ''
+        : '⚠ No mockable API responses captured. Record a flow with 🌐 Net capture ON, then open Mock Studio.'
+    )
+    setMockOpen(true)
+  }
+  // Load a captured response into the editor (its real status + body as the start).
+  const selectMock = (i: number): void => {
+    const e = mockEntries[i]
+    if (!e) return
+    setMockSel(i)
+    setMockStatus(String(e.status))
+    setMockBody(e.body)
+    setMockNote(
+      e.bodyTruncated
+        ? '⚠ This body was very large and is truncated — the mock uses the shown text.'
+        : ''
+    )
+  }
+  // Build the Playwright route/fulfill for the edited scenario. Pure — recomputed
+  // live as you edit the status/body, so the snippet always matches the editor.
+  const mockSnippet = (): string => {
+    if (mockSel == null) return ''
+    const e = mockEntries[mockSel]
+    if (!e) return ''
+    let pattern = e.url
+    try {
+      const u = new URL(e.url)
+      pattern = '**' + u.pathname + '**' // path-based glob; ignores cache-busting query
+    } catch {
+      /* keep the raw url */
+    }
+    const ct = e.mimeType || 'application/json'
+    const status = Number(mockStatus) || 200
+    const method = e.method.toUpperCase()
+    return [
+      `// Mock: ${method} ${e.url}`,
+      `await page.route('${pattern}', async (route) => {`,
+      // Only fulfil the intended verb; let other methods on the same path pass.
+      method !== 'GET' ? `  if (route.request().method() !== '${method}') return route.fallback()` : null,
+      `  await route.fulfill({`,
+      `    status: ${status},`,
+      `    contentType: ${JSON.stringify(ct)},`,
+      `    body: ${JSON.stringify(mockBody)}`,
+      `  })`,
+      `})`
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }
+  const copyMockSnippet = (): void => {
+    const s = mockSnippet()
+    if (!s) return
+    navigator.clipboard.writeText(s).catch(() => {})
+    // Confirm ON the button so the feedback is where the click is, not below the fold.
+    setMockCopied(true)
+    window.setTimeout(() => setMockCopied(false), 2000)
+  }
+
   // F15: open the visual-snapshot editor (mask regions + freeze animations).
   const openSnapEditor = (i: number): void => {
     setSnapDraft({ ...steps[i] })
@@ -4769,6 +4927,230 @@ function App(): React.JSX.Element {
           >
             🪄 Generate steps
           </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // F22: draft a whole test from a user story (+ optional local PR diff). No live
+  // page, so it stays open and shows the draft for review; actions become ⏸ manual
+  // steps (ground them by recording over) and checks become real ✅ AI assertions.
+  const draftStepIcon = (s: RecorderStep): string =>
+    s.type === 'navigate' ? '🧭' : s.type === 'assert' ? '✅' : '⏸'
+  const draftStepKind = (s: RecorderStep): string =>
+    s.type === 'navigate' ? 'Go to' : s.type === 'assert' ? 'Check' : 'Do (ground this)'
+  const draftModal = draftOpen && (
+    <div className="modal-backdrop" onClick={() => !draftBusy && setDraftOpen(false)}>
+      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">📝 Draft a test — from a story or PR diff</span>
+          <button
+            className="modal-close"
+            onClick={() => setDraftOpen(false)}
+            disabled={draftBusy}
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="api-editor-body">
+          <label className="api-field">
+            <span>User story / acceptance criteria</span>
+            <textarea
+              className="api-body"
+              rows={5}
+              placeholder={
+                'e.g. As a shopper I can sort products by price (low to high) on the inventory page, and the list re-orders so the cheapest item is first.'
+              }
+              value={draftStory}
+              onChange={(e) => setDraftStory(e.target.value)}
+              autoFocus
+            />
+          </label>
+          <div className="draft-diff-row">
+            <button className="modal-btn" onClick={handleLoadDiff} disabled={draftBusy}>
+              📁 {draftDiff ? 'Change PR diff…' : 'Load PR diff from repo…'}
+            </button>
+            {draftDiff && (
+              <span className="draft-diff-chip">
+                {draftDiff.summary}
+                <button
+                  className="draft-diff-clear"
+                  onClick={() => {
+                    setDraftDiff(null)
+                    setDraftNote('')
+                  }}
+                  title="Remove the diff"
+                  aria-label="Remove the diff"
+                >
+                  ✕
+                </button>
+              </span>
+            )}
+          </div>
+          <p className="api-hint">
+            The AI turns your story into a draft: <strong>navigations</strong> and{' '}
+            <strong>✅ checks</strong> run for real; <strong>⏸ actions</strong> are plain-English
+            placeholders you ground by recording over them (there’s no live page to read selectors
+            from yet). Optionally point at the app’s local git repo to steer the draft from its diff.
+          </p>
+          {draftNote && (
+            <p
+              className="api-hint"
+              style={{ color: draftNote.startsWith('✓') ? '#7ee787' : '#f0b232' }}
+            >
+              {draftNote}
+            </p>
+          )}
+          {draftResult && (
+            <>
+              <div className="ac-summary">
+                Draft: <strong>{draftResult.title}</strong> · {draftResult.steps.length} steps
+              </div>
+              <ul className="ac-list">
+                {draftResult.steps.map((s, i) => (
+                  <li key={i} className="ac-row">
+                    <span className="ac-mark">{draftStepIcon(s)}</span>
+                    <span className="ac-text">
+                      <strong>{draftStepKind(s)}</strong>
+                      <span className="mon-sub">
+                        {s.type === 'navigate' ? s.url : s.value}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={() => setDraftOpen(false)} disabled={draftBusy}>
+            Close
+          </button>
+          {draftResult ? (
+            <>
+              <button className="modal-btn" onClick={handleGenerateDraft} disabled={draftBusy}>
+                ↻ Regenerate
+              </button>
+              <button className="modal-btn primary" onClick={handleInsertDraft} disabled={draftBusy}>
+                ＋ Insert {draftResult.steps.length} steps
+              </button>
+            </>
+          ) : (
+            <button
+              className="modal-btn primary"
+              onClick={handleGenerateDraft}
+              disabled={draftBusy || (!draftStory.trim() && !draftDiff)}
+            >
+              {draftBusy ? '✨ Drafting…' : '✨ Generate draft'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+
+  // F35 (Mock Studio): pick a captured API response, edit its status/body into a
+  // scenario (sold-out, a 500, an empty list), and copy the Playwright route/fulfill.
+  const mockModal = mockOpen && (
+    <div className="modal-backdrop" onClick={() => setMockOpen(false)}>
+      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">🎭 Mock Studio — edit a captured response into a scenario</span>
+          <button className="modal-close" onClick={() => setMockOpen(false)} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="api-editor-body">
+          {!mockEntries.length ? (
+            <p className="api-hint">
+              {mockNote ||
+                'No mockable API responses captured yet. Record a flow with 🌐 Net capture ON, then reopen Mock Studio.'}
+            </p>
+          ) : (
+            <>
+              <p className="api-hint">
+                Pick a captured API call, edit its <strong>status</strong> and{' '}
+                <strong>body</strong> into the scenario you want to test (sold-out, a server error,
+                an empty list), then copy the Playwright mock. Paste it into your test to force that
+                exact response — no backend needed.
+              </p>
+              <div className="ac-summary">Captured responses ({mockEntries.length})</div>
+              <ul className="ac-list mock-list">
+                {mockEntries.map((e, i) => (
+                  <li
+                    key={i}
+                    className={`ac-row mock-row${mockSel === i ? ' selected' : ''}`}
+                    onClick={() => selectMock(i)}
+                  >
+                    <span className={`mock-verb verb-${e.method.toLowerCase()}`}>{e.method}</span>
+                    <span className="ac-text">
+                      <strong>{(() => { try { return new URL(e.url).pathname } catch { return e.url } })()}</strong>
+                      <span className="mon-sub">
+                        {e.status} {e.statusText} · {e.mimeType || '—'}
+                        {e.resourceType ? ` · ${e.resourceType}` : ''}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {mockSel != null && mockEntries[mockSel] && (
+                <div className="mock-editor">
+                  <div className="mock-controls">
+                    <label className="mock-status-field">
+                      <span>Status</span>
+                      <input
+                        className="mock-status-input"
+                        value={mockStatus}
+                        onChange={(e) => setMockStatus(e.target.value.replace(/[^\d]/g, ''))}
+                      />
+                    </label>
+                    <div className="mock-quick">
+                      <button className="modal-btn" onClick={() => { setMockStatus('500'); setMockBody('{"error":"Internal Server Error"}') }}>
+                        Force 500
+                      </button>
+                      <button className="modal-btn" onClick={() => { setMockStatus('404'); setMockBody('{"error":"Not Found"}') }}>
+                        Force 404
+                      </button>
+                      <button className="modal-btn" onClick={() => setMockBody('[]')}>
+                        Empty list []
+                      </button>
+                      <button className="modal-btn" onClick={() => { const e = mockEntries[mockSel]; setMockStatus(String(e.status)); setMockBody(e.body) }}>
+                        ↺ Reset
+                      </button>
+                    </div>
+                  </div>
+                  <label className="api-field">
+                    <span>Response body (edit into your scenario)</span>
+                    <textarea
+                      className="api-body mock-body"
+                      rows={7}
+                      value={mockBody}
+                      onChange={(e) => setMockBody(e.target.value)}
+                      spellCheck={false}
+                    />
+                  </label>
+                  <div className="ac-summary">Playwright mock (paste into your test)</div>
+                  <pre className="mock-snippet"><code>{mockSnippet()}</code></pre>
+                </div>
+              )}
+            </>
+          )}
+          {mockNote && mockEntries.length > 0 && (
+            <p className="api-hint" style={{ color: mockNote.startsWith('✓') ? '#7ee787' : '#f0b232' }}>
+              {mockNote}
+            </p>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={() => setMockOpen(false)}>
+            Close
+          </button>
+          {mockSel != null && (
+            <button className="modal-btn primary" onClick={copyMockSnippet}>
+              {mockCopied ? '✓ Copied!' : '📋 Copy Playwright mock'}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -5989,148 +6371,196 @@ function App(): React.JSX.Element {
           browser can be read without flashing over it). Same top-right toast. */}
       {aiToast && <div className={`download-toast ${aiToast.tone}`}>{aiToast.msg}</div>}
       <div className="chrome">
-        <button className="nav-btn" onClick={handleBack} title="Back" aria-label="Back">
-          ←
-        </button>
-        <button
-          className="nav-btn"
-          onClick={() => window.api.browser.goForward()}
-          title="Forward"
-          aria-label="Forward"
-        >
-          →
-        </button>
-        <button
-          className="nav-btn"
-          onClick={() => window.api.browser.reload()}
-          title="Reload"
-          aria-label="Reload"
-        >
-          ⟳
-        </button>
-        <button className="nav-btn" onClick={handleHome} title="Home" aria-label="Home">
-          ⌂
-        </button>
-        <button
-          className="nav-btn"
-          onClick={() => window.api.browser.clearData()}
-          title="Clear cookies & site data (log out, empty cart) and reload"
-          aria-label="Clear browser data"
-        >
-          🧹
-        </button>
-        <form className="url-form" onSubmit={handleSubmit}>
-          <input
-            className="url-input"
-            type="text"
-            value={urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-            placeholder="Enter URL or domain..."
-            spellCheck={false}
-          />
-          <button type="submit" className="go-btn">
-            Go
+        {/* Row 1 — the browser: navigation, URL bar, and the primary Record action. */}
+        <div className="chrome-row browser">
+          <button className="nav-btn" onClick={handleBack} title="Back" aria-label="Back">
+            ←
           </button>
-        </form>
-        <button
-          className={`check-btn${isPicking ? ' picking' : ''}`}
-          onClick={() => (isPicking ? handleCancelPick() : handleStartPick(null))}
-          disabled={isReplaying}
-          title={
-            isPicking ? 'Cancel picking (or press Esc)' : 'Add a check: pick an element on the page'
-          }
-        >
-          ✓ {isPicking ? 'Picking…' : 'Check'}
-        </button>
-        {/* F18: type an intent, get draft steps grounded to the current page. */}
-        <button
-          className="snapshot-btn"
-          onClick={() => {
-            setAiPromptText('')
-            setAiPromptNote('')
-            setAiPromptOpen(true)
-          }}
-          disabled={isReplaying || isPicking}
-          title="AI step: describe what to do in plain English (e.g. 'log in as standard_user') and get draft steps for the current page"
-        >
-          🪄 AI step
-        </button>
-        {/* F21: paste a bug's repro + expected → a regression test (repro + a check). */}
-        <button
-          className="snapshot-btn"
-          onClick={() => {
-            setBugReproText('')
-            setBugExpectedText('')
-            setBugPromptOpen(true)
-          }}
-          disabled={isReplaying || isPicking}
-          title="Turn a bug's repro + expected result into steps + a smart AI check for the page you're on. Covers this one page — for a multi-page bug, run it on each page."
-        >
-          🐛 Bug check (this page)
-        </button>
-        {/* Day 19: capture the current page as a visual baseline. */}
-        <button
-          className="snapshot-btn"
-          onClick={() => window.api.recorder.snapshot()}
-          disabled={isReplaying || isPicking}
-          title="Visual snapshot: capture how the page looks now as a baseline; replay flags any visual change"
-        >
-          📸 Snapshot
-        </button>
-        {/* F13: scan the current page for WCAG A/AA accessibility violations. */}
-        <button
-          className="a11y-btn"
-          onClick={handleA11yScan}
-          disabled={isReplaying || isPicking || a11yScanning}
-          title="Accessibility scan: check this page for WCAG A/AA violations (missing labels, contrast, ARIA, keyboard traps)"
-        >
-          ♿ {a11yScanning ? 'Scanning…' : 'A11y'}
-        </button>
-        {/* F14: measure the current page's Core Web Vitals (LCP, CLS, …). */}
-        <button
-          className="perf-btn"
-          onClick={handleMeasurePerf}
-          disabled={isReplaying || isPicking || perfMeasuring}
-          title="Performance: measure this page's Core Web Vitals (load speed, layout stability)"
-        >
-          ⚡ {perfMeasuring ? 'Measuring…' : 'Perf'}
-        </button>
-        {/* F23: crawl the app from here and overlay tested vs untested pages. */}
-        <button
-          className="a11y-btn"
-          onClick={handleCoverageCrawl}
-          disabled={isReplaying || isPicking || isRecording || coverageRun?.running}
-          title="Coverage map: crawl the app from this page and show which pages your tests cover — untested pages are gaps. It walks the links (moving the browser around) then returns you here."
-        >
-          🗺️ {coverageRun?.running ? 'Crawling…' : 'Coverage'}
-        </button>
-        {/* F1: capture network into a HAR while recording (opt-in flake-killer). */}
-        <button
-          className={`har-btn${captureNetwork ? ' on' : ''}`}
-          onClick={() => setCaptureNetwork((v) => !v)}
-          disabled={isReplaying}
-          title={
-            captureNetwork
-              ? 'Network capture is ON — while recording, API responses are saved to a standard .har file with the test (openable in Chrome DevTools; usable with Playwright routeFromHAR). Click to turn off.'
-              : 'Capture network (HAR): while recording, save API responses to a .har file with the test — a standard archive for deterministic replay. Click to turn on.'
-          }
-        >
-          🌐 {harCount > 0 ? `Net · ${harCount}` : captureNetwork ? 'Net ON' : 'Net'}
-        </button>
-        <button
-          className={`record-btn${isRecording ? ' recording' : ''}`}
-          onClick={handleRecordToggle}
-          title={
-            isRecording
-              ? 'Stop recording'
-              : steps.length > 0
-                ? 'Resume recording — new steps are added to the end'
-                : 'Start recording'
-          }
-        >
-          <span className="record-dot" />
-          {isRecording ? 'Stop' : steps.length > 0 ? 'Resume' : 'Record'}
-        </button>
+          <button
+            className="nav-btn"
+            onClick={() => window.api.browser.goForward()}
+            title="Forward"
+            aria-label="Forward"
+          >
+            →
+          </button>
+          <button
+            className="nav-btn"
+            onClick={() => window.api.browser.reload()}
+            title="Reload"
+            aria-label="Reload"
+          >
+            ⟳
+          </button>
+          <button className="nav-btn" onClick={handleHome} title="Home" aria-label="Home">
+            ⌂
+          </button>
+          <button
+            className="nav-btn"
+            onClick={() => window.api.browser.clearData()}
+            title="Clear cookies & site data (log out, empty cart) and reload"
+            aria-label="Clear browser data"
+          >
+            🧹
+          </button>
+          <form className="url-form" onSubmit={handleSubmit}>
+            <input
+              className="url-input"
+              type="text"
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+              placeholder="Enter URL or domain..."
+              spellCheck={false}
+            />
+            <button type="submit" className="go-btn">
+              Go
+            </button>
+          </form>
+          <button
+            className={`record-btn${isRecording ? ' recording' : ''}`}
+            onClick={handleRecordToggle}
+            title={
+              isRecording
+                ? 'Stop recording'
+                : steps.length > 0
+                  ? 'Resume recording — new steps are added to the end'
+                  : 'Start recording'
+            }
+          >
+            <span className="record-dot" />
+            {isRecording ? 'Stop' : steps.length > 0 ? 'Resume' : 'Record'}
+          </button>
+        </div>
+
+        {/* Row 2 — the QA tool belt, grouped by job: Author · Analyze · Network. */}
+        <div className="chrome-row tools">
+          {/* Author / capture a test. */}
+          <div className="tool-group">
+            <button
+              className={`check-btn${isPicking ? ' picking' : ''}`}
+              onClick={() => (isPicking ? handleCancelPick() : handleStartPick(null))}
+              disabled={isReplaying}
+              title={
+                isPicking
+                  ? 'Cancel picking (or press Esc)'
+                  : 'Add a check: pick an element on the page'
+              }
+            >
+              ✓ {isPicking ? 'Picking…' : 'Check'}
+            </button>
+            {/* F18: type an intent, get draft steps grounded to the current page. */}
+            <button
+              className="snapshot-btn"
+              onClick={() => {
+                setAiPromptText('')
+                setAiPromptNote('')
+                setAiPromptOpen(true)
+              }}
+              disabled={isReplaying || isPicking}
+              title="AI step: describe what to do in plain English (e.g. 'log in as standard_user') and get draft steps for the current page"
+            >
+              🪄 AI step
+            </button>
+            {/* F22: turn a user story / PR diff into a draft test (no page needed). */}
+            <button
+              className="snapshot-btn"
+              onClick={() => {
+                setDraftStory('')
+                setDraftDiff(null)
+                setDraftResult(null)
+                setDraftNote('')
+                setDraftOpen(true)
+              }}
+              disabled={isReplaying || isPicking}
+              title="Draft a whole test from a user story (or a PR diff from the app's local repo): navigations + real AI checks, with plain-English actions you ground by recording over them."
+            >
+              📝 Draft
+            </button>
+            {/* Day 19: capture the current page as a visual baseline. */}
+            <button
+              className="snapshot-btn"
+              onClick={() => window.api.recorder.snapshot()}
+              disabled={isReplaying || isPicking}
+              title="Visual snapshot: capture how the page looks now as a baseline; replay flags any visual change"
+            >
+              📸 Snapshot
+            </button>
+          </div>
+
+          {/* Analyze / inspect the current page. */}
+          <div className="tool-group">
+            {/* F21: paste a bug's repro + expected → a regression test (repro + a check). */}
+            <button
+              className="snapshot-btn"
+              onClick={() => {
+                setBugReproText('')
+                setBugExpectedText('')
+                setBugPromptOpen(true)
+              }}
+              disabled={isReplaying || isPicking}
+              title="Turn a bug's repro + expected result into steps + a smart AI check for the page you're on. Covers this one page — for a multi-page bug, run it on each page."
+            >
+              🐛 Bug check
+            </button>
+            {/* F13: scan the current page for WCAG A/AA accessibility violations. */}
+            <button
+              className="a11y-btn"
+              onClick={handleA11yScan}
+              disabled={isReplaying || isPicking || a11yScanning}
+              title="Accessibility scan: check this page for WCAG A/AA violations (missing labels, contrast, ARIA, keyboard traps)"
+            >
+              ♿ {a11yScanning ? 'Scanning…' : 'A11y'}
+            </button>
+            {/* F14: measure the current page's Core Web Vitals (LCP, CLS, …). */}
+            <button
+              className="perf-btn"
+              onClick={handleMeasurePerf}
+              disabled={isReplaying || isPicking || perfMeasuring}
+              title="Performance: measure this page's Core Web Vitals (load speed, layout stability)"
+            >
+              ⚡ {perfMeasuring ? 'Measuring…' : 'Perf'}
+            </button>
+            {/* F23: crawl the app from here and overlay tested vs untested pages. */}
+            <button
+              className="a11y-btn"
+              onClick={handleCoverageCrawl}
+              disabled={isReplaying || isPicking || isRecording || coverageRun?.running}
+              title="Coverage map: crawl the app from this page and show which pages your tests cover — untested pages are gaps. It walks the links (moving the browser around) then returns you here."
+            >
+              🗺️ {coverageRun?.running ? 'Crawling…' : 'Coverage'}
+            </button>
+          </div>
+
+          {/* Network: capture responses, then mock them. */}
+          <div className="tool-group">
+            {/* F1: capture network into a HAR while recording (opt-in flake-killer). */}
+            <button
+              className={`har-btn${captureNetwork ? ' on' : ''}`}
+              onClick={() => setCaptureNetwork((v) => !v)}
+              disabled={isReplaying}
+              title={
+                captureNetwork
+                  ? 'Network capture is ON — while recording, API responses are saved to a standard .har file with the test (openable in Chrome DevTools; usable with Playwright routeFromHAR). Click to turn off.'
+                  : 'Capture network (HAR): while recording, save API responses to a .har file with the test — a standard archive for deterministic replay. Click to turn on.'
+              }
+            >
+              🌐 {harCount > 0 ? `Net · ${harCount}` : captureNetwork ? 'Net ON' : 'Net'}
+            </button>
+            {/* F35: turn a captured response into a scenario mock + Playwright route. */}
+            <button
+              className="snapshot-btn"
+              onClick={openMockStudio}
+              disabled={isReplaying || isPicking || harCount === 0}
+              title={
+                harCount === 0
+                  ? 'Mock Studio: record a flow with 🌐 Net capture ON first, then edit a captured response into a scenario (sold-out, a 500, an empty list) and export the Playwright mock.'
+                  : 'Mock Studio: edit a captured API response into a scenario (sold-out, a 500, an empty list) and export the Playwright route/fulfill.'
+              }
+            >
+              🎭 Mock
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* F1: HAR status — a captured/linked archive, and the last run's usage. */}
@@ -9006,6 +9436,8 @@ function App(): React.JSX.Element {
 
       {/* F18: the AI-prompt step composer. */}
       {aiPromptModal}
+      {draftModal}
+      {mockModal}
       {bugPromptModal}
       {/* F27: name the data a step creates (replaces window.prompt, which
           Electron does not implement — it silently returned null). */}
