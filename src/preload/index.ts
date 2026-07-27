@@ -133,7 +133,8 @@ const api = {
       storageState?: string,
       traceOpts?: unknown,
       harFile?: string,
-      chaos?: { slowNetwork?: boolean; locale?: string }
+      chaos?: { slowNetwork?: boolean; locale?: string },
+      authorChecks?: boolean // F21b: pause per page to add checks along the ride
     ): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
       ipcRenderer.invoke(
         'recorder:replay',
@@ -142,7 +143,8 @@ const api = {
         storageState,
         traceOpts,
         harFile,
-        chaos
+        chaos,
+        authorChecks
       ),
 
     // === Recovery (Day 12) ===
@@ -173,6 +175,16 @@ const api = {
     },
     // F30: the human finished the manual step — resume the run.
     manualContinue: (): void => ipcRenderer.send('recorder:manual-continue'),
+
+    // F21b: the "add checks along a replay" ride paused on a page — {afterIndex,url}.
+    onCheckOffer: (callback: (info: unknown) => void): (() => void) => {
+      const listener = (_event: unknown, info: unknown): void => callback(info)
+      ipcRenderer.on('recorder:check-offer', listener)
+      return () => ipcRenderer.removeListener('recorder:check-offer', listener)
+    },
+    // F21b: answer the ride pause — {} to continue, {stop:true} to end the ride.
+    checkOfferRespond: (resp: { stop?: boolean }): void =>
+      ipcRenderer.send('recorder:check-offer-respond', resp),
 
     // Subscribe to per-step replay progress. Returns an unsubscribe fn.
     onReplayProgress: (callback: (progress: unknown) => void): (() => void) => {
@@ -263,7 +275,10 @@ const api = {
   },
   notify: {
     show: (title: string, body: string): Promise<void> =>
-      ipcRenderer.invoke('notify:show', title, body)
+      ipcRenderer.invoke('notify:show', title, body),
+    // F32b: POST a monitor failure to a Slack/Discord/Teams webhook.
+    webhook: (url: string, title: string, body: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('notify:webhook', url, title, body)
   },
 
   // === Coverage gap map (F23) ===
@@ -348,6 +363,21 @@ const api = {
       summary: string
       note: string
     } | null> => ipcRenderer.invoke('repo:pickDiff')
+  },
+  // F34: push a failure's bug report to Jira as a new issue, or open Jira's
+  // create page in the browser (the no-token, paste-the-ticket path).
+  jira: {
+    createIssue: (cfg: {
+      baseUrl: string
+      email: string
+      apiToken: string
+      projectKey: string
+      summary: string
+      description: string
+      issueType?: string
+    }): Promise<{ ok: boolean; key?: string; url?: string; error?: string }> =>
+      ipcRenderer.invoke('jira:createIssue', cfg),
+    openCreate: (baseUrl: string): Promise<void> => ipcRenderer.invoke('jira:openCreate', baseUrl)
   },
   // F31: acceptance-criteria checklist — persist the ACs + map them to tests.
   ac: {

@@ -7,7 +7,7 @@ import {
   generateEdgeSuite,
   stepText
 } from './playwrightExport'
-import { generateBugReport, bugReportFileName } from './bugReport'
+import { generateBugReport, bugReportFileName, jiraSummary } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
 import {
   retargetSteps,
@@ -359,6 +359,8 @@ function App(): React.JSX.Element {
   )
   const [monitorsOpen, setMonitorsOpen] = useState(false)
   const monitorBusyRef = useRef(false)
+  // F32b: optional Slack/Discord/Teams webhook — alerts reach you off-machine.
+  const [monWebhook, setMonWebhook] = useState(() => localStorage.getItem('monitor.webhookUrl') || '')
   const [monTestSel, setMonTestSel] = useState('') // fileName to promote
   const [monInterval, setMonInterval] = useState(15) // minutes
   const [monAlert, setMonAlert] = useState(true)
@@ -680,12 +682,35 @@ function App(): React.JSX.Element {
   const [lastEvidence, setLastEvidence] = useState<FailureEvidence | null>(null)
   const [bugReport, setBugReport] = useState<string | null>(null)
   const [reportSavedPath, setReportSavedPath] = useState<string | null>(null)
+  // F34: Jira ticket modal. Site/email/project persist (convenience); the API
+  // token is entered per session and never stored (it's a credential).
+  const [jiraOpen, setJiraOpen] = useState(false)
+  const [jiraSummaryText, setJiraSummaryText] = useState('')
+  const [jiraDescText, setJiraDescText] = useState('')
+  const [jiraBaseUrl, setJiraBaseUrl] = useState(() => localStorage.getItem('jira.baseUrl') || '')
+  const [jiraEmail, setJiraEmail] = useState(() => localStorage.getItem('jira.email') || '')
+  const [jiraProject, setJiraProject] = useState(() => localStorage.getItem('jira.project') || '')
+  const [jiraToken, setJiraToken] = useState('')
+  const [jiraBusy, setJiraBusy] = useState(false)
+  const [jiraNote, setJiraNote] = useState('')
 
   // Day 12 — recovery. Non-null while a replay is PAUSED at a failed step
   // (main's loop is holding for our decision: retry / re-pick / skip / stop).
   const [recovery, setRecovery] = useState<ReplayPaused | null>(null)
   // F30: replay is paused at a manual (wait-for-human) step — its instruction.
   const [manualPause, setManualPause] = useState<{ index: number; message: string } | null>(null)
+  // F21b: the "add checks along a replay" ride paused on a page. You can add
+  // MULTIPLE checks per page; they're placed BEFORE the page navigates away (so
+  // they verify the page's final state, after its actions). `pendingClaimsRef`
+  // holds the current page's checks until we know where the page ends (the next
+  // navigation, or the run's end); `rideChecksRef` is the positioned result,
+  // spliced into the test at the ride's end so live index-shuffling can't corrupt it.
+  const [checkOffer, setCheckOffer] = useState<{ afterIndex: number; url: string } | null>(null)
+  const [rideClaim, setRideClaim] = useState('')
+  const [ridePending, setRidePending] = useState<string[]>([]) // current page's checks, for display
+  const pendingClaimsRef = useRef<string[]>([])
+  const rideChecksRef = useRef<{ afterIndex: number; claim: string }[]>([])
+  const rideListLenRef = useRef(0) // run length, so the LAST page's checks land at the end
   // Which step a re-pick is healing (null = the picker is for an assertion).
   const [repickIndex, setRepickIndex] = useState<number | null>(null)
   // Steps bypassed via Skip THIS run (amber rows) — cleared on the next run.
@@ -1200,6 +1225,7 @@ function App(): React.JSX.Element {
         coverageOpen || // F23 coverage map
         draftOpen || // F22 draft-from-story
         mockOpen || // F35 mock studio
+        jiraOpen || // F34 Jira ticket
         apiPanelIndex !== null
     )
   }, [
@@ -1231,6 +1257,7 @@ function App(): React.JSX.Element {
     coverageOpen,
     draftOpen,
     mockOpen,
+    jiraOpen,
     apiPanelIndex
   ])
 
@@ -1275,6 +1302,26 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const unsubscribe = window.api.recorder.onManualPause((info) => {
       setManualPause(info as { index: number; message: string })
+    })
+    return unsubscribe
+  }, [])
+
+  // F21b: the ride landed on a new page and is holding. First finalize the page
+  // we just LEFT — its checks go right before the step that navigated here (so
+  // they run after that page's actions, before it leaves). Then open the offer
+  // for the new page (you can add several before Continue).
+  useEffect(() => {
+    const unsubscribe = window.api.recorder.onCheckOffer((info) => {
+      const offer = info as { afterIndex: number; url: string }
+      const prev = pendingClaimsRef.current
+      if (prev.length) {
+        const at = Math.max(0, offer.afterIndex - 1)
+        for (const claim of prev) rideChecksRef.current.push({ afterIndex: at, claim })
+      }
+      pendingClaimsRef.current = []
+      setRidePending([])
+      setRideClaim('')
+      setCheckOffer(offer)
     })
     return unsubscribe
   }, [])
@@ -1549,7 +1596,9 @@ function App(): React.JSX.Element {
     traceOverride?: 'always' | 'failure' | 'off',
     // F28: replay the whole flow under this browser locale (Accept-Language +
     // Emulation.setLocaleOverride), for the localization sweep.
-    localeOverride?: string
+    localeOverride?: string,
+    // F21b: ride the replay and pause per page to add a grounded check there.
+    authorChecks = false
   ): Promise<{
     ok: boolean
     failedAt?: number
@@ -1608,7 +1657,8 @@ function App(): React.JSX.Element {
         // F29 slow-net + F28 locale override travel in the same run-options arg.
         chaosSlowNet || localeOverride
           ? { slowNetwork: chaosSlowNet || undefined, locale: localeOverride }
-          : undefined
+          : undefined,
+        authorChecks // F21b
       )
     } catch (err) {
       result = { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -1805,6 +1855,90 @@ function App(): React.JSX.Element {
     // F25: resolve {{env:}} creds + re-point navigations at the active env (if any).
     const list = await applyEnv(flat, fromBase, noEnv)
     await runOnce(list, testFileName, true)
+  }
+
+  // F21b: "Add checks along a replay" — ride the recorded flow and, on each page
+  // it lands on, offer to drop a plain-English (nl) check for that page. Unlike
+  // 🐛 Bug check (one page at a time), this walks the WHOLE flow once and lets you
+  // add a check per page with no re-typing. Checks are collected during the ride
+  // and spliced into the test at the end, so the live run's indices never shift.
+  const handleReplayAlongChecks = async (): Promise<void> => {
+    if (isDataDriven && dataRows.length > 0) {
+      setAiToast({ tone: 'warn', msg: 'Ride-checks runs a single pass — use plain ▶ Replay for a data matrix.' })
+      window.setTimeout(() => setAiToast(null), 6000)
+      return
+    }
+    const { flat, map } = await buildRunPlan(steps)
+    runPlanRef.current = map
+    const fromBase = baseURL || deriveBaseURL(flat)
+    const choice = await confirmRetarget(fromBase, flat)
+    if (choice === 'cancel') return
+    const list = await applyEnv(flat, fromBase, choice === 'noenv')
+    rideChecksRef.current = []
+    pendingClaimsRef.current = []
+    rideListLenRef.current = list.length
+    setRidePending([])
+    setCheckOffer(null)
+    await runOnce(list, testFileName, true, undefined, undefined, false, undefined, undefined, true)
+    // The LAST page never fires a "next navigation", so finalize its pending
+    // checks at the end of the flow.
+    const tail = pendingClaimsRef.current
+    if (tail.length) {
+      const at = Math.max(0, rideListLenRef.current - 1)
+      for (const claim of tail) rideChecksRef.current.push({ afterIndex: at, claim })
+    }
+    pendingClaimsRef.current = []
+    const collected = rideChecksRef.current
+    rideChecksRef.current = []
+    setRidePending([])
+    setCheckOffer(null)
+    if (!collected.length) {
+      setAiToast({ tone: 'warn', msg: 'Ride finished — no checks were added.' })
+      window.setTimeout(() => setAiToast(null), 6000)
+      return
+    }
+    // Splice descending so an earlier insert doesn't shift a later target row.
+    const next = [...stepsRef.current]
+    for (const c of [...collected].sort((a, b) => b.afterIndex - a.afterIndex)) {
+      const at = toDisplayIdx(c.afterIndex) + 1
+      next.splice(at, 0, { type: 'assert', assertKind: 'nl', value: c.claim } as RecorderStep)
+    }
+    editSteps(next)
+    setAiToast({
+      tone: 'ok',
+      msg: `✓ Added ${collected.length} check${collected.length === 1 ? '' : 's'} across the ride. Review + ▶ Replay to verify.`
+    })
+    window.setTimeout(() => setAiToast(null), 7000)
+  }
+
+  // F21b: add ANOTHER check for the current page — buffered, not positioned yet
+  // (its spot depends on where this page ends). Stays on the pause so you can
+  // add more; ▶ Continue moves on.
+  const handleRideAddCheck = (): void => {
+    const claim = rideClaim.trim()
+    if (!claim) return
+    pendingClaimsRef.current = [...pendingClaimsRef.current, claim]
+    setRidePending(pendingClaimsRef.current)
+    setRideClaim('')
+  }
+  // F21b: done adding for this page — resume the ride to the next page.
+  const handleRideContinue = (): void => {
+    setCheckOffer(null)
+    setRideClaim('')
+    window.api.recorder.checkOfferRespond({})
+  }
+  // F21b: stop the ride here. Keep the current page's checks (place them right
+  // after this page's landing step, since we never reach a "next navigation").
+  const handleRideStop = (): void => {
+    const pending = pendingClaimsRef.current
+    if (checkOffer && pending.length) {
+      for (const claim of pending) rideChecksRef.current.push({ afterIndex: checkOffer.afterIndex, claim })
+    }
+    pendingClaimsRef.current = []
+    setRidePending([])
+    setCheckOffer(null)
+    setRideClaim('')
+    window.api.recorder.checkOfferRespond({ stop: true })
   }
 
   // === Day 20: data-driven runs ======================================
@@ -2573,6 +2707,52 @@ function App(): React.JSX.Element {
     if (!bugReport || !lastEvidence) return
     const path = await window.api.translator.saveReport(bugReport, bugReportFileName(lastEvidence))
     if (path) setReportSavedPath(path)
+  }
+
+  // F34: open the Jira ticket modal, pre-filled from THIS failure — the summary
+  // is the one-line title, the description is the whole bug report.
+  const handleOpenJira = (): void => {
+    if (!lastEvidence) return
+    setJiraSummaryText(jiraSummary(lastEvidence))
+    setJiraDescText(bugReport ?? generateBugReport(lastEvidence, analysis))
+    setJiraNote('')
+    setJiraOpen(true)
+  }
+  // F34: push the ticket to Jira via REST. Persists site/email/project (not token).
+  const handleJiraCreate = async (): Promise<void> => {
+    if (!jiraBaseUrl.trim() || !jiraEmail.trim() || !jiraToken.trim() || !jiraProject.trim()) {
+      setJiraNote('⚠ Fill in the Jira site, email, API token, and project key first.')
+      return
+    }
+    setJiraBusy(true)
+    setJiraNote('Creating the issue in Jira…')
+    localStorage.setItem('jira.baseUrl', jiraBaseUrl.trim())
+    localStorage.setItem('jira.email', jiraEmail.trim())
+    localStorage.setItem('jira.project', jiraProject.trim())
+    try {
+      const res = await window.api.jira.createIssue({
+        baseUrl: jiraBaseUrl.trim(),
+        email: jiraEmail.trim(),
+        apiToken: jiraToken.trim(),
+        projectKey: jiraProject.trim(),
+        summary: jiraSummaryText,
+        description: jiraDescText
+      })
+      setJiraNote(res.ok ? `✓ Created ${res.key} — ${res.url}` : `⚠ ${res.error || 'Jira rejected the request.'}`)
+    } finally {
+      setJiraBusy(false)
+    }
+  }
+  // F34: the no-token path — copy the ticket + open Jira's create page in the browser.
+  const handleJiraCopyOpen = async (): Promise<void> => {
+    await navigator.clipboard.writeText(`${jiraSummaryText}\n\n${jiraDescText}`).catch(() => {})
+    if (jiraBaseUrl.trim()) {
+      localStorage.setItem('jira.baseUrl', jiraBaseUrl.trim())
+      await window.api.jira.openCreate(jiraBaseUrl.trim())
+      setJiraNote('✓ Ticket copied. Opened Jira’s create page — paste it into the description.')
+    } else {
+      setJiraNote('✓ Ticket copied. Add your Jira site URL to open the create page, or paste it into Jira yourself.')
+    }
   }
 
 
@@ -3353,79 +3533,128 @@ function App(): React.JSX.Element {
       setMonRunningId(null)
     }
   }
+  // F32b: fire a monitor's alert — a desktop notification AND, if configured, a
+  // POST to a Slack/Discord/Teams incoming webhook (a real second alert channel
+  // beyond the desktop, so a failure reaches you even away from the machine).
+  const fireMonitorAlert = async (
+    mon: { name: string },
+    run: { status: 'passed' | 'failed' | 'error'; detail?: string }
+  ): Promise<void> => {
+    const title =
+      run.status === 'failed' ? `Monitor failed: ${mon.name}` : `Monitor couldn't run: ${mon.name}`
+    const body = run.detail || 'A monitored test just failed.'
+    // In-app alert: a visible toast INSIDE the app — the reliable channel, since
+    // Windows desktop toasts only show for a packaged/installed app, not in dev.
+    // Kept up longer than a normal toast so a background failure isn't missed.
+    const short = body.length > 160 ? body.slice(0, 159) + '…' : body
+    setAiToast({ tone: 'fail', msg: `🔔 ${title} — ${short}` })
+    window.setTimeout(() => setAiToast(null), 12000)
+    // Desktop toast (fires in a packaged build) + the optional webhook.
+    window.api.notify.show(title, body)
+    const hook = (localStorage.getItem('monitor.webhookUrl') || '').trim()
+    if (hook) await window.api.notify.webhook(hook, title, body).catch(() => {})
+  }
+
+  // F32b: retry a FAILING run before alerting — a single transient blip (a slow
+  // page, a one-off network hiccup) shouldn't wake you. Up to 3 attempts total;
+  // a pass on any attempt clears it. A setup 'error' (missing test / no Playwright)
+  // is NOT retried — re-running won't fix it.
+  const MONITOR_MAX_ATTEMPTS = 3
   const doMonitorRun = async (
     mon: Awaited<ReturnType<typeof window.api.monitors.list>>[number]
   ): Promise<void> => {
-    const at = new Date().toISOString()
-    let run: { at: string; status: 'passed' | 'failed' | 'error'; detail?: string }
     const test = await window.api.library.load(mon.fileName)
     if (!test) {
-      run = { at, status: 'error', detail: 'The saved test no longer exists.' }
-    } else {
-      try {
-        const flat = await expandForRun(test.steps)
-        // A data-driven test carries {{column}} tokens (e.g. {{username}}) that only
-        // resolve when the DATA TABLE is handed to the generator — without it the
-        // exported spec types nothing and login fails. (Same trap as the F28 fix.)
-        const cols = dataColumns(flat)
-        const rows = test.dataRows ?? []
-        const code = generatePlaywrightTest(flat, {
-          name: test.name || 'monitored flow',
-          baseURL: test.baseURL || deriveBaseURL(flat),
-          viewport: test.viewport,
-          data: cols.length > 0 && rows.length > 0 ? { columns: cols, rows } : undefined
-        })
-        // F32: run against the monitor's PINNED environment (its baseURL + vars),
-        // NOT the global "Run against" selection — so a monitor's target is stable.
-        // Always pass an explicit override (possibly {}) so the active env can't
-        // silently retarget it.
-        const pinned = mon.envId
-          ? envState.environments.find((e) => e.id === mon.envId)
-          : null
-        const envVars: Record<string, string> = {}
-        if (pinned) {
-          for (const v of pinned.vars) if (v.name) envVars[v.name] = v.value
-          if (pinned.baseURL) envVars.BASE_URL = pinned.baseURL
-        }
-        // The export blanks secret fields to process.env.PASSWORD so a SHARED test
-        // never leaks a password. But a monitor re-runs YOUR OWN saved test on YOUR
-        // machine — the secret is already on disk — so use it, matching what the
-        // individual replay does. A pinned env's PASSWORD still takes precedence.
-        if (envVars.PASSWORD === undefined) {
-          const secretStep = flat.find(
-            (s) => s.type === 'type' && s.secret && s.value && !s.value.includes('{{')
-          )
-          if (secretStep?.value) envVars.PASSWORD = secretStep.value
-        }
-        // F32: a test that "starts logged in" carries a saved session — hand it to
-        // the headless run so it isn't bounced to the login page (→ timeout).
-        const res = await window.api.xbrowser.run(
-          code,
-          ['chromium'],
-          envVars,
-          test.storageState || undefined
+      const run = {
+        at: new Date().toISOString(),
+        status: 'error' as const,
+        detail: 'The saved test no longer exists.'
+      }
+      setMonitors(await window.api.monitors.recordRun(mon.id, run))
+      if (mon.alertOnFail) await fireMonitorAlert(mon, run)
+      return
+    }
+    // Build the run inputs ONCE — they don't change between retries.
+    let code: string
+    let session: string | undefined
+    const envVars: Record<string, string> = {}
+    try {
+      const flat = await expandForRun(test.steps)
+      // A data-driven test carries {{column}} tokens that only resolve when the
+      // DATA TABLE is handed to the generator (same trap as the F28 fix).
+      const cols = dataColumns(flat)
+      const rows = test.dataRows ?? []
+      code = generatePlaywrightTest(flat, {
+        name: test.name || 'monitored flow',
+        baseURL: test.baseURL || deriveBaseURL(flat),
+        viewport: test.viewport,
+        data: cols.length > 0 && rows.length > 0 ? { columns: cols, rows } : undefined
+      })
+      // F32: run against the monitor's PINNED environment, not the global "Run
+      // against" — always an explicit override so the active env can't retarget it.
+      const pinned = mon.envId ? envState.environments.find((e) => e.id === mon.envId) : null
+      if (pinned) {
+        for (const v of pinned.vars) if (v.name) envVars[v.name] = v.value
+        if (pinned.baseURL) envVars.BASE_URL = pinned.baseURL
+      }
+      // A monitor re-runs YOUR OWN saved test on YOUR machine — the secret is on
+      // disk already — so use it (a pinned env's PASSWORD still wins).
+      if (envVars.PASSWORD === undefined) {
+        const secretStep = flat.find(
+          (s) => s.type === 'type' && s.secret && s.value && !s.value.includes('{{')
         )
-        if (!res.installed)
+        if (secretStep?.value) envVars.PASSWORD = secretStep.value
+      }
+      session = test.storageState || undefined
+    } catch (e) {
+      const run = {
+        at: new Date().toISOString(),
+        status: 'error' as const,
+        detail: e instanceof Error ? e.message : String(e)
+      }
+      setMonitors(await window.api.monitors.recordRun(mon.id, run))
+      if (mon.alertOnFail) await fireMonitorAlert(mon, run)
+      return
+    }
+    let run: { at: string; status: 'passed' | 'failed' | 'error'; detail?: string } = {
+      at: new Date().toISOString(),
+      status: 'error'
+    }
+    let attempts = 0
+    for (let a = 0; a < MONITOR_MAX_ATTEMPTS; a++) {
+      attempts = a + 1
+      const at = new Date().toISOString()
+      try {
+        const res = await window.api.xbrowser.run(code, ['chromium'], envVars, session)
+        if (!res.installed) {
           run = { at, status: 'error', detail: 'Playwright is not installed — monitor runs need it.' }
-        else if (!res.ran)
-          run = { at, status: 'error', detail: res.message || 'The run did not start.' }
-        else {
-          const bad = res.results.find((r) => !r.ok)
-          run = bad
-            ? { at, status: 'failed', detail: bad.error || bad.failingTest || 'A step failed.' }
-            : { at, status: 'passed' }
+          break
         }
+        if (!res.ran) {
+          run = { at, status: 'error', detail: res.message || 'The run did not start.' }
+          break
+        }
+        const bad = res.results.find((r) => !r.ok)
+        if (!bad) {
+          run = {
+            at,
+            status: 'passed',
+            detail: a > 0 ? `Passed on attempt ${a + 1} — a transient blip cleared.` : undefined
+          }
+          break
+        }
+        run = { at, status: 'failed', detail: bad.error || bad.failingTest || 'A step failed.' }
+        // fall through to retry
       } catch (e) {
         run = { at, status: 'error', detail: e instanceof Error ? e.message : String(e) }
+        break
       }
     }
-    setMonitors(await window.api.monitors.recordRun(mon.id, run))
-    if (run.status !== 'passed' && mon.alertOnFail) {
-      window.api.notify.show(
-        run.status === 'failed' ? `Monitor failed: ${mon.name}` : `Monitor couldn't run: ${mon.name}`,
-        run.detail || 'A monitored test just failed.'
-      )
+    if (run.status === 'failed' && attempts > 1) {
+      run = { ...run, detail: `${run.detail || 'A step failed.'} (failed all ${attempts} attempts)` }
     }
+    setMonitors(await window.api.monitors.recordRun(mon.id, run))
+    if (run.status !== 'passed' && mon.alertOnFail) await fireMonitorAlert(mon, run)
   }
 
   // F32: run EVERY monitor once, in order — a one-click "are they all still
@@ -5156,6 +5385,122 @@ function App(): React.JSX.Element {
     </div>
   )
 
+  // F34: create a Jira ticket from a failure. Pre-filled summary + the whole bug
+  // report as the description. Two paths: push via API token, or copy + open
+  // Jira's create page (no token). Site/email/project persist; token never stored.
+  const jiraModal = jiraOpen && (
+    <div className="modal-backdrop" onClick={() => !jiraBusy && setJiraOpen(false)}>
+      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">🎫 Create a Jira ticket</span>
+          <button
+            className="modal-close"
+            onClick={() => setJiraOpen(false)}
+            disabled={jiraBusy}
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="api-editor-body">
+          <label className="api-field">
+            <span>Summary (ticket title)</span>
+            <input
+              className="url-input"
+              type="text"
+              value={jiraSummaryText}
+              onChange={(e) => setJiraSummaryText(e.target.value)}
+            />
+          </label>
+          <label className="api-field">
+            <span>Description</span>
+            <textarea
+              className="api-body"
+              rows={8}
+              value={jiraDescText}
+              onChange={(e) => setJiraDescText(e.target.value)}
+              spellCheck={false}
+            />
+          </label>
+          <p className="api-hint">
+            Push it straight to Jira with an API token, or use <strong>Copy + open Jira</strong> (no
+            token — paste the ticket into Jira’s create page). Your site, email and project are
+            remembered; the token is never stored.
+          </p>
+          <div className="jira-cred-grid">
+            <label className="api-field">
+              <span>Jira site URL</span>
+              <input
+                className="url-input"
+                type="text"
+                placeholder="https://yourteam.atlassian.net"
+                value={jiraBaseUrl}
+                onChange={(e) => setJiraBaseUrl(e.target.value)}
+              />
+            </label>
+            <label className="api-field">
+              <span>Project key</span>
+              <input
+                className="url-input"
+                type="text"
+                placeholder="QA"
+                value={jiraProject}
+                onChange={(e) => setJiraProject(e.target.value)}
+              />
+            </label>
+            <label className="api-field">
+              <span>Your email</span>
+              <input
+                className="url-input"
+                type="text"
+                placeholder="you@team.com"
+                value={jiraEmail}
+                onChange={(e) => setJiraEmail(e.target.value)}
+              />
+            </label>
+            <label className="api-field">
+              <span>
+                API token <span className="mon-sub">(not stored)</span>
+              </span>
+              <input
+                className="url-input"
+                type="password"
+                placeholder="Atlassian API token"
+                value={jiraToken}
+                onChange={(e) => setJiraToken(e.target.value)}
+              />
+            </label>
+          </div>
+          {jiraNote && (
+            <p
+              className="api-hint"
+              style={{
+                color: jiraNote.startsWith('✓')
+                  ? '#7ee787'
+                  : jiraNote.startsWith('⚠')
+                    ? '#f0b232'
+                    : '#9aa4b2'
+              }}
+            >
+              {jiraNote}
+            </p>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={() => setJiraOpen(false)} disabled={jiraBusy}>
+            Close
+          </button>
+          <button className="modal-btn" onClick={handleJiraCopyOpen} disabled={jiraBusy}>
+            📋 Copy + open Jira
+          </button>
+          <button className="modal-btn primary" onClick={handleJiraCreate} disabled={jiraBusy}>
+            {jiraBusy ? '⏳ Creating…' : '⚡ Create in Jira'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
   // F21: paste a bug's repro + expected result → a regression test (repro steps + a
   // plain-English check of the expected behaviour). Same close-first + toast flow.
   const bugPromptModal = bugPromptOpen && (
@@ -5399,6 +5744,23 @@ function App(): React.JSX.Element {
               ⏳ A monitor run is in progress (headless, ~10–30s)… the row updates when it finishes.
             </p>
           )}
+          {/* F32b: a failing run retries up to 3× before alerting (kills transient
+              blips); alerts also POST to this webhook if set (off-machine reach). */}
+          <label className="api-field">
+            <span>Alert webhook — Slack / Discord / Teams (optional)</span>
+            <input
+              className="url-input"
+              type="text"
+              placeholder="https://hooks.slack.com/services/…  (also fires the desktop alert)"
+              value={monWebhook}
+              onChange={(e) => {
+                setMonWebhook(e.target.value)
+                const v = e.target.value.trim()
+                if (v) localStorage.setItem('monitor.webhookUrl', v)
+                else localStorage.removeItem('monitor.webhookUrl')
+              }}
+            />
+          </label>
           <div className="mon-add">
             <select
               className="env-bar-select"
@@ -5714,6 +6076,11 @@ function App(): React.JSX.Element {
         {/* Run All is launched from here; its host-mismatch warning must render
             on this screen too, before the suite navigates to the workspace. */}
         {envWarnModal}
+        {/* F32b: the in-app alert toast must also render on the WELCOME screen —
+            the 📡 Monitors dashboard lives here, so a monitor-failure toast fired
+            from it has nowhere to show otherwise (the workspace toast is a
+            separate return). */}
+        {aiToast && <div className={`download-toast ${aiToast.tone}`}>{aiToast.msg}</div>}
         <div className="welcome-content">
           <h1 className="logo-text">QATestFlow Recorder</h1>
           <p className="tagline">No-code QA test recorder with AI-powered selectors</p>
@@ -6765,6 +7132,16 @@ function App(): React.JSX.Element {
                 >
                   ▶ {isReplaying ? 'Replaying…' : 'Replay'}
                 </button>
+                {/* F21b: ride the whole flow once and drop a plain-English check
+                    on each page it lands on — a check per page in one pass. */}
+                <button
+                  className="data-btn"
+                  onClick={handleReplayAlongChecks}
+                  disabled={isReplaying || isRecording || isPicking || enabledCount === 0}
+                  title="Add checks along a replay: replays the whole flow once and pauses on each page so you can add a plain-English check for it — a check per page in one pass, no re-typing. (For a multi-page bug this is the fast path vs. 🐛 Bug check, which does one page at a time.)"
+                >
+                  🐛➰ Ride + checks
+                </button>
                 {/* Day 18: when to keep a full run recording (trace), like
                     Playwright's trace: retain-on-failure. */}
                 <select
@@ -7323,6 +7700,65 @@ function App(): React.JSX.Element {
                   }}
                 >
                   ▶ Continue
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* F21b: the ride landed on a page and is holding — offer to add a
+              grounded plain-English check for it. Inline (not a modal) so the
+              page stays visible on the left while you describe the check. */}
+          {checkOffer && (
+            <div className="assert-panel manual-panel">
+              <div className="assert-target">
+                <span className="assert-title">🐛 Add checks for this page</span>
+              </div>
+              <p className="manual-message">
+                On{' '}
+                <strong>
+                  {(() => {
+                    try {
+                      return new URL(checkOffer.url).pathname || checkOffer.url
+                    } catch {
+                      return checkOffer.url
+                    }
+                  })()}
+                </strong>{' '}
+                — say in plain English what should be true on this page (each becomes an AI check). Add
+                as many as you like; they run <em>after this page’s actions, before it navigates away</em>.
+                Then ▶ Continue.
+              </p>
+              {ridePending.length > 0 && (
+                <ul className="ride-pending">
+                  {ridePending.map((c, i) => (
+                    <li key={i}>✅ {c}</li>
+                  ))}
+                </ul>
+              )}
+              <input
+                className="url-input"
+                type="text"
+                placeholder="e.g. the cart badge shows 1 after the item is added"
+                value={rideClaim}
+                onChange={(e) => setRideClaim(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && rideClaim.trim()) handleRideAddCheck()
+                }}
+                autoFocus
+              />
+              <div className="assert-actions">
+                <button
+                  className="modal-btn"
+                  onClick={handleRideAddCheck}
+                  disabled={!rideClaim.trim()}
+                >
+                  ➕ Add check
+                </button>
+                <button className="modal-btn primary" onClick={handleRideContinue}>
+                  ▶ Continue{ridePending.length ? ` (${ridePending.length})` : ''}
+                </button>
+                <button className="modal-btn" onClick={handleRideStop}>
+                  ■ Stop ride
                 </button>
               </div>
             </div>
@@ -8946,6 +9382,14 @@ function App(): React.JSX.Element {
                   <button className="modal-btn" onClick={handleCopyReport}>
                     Copy
                   </button>
+                  {/* F34: turn this failure into a Jira ticket. */}
+                  <button
+                    className="modal-btn"
+                    onClick={handleOpenJira}
+                    title="Create a Jira ticket from this failure — pre-filled summary + the whole report as the description. Push it via API, or copy + open Jira's create page."
+                  >
+                    🎫 Jira
+                  </button>
                   <button
                     className="modal-btn primary"
                     onClick={handleSaveReport}
@@ -9438,6 +9882,7 @@ function App(): React.JSX.Element {
       {aiPromptModal}
       {draftModal}
       {mockModal}
+      {jiraModal}
       {bugPromptModal}
       {/* F27: name the data a step creates (replaces window.prompt, which
           Electron does not implement — it silently returned null). */}

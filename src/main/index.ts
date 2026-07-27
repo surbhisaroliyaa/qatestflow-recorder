@@ -1757,6 +1757,16 @@ function createWindow(): void {
     pending?.()
   })
 
+  // F21b: the "add checks along a replay" pause. When the renderer has decided
+  // (add a check / skip this page / stop the ride) it calls this to release the
+  // held replay. `stop` aborts the whole ride like a normal replay abort.
+  let checkOfferResolve: ((r: { stop?: boolean }) => void) | null = null
+  ipcMain.on('recorder:check-offer-respond', (_e, resp: { stop?: boolean }) => {
+    const pending = checkOfferResolve
+    checkOfferResolve = null
+    pending?.(resp || {})
+  })
+
   // === Replay ========================================================
   // Run the recorded steps one-by-one inside the embedded browser. We report
   // progress per step so React can highlight the current/failed step. A plain
@@ -1776,7 +1786,12 @@ function createWindow(): void {
       // F29 (chaos): replay under adverse conditions to test resilience / surface
       // timing flakiness. `slowNetwork` throttles via CDP emulateNetworkConditions
       // (the STABLE path — unlike F1's Fetch interception which crashed the view).
-      chaos?: { slowNetwork?: boolean; locale?: string }
+      chaos?: { slowNetwork?: boolean; locale?: string },
+      // F21b (Bug check across replay): when true (interactive only), the replay
+      // PAUSES after each page it lands on and offers to add a grounded check for
+      // THAT page — so a multi-page test gets a check per page in ONE ride, no
+      // re-typing the flow. Off by default → normal replay is byte-for-byte unchanged.
+      authorChecks?: boolean
     ): Promise<{
       ok: boolean
       failedAt?: number
@@ -2942,6 +2957,18 @@ function createWindow(): void {
         }
       }
 
+      // F21b: track the page we last offered a check on, so the "add checks along
+      // a replay" ride offers exactly ONCE per distinct page it lands on.
+      let lastOfferPath = ''
+      let rideStopped = false
+      const pagePath = (u: string): string => {
+        try {
+          const url = new URL(u)
+          return url.origin + url.pathname
+        } catch {
+          return u
+        }
+      }
       for (let i = 0; i < list.length; i++) {
         // F24.1: resolve the LATE tokens now, for THIS step. {{env:X}} and data
         // columns were substituted by the renderer before the run; {{uuid}} and
@@ -3556,6 +3583,28 @@ function createWindow(): void {
           mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'done' })
           await captureTraceStep(i, 'done', stepStartMs, undefined, undefined, stepApi ?? undefined)
           await wait(450)
+          // F21b: if this step landed the ride on a NEW page, pause and offer to
+          // add a grounded check for it. One offer per distinct page; the renderer
+          // grounds the check against the LIVE page and splices it into the test.
+          if (authorChecks && interactive && !rideStopped) {
+            let curUrl = ''
+            try {
+              curUrl = currentWC.getURL()
+            } catch {
+              curUrl = ''
+            }
+            if (curUrl && pagePath(curUrl) !== lastOfferPath) {
+              lastOfferPath = pagePath(curUrl)
+              mainWindow.webContents.send('recorder:check-offer', { afterIndex: i, url: curUrl })
+              const resp = await new Promise<{ stop?: boolean }>((resolve) => {
+                checkOfferResolve = resolve
+              })
+              if (resp.stop) {
+                rideStopped = true
+                break
+              }
+            }
+          }
         } catch (err) {
           onPopupOpened = null // disarm any popup hook if the step failed
           const message = err instanceof Error ? err.message : String(err)
@@ -4103,6 +4152,26 @@ function createWindow(): void {
     if (!Notification.isSupported()) return
     new Notification({ title, body }).show()
   })
+  // F32b: POST a monitor failure to a Slack/Discord/Teams incoming webhook. All
+  // three accept a simple JSON `{text}` body, so one shape covers them. Best-effort
+  // — a bad/unreachable webhook must never break the run, so errors are swallowed.
+  ipcMain.handle(
+    'notify:webhook',
+    async (_event, url: string, title: string, body: string): Promise<{ ok: boolean; error?: string }> => {
+      const hook = (url || '').trim()
+      if (!/^https:\/\//.test(hook)) return { ok: false, error: 'Webhook URL must start with https://' }
+      try {
+        const res = await fetch(hook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: `*${title}*\n${body}` })
+        })
+        return res.ok ? { ok: true } : { ok: false, error: `Webhook returned ${res.status}` }
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
   // F20 (Option 2): persist / list / re-open edge-case batches (negative-testing
   // evidence), kept separate from the pass/fail run history above.
   ipcMain.handle(
@@ -4688,6 +4757,77 @@ function createWindow(): void {
       return result.filePath
     }
   )
+
+  // === F34: Jira integration ==========================================
+  // Push a failure's bug report to Jira as a new issue. Uses Jira Cloud's REST
+  // v2 (a plain-string description — v3 needs ADF, which is far heavier for the
+  // same result). Basic auth = base64(email:apiToken), the standard Jira Cloud
+  // token scheme. Returns the new key + a browse URL, or a readable error so the
+  // renderer can show WHY (bad token, wrong project key, etc.) instead of a 500.
+  ipcMain.handle(
+    'jira:createIssue',
+    async (
+      _event,
+      cfg: {
+        baseUrl: string
+        email: string
+        apiToken: string
+        projectKey: string
+        summary: string
+        description: string
+        issueType?: string
+      }
+    ): Promise<{ ok: boolean; key?: string; url?: string; error?: string }> => {
+      const base = (cfg.baseUrl || '').trim().replace(/\/+$/, '')
+      if (!/^https?:\/\//.test(base)) return { ok: false, error: 'Jira site URL must start with https://' }
+      if (!cfg.email || !cfg.apiToken) return { ok: false, error: 'Email and API token are required.' }
+      if (!cfg.projectKey) return { ok: false, error: 'A project key (e.g. QA) is required.' }
+      try {
+        const auth = Buffer.from(`${cfg.email}:${cfg.apiToken}`).toString('base64')
+        const res = await fetch(`${base}/rest/api/2/issue`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Basic ${auth}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          },
+          body: JSON.stringify({
+            fields: {
+              project: { key: cfg.projectKey.trim() },
+              summary: cfg.summary.slice(0, 240),
+              description: cfg.description,
+              issuetype: { name: cfg.issueType || 'Bug' }
+            }
+          })
+        })
+        const text = await res.text()
+        if (!res.ok) {
+          let msg = `Jira returned ${res.status} ${res.statusText}`
+          try {
+            const j = JSON.parse(text)
+            const detail =
+              (Array.isArray(j.errorMessages) && j.errorMessages.join('; ')) ||
+              (j.errors && Object.values(j.errors).join('; '))
+            if (detail) msg = detail
+          } catch {
+            /* keep the status line */
+          }
+          if (res.status === 401) msg = 'Unauthorized — check the email + API token.'
+          return { ok: false, error: msg }
+        }
+        const j = JSON.parse(text)
+        return { ok: true, key: j.key, url: `${base}/browse/${j.key}` }
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+  // F34: open Jira's "create issue" page in the real browser — the no-token path
+  // (you paste the copied ticket). openExternal is https-guarded like elsewhere.
+  ipcMain.handle('jira:openCreate', (_event, baseUrl: string): void => {
+    const base = (baseUrl || '').trim().replace(/\/+$/, '')
+    if (/^https:\/\//.test(base)) shell.openExternal(`${base}/secure/CreateIssue!default.jspa`)
+  })
 
   // === Export ========================================================
   // React generates the Playwright code (it owns the steps); main just saves

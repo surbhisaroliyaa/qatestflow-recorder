@@ -239,6 +239,28 @@ body {
   flex-shrink: 0;
 }
 
+/* F21b: the checks you've added for the current page during a ride. */
+.ride-pending {
+  list-style: none;
+  margin: 6px 0;
+  padding: 6px 8px;
+  background: rgba(126, 231, 135, 0.08);
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+.ride-pending li {
+  padding: 2px 0;
+  color: #7ee787;
+}
+
+/* F34: the Jira credentials block — site/project/email/token in a 2-col grid. */
+.jira-cred-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin-top: 4px;
+}
+
 /* Day 17 (multiple windows): the tab strip. Height (34px) MUST match
    TAB_STRIP_HEIGHT in src/main/index.ts so the native browser view, which
    starts just below it, lines up with no gap or overlap. */

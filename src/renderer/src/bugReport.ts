@@ -151,3 +151,17 @@ export function bugReportFileName(ev: FailureEvidence): string {
   const stamp = new Date().toISOString().slice(0, 10)
   return `${base || 'bug-report'}-step${ev.stepIndex + 1}-${stamp}.md`
 }
+
+// F34 (Jira): a one-line issue SUMMARY from the same evidence. The full bug
+// report (generateBugReport) becomes the ticket DESCRIPTION — this is just the
+// title. Kept short (Jira summaries are single-line); the test name is bracketed
+// so tickets group by test at a glance.
+export function jiraSummary(ev: FailureEvidence): string {
+  const tag = ev.testName ? `[${ev.testName}] ` : ''
+  const multi = !!(ev.failures && ev.failures.length > 1)
+  if (multi) {
+    const steps = ev.failures!.map((f) => f.index + 1).join(', ')
+    return `${tag}${ev.failures!.length} steps fail (steps ${steps})`.slice(0, 240)
+  }
+  return `${tag}Step ${ev.stepIndex + 1} fails: ${ev.stepText}`.slice(0, 240)
+}

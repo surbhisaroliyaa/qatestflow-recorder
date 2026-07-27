@@ -98,7 +98,9 @@ interface RecorderAPI {
     harFile?: string,
     // F29 (chaos): replay under adverse conditions (e.g. throttled network).
     // F28: `locale` replays under a browser locale for the localization sweep.
-    chaos?: { slowNetwork?: boolean; locale?: string }
+    chaos?: { slowNetwork?: boolean; locale?: string },
+    // F21b: pause per page during the ride to add a grounded check there.
+    authorChecks?: boolean
   ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
@@ -122,6 +124,9 @@ interface RecorderAPI {
   // F30: replay paused at a manual (wait-for-human) step; resume with manualContinue.
   onManualPause: (callback: (info: { index: number; message: string }) => void) => () => void
   manualContinue: () => void
+  // F21b: the "add checks along a replay" ride paused on a page.
+  onCheckOffer: (callback: (info: { afterIndex: number; url: string }) => void) => () => void
+  checkOfferRespond: (resp: { stop?: boolean }) => void
   setPicking: (active: boolean) => Promise<void>
   onPicked: (callback: (picked: PickedElement) => void) => () => void
   onPickCancel: (callback: () => void) => () => void
@@ -202,6 +207,12 @@ interface MonitorsAPI {
 }
 interface NotifyAPI {
   show: (title: string, body: string) => Promise<void>
+  // F32b: POST a monitor failure to a Slack/Discord/Teams incoming webhook.
+  webhook: (
+    url: string,
+    title: string,
+    body: string
+  ) => Promise<{ ok: boolean; error?: string }>
 }
 
 // === Coverage gap map (F23) ===
@@ -292,6 +303,20 @@ interface RepoAPI {
     summary: string
     note: string
   } | null>
+}
+
+// F34: push a failure's bug report to Jira, or open Jira's create page.
+interface JiraAPI {
+  createIssue: (cfg: {
+    baseUrl: string
+    email: string
+    apiToken: string
+    projectKey: string
+    summary: string
+    description: string
+    issueType?: string
+  }) => Promise<{ ok: boolean; key?: string; url?: string; error?: string }>
+  openCreate: (baseUrl: string) => Promise<void>
 }
 
 // F31: acceptance-criteria checklist — persist ACs + AI-map them to covering tests.
@@ -427,6 +452,7 @@ interface API {
   visual: VisualAPI
   ai: AiAPI
   repo: RepoAPI
+  jira: JiraAPI
   ac: AcAPI
   i18n: I18nAPI
   a11y: A11yAPI
