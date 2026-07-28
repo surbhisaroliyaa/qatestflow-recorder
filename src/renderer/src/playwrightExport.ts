@@ -7,6 +7,9 @@
 // =====================================================================
 
 import { TOKEN_RE, extractTokens } from './dataDriven'
+// F37: shared with the replay engine in main, so the exported spec and the
+// in-app run can never disagree about how a loop or an if-block behaves.
+import { isControlStep, conditionText, repeatText } from '../../shared/controlFlow'
 
 // F33 (CI export): a standard GitHub Actions workflow that runs the exported
 // Playwright tests on every push / PR — the official Playwright CI template, so
@@ -674,6 +677,17 @@ export function stepText(step: RecorderStep): string {
       return `Go to ${step.url}`
     case 'back':
       return 'Go back'
+    // === F37: loops + branching ===
+    case 'repeat':
+      return `🔁 Repeat ${repeatText(step.repeatKind, step.label, step.value)}`
+    case 'endRepeat':
+      return '🔁 End repeat'
+    case 'if':
+      return `🔀 If ${conditionText(step.condKind, step.label, step.value)}`
+    case 'else':
+      return '🔀 Otherwise'
+    case 'endIf':
+      return '🔀 End if'
     case 'block':
       // A live reference to a saved block — shown in the UI; expanded to the
       // block's real steps before any code is generated (never reaches actionFor).
@@ -848,6 +862,50 @@ export function testIdPolicy(steps: RecorderStep[]): {
 // short of an explicit count()/isVisible() guard, so a wrapped optional ASSERT
 // is weaker in the export than it is in the app (where the run loop gates the
 // skip on a selector break). Optional is meant for dismissal steps.
+/**
+ * F37 — an `if` step's condition, as a Playwright expression.
+ *
+ * Element checks use `.isVisible()` with a `.catch(() => false)`, mirroring
+ * replay's probe: a condition asks a QUESTION, so "the element isn't there" is
+ * an answer (false → take the else branch), never a thrown failure. Without the
+ * catch, a detached/navigating element would abort the whole test at exactly
+ * the moment the author was trying to handle gracefully.
+ */
+/**
+ * F38 — the second argument to `test()`, carrying its tags.
+ *
+ * Playwright's native form is `test('name', { tag: ['@smoke'] }, async …)`,
+ * which `--grep @smoke` matches and which shows up in the HTML report. Emitting
+ * nothing when there are no tags keeps an untagged test byte-identical to what
+ * it exported before F38.
+ */
+function tagArgFor(tags: string[] | undefined): string {
+  const clean = (tags ?? []).filter((t) => t && t.startsWith('@'))
+  if (!clean.length) return ''
+  return `, { tag: [${clean.map((t) => quote(t)).join(', ')}] }`
+}
+
+/** Did anything actually nest? Lets a plain test skip the re-indent entirely
+ *  and stay byte-identical to what it exported before F37. */
+function depthUsed(depths: number[]): boolean {
+  return depths.some((d) => d > 0)
+}
+
+function conditionExpr(step: RecorderStep, pageVar: string, portableTestId: boolean): string {
+  const kind = step.condKind ?? 'element-visible'
+  if (kind === 'url-contains') {
+    return `${pageVar}.url().includes(${quote(step.value ?? '')})`
+  }
+  if (kind === 'text-present' || kind === 'text-absent') {
+    const expr = `(await ${pageVar}.locator('body').innerText()).includes(${quote(step.value ?? '')})`
+    return kind === 'text-present' ? expr : `!${expr}`
+  }
+  const sel = (portableTestId && portableTestIdSelector(step)) || step.selector
+  if (!sel) return kind === 'element-absent' ? 'true' : 'false'
+  const visible = `await ${pageBase(pageVar, step.frame)}.${sel}.isVisible().catch(() => false)`
+  return kind === 'element-absent' ? `!(${visible})` : `(${visible})`
+}
+
 function wrapOptional(line: string, pad: string): string {
   return (
     `${pad}try {\n` +
@@ -1193,6 +1251,38 @@ function withTeardown(main: string[], down: string[], joiner = '\n\n'): string {
   )
 }
 
+/**
+ * F36 — what a device contributes to the exported `test.use({ … })`.
+ *
+ * A named Playwright preset wins: `...devices['iPhone 13']` brings userAgent,
+ * viewport, deviceScaleFactor, isMobile and hasTouch in one spread, so the
+ * exported spec is emulating the same phone the app was. It MUST be spread
+ * first so later props (baseURL, storageState) override it rather than being
+ * overridden by it.
+ *
+ * Without a preset we fall back to the bare `viewport:` — which is exactly what
+ * the size-only presets and every pre-F36 test mean.
+ */
+function deviceUse(
+  device: { playwrightDevice?: string; label?: string } | undefined,
+  viewport: { width: number; height: number } | undefined
+): { spread: string | null; viewportProp: string | null; usesPreset: boolean } {
+  if (device?.playwrightDevice) {
+    return {
+      spread: `...devices[${quote(device.playwrightDevice)}]`,
+      viewportProp: null,
+      usesPreset: true
+    }
+  }
+  return {
+    spread: null,
+    viewportProp: viewport
+      ? `viewport: { width: ${viewport.width}, height: ${viewport.height} }`
+      : null,
+    usesPreset: false
+  }
+}
+
 export function generatePlaywrightTest(
   steps: RecorderStep[],
   options?: {
@@ -1200,6 +1290,15 @@ export function generatePlaywrightTest(
     baseURL?: string
     storageState?: string
     viewport?: { width: number; height: number }
+    // F36: the full device this test runs as. When it names a Playwright preset
+    // the spec emits `...devices['iPhone 13']` — carrying UA + touch + pixel
+    // density, not just size. Falls back to `viewport` for the size-only
+    // presets and for every test saved before F36.
+    device?: { playwrightDevice?: string; label?: string }
+    // F38: cross-cutting labels → Playwright's own `{ tag: [...] }` option, so
+    // `npx playwright test --grep @smoke` in CI selects the same set the app's
+    // tag filter does.
+    tags?: string[]
     // Day 20 (data-driven): a table of rows. When present (and non-empty), the
     // test body is wrapped in `for (const data of dataset)` and tokenized
     // values become data.* / process.env.* references.
@@ -1226,11 +1325,84 @@ export function generatePlaywrightTest(
 
   // Test-id portability: declare the attribute, or fall back to CSS locators.
   const idPolicy = testIdPolicy(enabled)
+  // F38: tags become Playwright's own test-level tag option.
+  const tagArg = tagArgFor(options?.tags)
 
   const lines: string[] = []
+  // F37: how deep in loops/if-blocks each emitted line-group sits, so the final
+  // code is indented like hand-written JS. Tracked separately because the
+  // emitters below all push at a fixed two-space indent; re-indenting once at
+  // the end is far less invasive than threading a pad through every one.
+  const lineDepth: number[] = []
+  let depth = 0
+  const syncDepth = (): void => {
+    while (lineDepth.length < lines.length) lineDepth.push(depth)
+  }
+  // A unique loop variable per nesting level, so nested loops don't collide.
+  const loopVar = (level: number): string => `i${level}`
+
   for (let i = 0; i < enabled.length; i++) {
+    syncDepth()
     const step = enabled[i]
     const pageVar = pv(step.windowId)
+
+    // === F37: loops + branching ===
+    // These emit real JavaScript control flow, so the exported spec loops and
+    // branches the same way the app did — not a comment saying it did.
+    if (isControlStep(step)) {
+      if (step.type === 'repeat') {
+        const v = loopVar(depth)
+        if (step.repeatKind === 'each' && step.selector) {
+          const items = `items${depth}`
+          lines.push(
+            `  // ${stepText(step)}\n` +
+              `  const ${items} = ${pageBase(pageVar, step.frame)}.${(idPolicy.portable && portableTestIdSelector(step)) || step.selector}\n` +
+              // Count ONCE up front, matching the app: a live count could loop
+              // forever if the body adds matching elements.
+              `  const ${items}Count = await ${items}.count()\n` +
+              `  for (let ${v} = 0; ${v} < ${items}Count; ${v}++) {`
+          )
+        } else {
+          const n = parseInt(step.value ?? '1', 10)
+          const times = Number.isFinite(n) && n > 0 ? n : 1
+          lines.push(`  // ${stepText(step)}\n  for (let ${v} = 0; ${v} < ${times}; ${v}++) {`)
+        }
+        syncDepth()
+        depth++
+        continue
+      }
+      if (step.type === 'endRepeat') {
+        syncDepth()
+        depth = Math.max(0, depth - 1)
+        lines.push(`  }`)
+        syncDepth()
+        continue
+      }
+      if (step.type === 'if') {
+        lines.push(
+          `  // ${stepText(step)}\n  if (${conditionExpr(step, pageVar, idPolicy.portable)}) {`
+        )
+        syncDepth()
+        depth++
+        continue
+      }
+      if (step.type === 'else') {
+        syncDepth()
+        depth = Math.max(0, depth - 1)
+        lines.push(`  } else {`)
+        syncDepth()
+        depth++
+        continue
+      }
+      if (step.type === 'endIf') {
+        syncDepth()
+        depth = Math.max(0, depth - 1)
+        lines.push(`  }`)
+        syncDepth()
+        continue
+      }
+    }
+
     // A dialog step has no action of its own — its handler is emitted just
     // before the action that triggers it (the previous loop iteration).
     if (step.type === 'dialog') continue
@@ -1291,6 +1463,20 @@ export function generatePlaywrightTest(
     }
     lines.push(`${healNote}  // ${stepText(step)}\n  ${action}`)
   }
+  syncDepth()
+  // F37: apply the nesting indent once, at the end. Each entry may be several
+  // lines, so every line inside it is padded — blank lines are left blank
+  // rather than becoming trailing whitespace.
+  if (depthUsed(lineDepth)) {
+    for (let n = 0; n < lines.length; n++) {
+      const pad = '  '.repeat(lineDepth[n] ?? 0)
+      if (!pad) continue
+      lines[n] = lines[n]
+        .split('\n')
+        .map((l) => (l.trim() ? pad + l : l))
+        .join('\n')
+    }
+  }
 
   // Day 17: in multi-window mode, alias the fixture as page0 and grab its
   // context (used to await newly-opened pages). Prepended to the test body.
@@ -1329,7 +1515,13 @@ export function generatePlaywrightTest(
     hasA11y ||
     hasPerf ||
     needsRequest
-  const imports = hasAssert ? '{ test, expect }' : '{ test }'
+  // F36: `devices` is only imported when a preset is actually spread — an unused
+  // import would trip a lint rule in the user's repo.
+  const usesDevicePreset = !!options?.device?.playwrightDevice
+  const importNames = ['test', hasAssert ? 'expect' : null, usesDevicePreset ? 'devices' : null]
+    .filter(Boolean)
+    .join(', ')
+  const imports = `{ ${importNames} }`
   const header =
     (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
     `import ${imports} from '@playwright/test'\n` +
@@ -1348,6 +1540,9 @@ export function generatePlaywrightTest(
   // twin of the in-app "Run against" environment switch). Navigations are already
   // emitted relative to the base, so overriding this one value retargets them all.
   const useProps: string[] = []
+  // F36: the device spread goes FIRST so the props below win over it.
+  const dev = deviceUse(options?.device, options?.viewport)
+  if (dev.spread) useProps.push(dev.spread)
   if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
   // Tell Playwright which attribute getByTestId() should read — without this it
   // looks for `data-testid` and a `data-test` app's locators never resolve.
@@ -1355,15 +1550,18 @@ export function generatePlaywrightTest(
   if (options?.storageState) {
     useProps.push(`storageState: ${quote(`sessions/${options.storageState}`)}`)
   }
-  if (options?.viewport) {
-    useProps.push(
-      `viewport: { width: ${options.viewport.width}, height: ${options.viewport.height} }`
-    )
-  }
+  if (dev.viewportProp) useProps.push(dev.viewportProp)
   const useComment = baseURL
     ? '// Base URL — override per environment in CI with the BASE_URL env var.\n'
     : ''
-  const use = useProps.length ? `\n${useComment}test.use({ ${useProps.join(', ')} })\n` : ''
+  // F36: an iPhone/iPad preset is a WebKit device in Playwright's own catalogue.
+  // Run this spec on the webkit project to get the engine as well as the shape.
+  const devComment = dev.usesPreset
+    ? `// Device: ${options?.device?.label ?? options?.device?.playwrightDevice} — includes userAgent, touch and pixel density, not just size.\n`
+    : ''
+  const use = useProps.length
+    ? `\n${devComment}${useComment}test.use({ ${useProps.join(', ')} })\n`
+    : ''
 
   // Day 20 (data-driven): emit a `dataset` array and run the same body once per
   // row inside a for-loop, giving each row its own test (named by the first
@@ -1387,7 +1585,7 @@ ${dataset}
 ]
 
 for (const data of dataset) {
-  test(${title}, async (${fixtures}) => {
+  test(${title}${tagArg}, async (${fixtures}) => {
 ${inner}
   })
 }
@@ -1395,7 +1593,7 @@ ${inner}
   }
 
   return `${header}${use}
-test(${quote(options?.name || 'recorded flow')}, async (${fixtures}) => {
+test(${quote(options?.name || 'recorded flow')}${tagArg}, async (${fixtures}) => {
 ${body}
 })
 `
@@ -1427,7 +1625,12 @@ export interface EdgeSuiteCase {
 
 export function generateEdgeSuite(
   cases: EdgeSuiteCase[],
-  options?: { name?: string; baseURL?: string; viewport?: { width: number; height: number } }
+  options?: {
+    name?: string
+    baseURL?: string
+    viewport?: { width: number; height: number }
+    device?: { playwrightDevice?: string; label?: string } // F36
+  }
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   const variants = cases.filter((c) => !c.baseline)
@@ -1503,14 +1706,13 @@ export function generateEdgeSuite(
   }
 
   const useProps: string[] = []
+  // F36: device spread first so the props below override it (see deviceUse).
+  const edgeDev = deviceUse(options?.device, options?.viewport)
+  if (edgeDev.spread) useProps.push(edgeDev.spread)
   if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
   // Same reason as generatePlaywrightTest: getByTestId needs the right attribute.
   if (idPolicy.attr) useProps.push(`testIdAttribute: ${quote(idPolicy.attr)}`)
-  if (options?.viewport) {
-    useProps.push(
-      `viewport: { width: ${options.viewport.width}, height: ${options.viewport.height} }`
-    )
-  }
+  if (edgeDev.viewportProp) useProps.push(edgeDev.viewportProp)
   const use = useProps.length
     ? `\n// Base URL — override per environment in CI with the BASE_URL env var.\ntest.use({ ${useProps.join(', ')} })\n`
     : ''
@@ -1524,7 +1726,7 @@ export function generateEdgeSuite(
     `// Auto-generated by QATestFlow (F20). Each test feeds ONE hostile value and\n` +
     `// asserts the app REJECTS it. A fully passing suite means your input\n` +
     `// validation holds; a FAILURE means bad/malicious input was accepted.\n` +
-    `import { test, expect } from '@playwright/test'\n` +
+    `import { test, expect${edgeDev.usesPreset ? ', devices' : ''} } from '@playwright/test'\n` +
     (runtimeTokenUse(allSteps).uuid ? "import { randomUUID } from 'node:crypto'\n" : '') +
     (anyApiChecks(allSteps) ? `\n${API_CHECK_HELPER}` : '')
 
@@ -1556,6 +1758,15 @@ export function generatePageObjectTest(
     baseURL?: string
     storageState?: string
     viewport?: { width: number; height: number }
+    // F36: the full device this test runs as. When it names a Playwright preset
+    // the spec emits `...devices['iPhone 13']` — carrying UA + touch + pixel
+    // density, not just size. Falls back to `viewport` for the size-only
+    // presets and for every test saved before F36.
+    device?: { playwrightDevice?: string; label?: string }
+    // F38: cross-cutting labels → Playwright's own `{ tag: [...] }` option, so
+    // `npx playwright test --grep @smoke` in CI selects the same set the app's
+    // tag filter does.
+    tags?: string[]
     // Day 20: present (with rows) for a data-driven test — the spec wraps the
     // page-object calls in a `for (const data of dataset)` loop.
     data?: { columns: string[]; rows: Record<string, string>[] }
@@ -1586,6 +1797,8 @@ export function generatePageObjectTest(
   const pageFileName = `${className}.ts`
   // Test-id portability — same policy as the inline export (see testIdPolicy).
   const idPolicy = testIdPolicy(enabled)
+  // F38: POM/inline parity — the same tags reach both exports.
+  const tagArg = tagArgFor(options?.tags)
 
   // The class's Locator fields must use the SAME portable rewrite as the inline
   // export, or a data-test app's POM locators resolve to nothing.
@@ -1803,19 +2016,21 @@ export function generatePageObjectTest(
   const needsRequest = enabled.some((s) => s.type === 'api')
   const specFixtures = needsRequest ? '{ page, request }' : '{ page }'
   const hasAssert = enabled.some((s) => s.type === 'assert') || hasA11y || hasPerf || needsRequest
-  const imports = hasAssert ? '{ test, expect }' : '{ test }'
+  // F36: keep POM/inline parity — the same device reaches both exports.
+  const pomDev = deviceUse(options?.device, options?.viewport)
+  const importNames = ['test', hasAssert ? 'expect' : null, pomDev.usesPreset ? 'devices' : null]
+    .filter(Boolean)
+    .join(', ')
+  const imports = `{ ${importNames} }`
   const useProps: string[] = []
+  if (pomDev.spread) useProps.push(pomDev.spread)
   if (baseURL) useProps.push(`baseURL: process.env.BASE_URL || ${quote(baseURL)}`)
   // Same reason as the inline export: getByTestId needs the right attribute.
   if (idPolicy.attr) useProps.push(`testIdAttribute: ${quote(idPolicy.attr)}`)
   if (options?.storageState) {
     useProps.push(`storageState: ${quote(`sessions/${options.storageState}`)}`)
   }
-  if (options?.viewport) {
-    useProps.push(
-      `viewport: { width: ${options.viewport.width}, height: ${options.viewport.height} }`
-    )
-  }
+  if (pomDev.viewportProp) useProps.push(pomDev.viewportProp)
   // F25: same env-overridable baseURL as the inline export (see there).
   const useComment = baseURL
     ? '// Base URL — override per environment in CI with the BASE_URL env var.\n'
@@ -1860,7 +2075,7 @@ export function generatePageObjectTest(
       `${importLines}${use}\n` +
       `const dataset = [\n${dataset}\n]\n\n` +
       `for (const data of dataset) {\n` +
-      `  test(${title}, async (${specFixtures}) => {\n` +
+      `  test(${title}${tagArg}, async (${specFixtures}) => {\n` +
       `${runtimeTokenPreamble(enabled, '    ')}${inner}\n` +
       `  })\n` +
       `}\n`
@@ -1871,7 +2086,7 @@ export function generatePageObjectTest(
   const spec =
     `${importLines}` +
     `${use}\n` +
-    `test(${quote(options?.name || 'recorded flow')}, async (${specFixtures}) => {\n` +
+    `test(${quote(options?.name || 'recorded flow')}${tagArg}, async (${specFixtures}) => {\n` +
     `${tokenPrelude}` +
     `  const app = new ${className}(page)\n` +
     `${withTeardown(specMain, specDown, '\n')}\n` +

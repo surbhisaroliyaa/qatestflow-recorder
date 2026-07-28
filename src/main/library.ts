@@ -14,6 +14,8 @@
 import { app } from 'electron'
 import { mkdir, readdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
+// F40: keeps plaintext passwords out of the shared/committed test files.
+import { stripSecrets } from './secrets'
 
 // Outcome of one replay — gives the library list its green/red
 // "mini CI dashboard" dots.
@@ -60,6 +62,14 @@ export interface SavedTestFile {
   // Day 17: render the test at a fixed viewport (device emulation). Undefined =
   // fill the window (desktop, the default).
   viewport?: { width: number; height: number }
+  // F36: which DEVICE profile that viewport came from — carries the UA, touch
+  // and pixel-density signals a bare width×height can't. Stored alongside (not
+  // instead of) `viewport`, so a test saved before F36 — and an older build of
+  // the app reading a newer file — still gets the right size.
+  deviceId?: string
+  // F38: cross-cutting labels (@smoke, @regression). A test has ONE suite but
+  // MANY tags — that is the whole difference between them.
+  tags?: string[]
   // Day 20 (data-driven): the table of rows this test runs against. Each row is
   // a { column: value } map; columns are derived from the {{tokens}} in steps.
   dataRows?: Record<string, string>[]
@@ -85,6 +95,11 @@ export interface SavedTestSummary {
   stepCount: number
   storageState?: string // Day 17: attached session, if any
   har?: string // F1: a captured network archive, if any (drives a 🌐 badge)
+  // F38: cross-cutting labels (@smoke, @regression, @checkout). Deliberately in
+  // the SUMMARY, not just the test file — the library filters and "Run all
+  // @smoke" would otherwise have to open every test on disk to know its tags,
+  // which is exactly the thing that stops scaling at 500 tests.
+  tags?: string[]
   // F5 (trust score): light aggregates computed from the steps so the renderer
   // can score a test WITHOUT loading every step array. assertCount = how many
   // checks it makes; selectorHealth = avg stability (0–100) of its selectors.
@@ -168,6 +183,7 @@ function toSummary(fileName: string, test: SavedTestFile): SavedTestSummary {
     stepCount: Array.isArray(test.steps) ? test.steps.length : 0,
     storageState: test.storageState,
     har: test.har,
+    tags: test.tags, // F38
     assertCount: stats.assertCount,
     selectorHealth: stats.selectorHealth,
     lastRun: test.lastRun,
@@ -217,6 +233,8 @@ export async function saveTest(input: {
   steps: unknown[]
   storageState?: string
   viewport?: { width: number; height: number }
+  deviceId?: string // F36
+  tags?: string[] // F38
   dataRows?: Record<string, string>[]
   // F1: the captured HAR log to write alongside this test (main passes it in;
   // the renderer only signals intent). Absent = keep whatever HAR existed.
@@ -236,11 +254,17 @@ export async function saveTest(input: {
     await mkdir(harsDir(), { recursive: true })
     await writeFile(join(harsDir(), har), JSON.stringify(input.harLog), 'utf-8')
   }
+  // F40: the choke point. Every save comes through here, so this is the one
+  // place that can guarantee no password is ever written into a test file. The
+  // value moves to the userData secret store and the step keeps only a ref.
+  // Done BEFORE the version snapshot below, so history holds the safe form too.
+  const safeSteps = await stripSecrets(input.steps)
+
   // F12: if the STEPS actually changed vs the last save, snapshot the previous
   // steps as a version (so you can see what changed and roll back). Re-saving
   // without touching the steps (e.g. a rename) doesn't add a version.
   let versions = previous?.versions
-  if (previous && JSON.stringify(previous.steps) !== JSON.stringify(input.steps)) {
+  if (previous && JSON.stringify(previous.steps) !== JSON.stringify(safeSteps)) {
     versions = [
       { at: previous.updatedAt, steps: previous.steps },
       ...(previous.versions ?? [])
@@ -256,10 +280,12 @@ export async function saveTest(input: {
     runs: previous?.runs,
     storageState: input.storageState,
     viewport: input.viewport,
+    deviceId: input.deviceId,
+    tags: input.tags,
     dataRows: input.dataRows,
     har,
     versions,
-    steps: input.steps
+    steps: safeSteps // F40: never the plaintext form
   }
   await writeFile(join(libraryDir(), fileName), JSON.stringify(test, null, 2), 'utf-8')
   return toSummary(fileName, test)
@@ -340,6 +366,8 @@ export interface DraftFile {
   suite: string
   storageState?: string
   viewport?: { width: number; height: number }
+  deviceId?: string // F36
+  tags?: string[] // F38
   dataRows?: Record<string, string>[] // Day 20: data-driven table rows
   updatedAt: string
   steps: unknown[]
@@ -364,6 +392,8 @@ export async function saveDraft(input: {
   suite: string
   storageState?: string
   viewport?: { width: number; height: number }
+  deviceId?: string // F36
+  tags?: string[] // F38
   dataRows?: Record<string, string>[]
   steps: unknown[]
 }): Promise<void> {
@@ -376,6 +406,8 @@ export async function saveDraft(input: {
     suite: input.suite,
     storageState: input.storageState,
     viewport: input.viewport,
+    deviceId: input.deviceId,
+    tags: input.tags,
     dataRows: input.dataRows,
     updatedAt: new Date().toISOString(),
     steps: input.steps

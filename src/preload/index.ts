@@ -49,7 +49,24 @@ const api = {
 
     // Day 17 (viewport emulation): render at a fixed viewport, or null to fill.
     setViewport: (viewport: { width: number; height: number } | null): Promise<void> =>
-      ipcRenderer.invoke('browser:setViewport', viewport)
+      ipcRenderer.invoke('browser:setViewport', viewport),
+
+    // Tell main whether the renderer is showing a page or the welcome screen —
+    // they each track this separately and a renderer reload desynced them.
+    syncNavigated: (navigated: boolean): Promise<void> =>
+      ipcRenderer.invoke('browser:syncNavigated', navigated),
+
+    // F36 (device emulation): size + userAgent + touch + pixel density, or null
+    // for a plain desktop browser.
+    setDevice: (
+      device: {
+        viewport: { width: number; height: number }
+        userAgent?: string
+        deviceScaleFactor?: number
+        isMobile?: boolean
+        hasTouch?: boolean
+      } | null
+    ): Promise<void> => ipcRenderer.invoke('browser:setDevice', device)
   },
 
   recorder: {
@@ -260,7 +277,35 @@ const api = {
       envOverride?: Record<string, string>,
       sessionFile?: string
     ): Promise<unknown> =>
-      ipcRenderer.invoke('xbrowser:run', specCode, browsers, envOverride, sessionFile)
+      ipcRenderer.invoke('xbrowser:run', specCode, browsers, envOverride, sessionFile),
+
+    // F40: export the library (or a selection) as a portable bundle folder.
+    exportBundle: (tests: string[], includeAcs: boolean): Promise<unknown> =>
+      ipcRenderer.invoke('bundle:export', tests, includeAcs),
+    // F40: read a bundle and report what importing it WOULD do — no writes.
+    inspectBundle: (): Promise<unknown> => ipcRenderer.invoke('bundle:inspect'),
+    // F40: apply an import plan (a choice per colliding test).
+    importBundle: (
+      bundleDir: string,
+      plan: { file: string; choice: 'keep-both' | 'overwrite' | 'skip' }[]
+    ): Promise<unknown> => ipcRenderer.invoke('bundle:import', bundleDir, plan),
+    revealBundle: (path: string): Promise<void> => ipcRenderer.invoke('bundle:reveal', path),
+
+    // F40: resolve secret refs for a headless run (which reads process.env.PASSWORD).
+    resolveSecrets: (refs: string[]): Promise<Record<string, string>> =>
+      ipcRenderer.invoke('secrets:resolve', refs),
+
+    // F40: one-time move of plaintext passwords out of test files into userData.
+    migrateSecrets: (): Promise<{ migrated: number; tests: string[] }> =>
+      ipcRenderer.invoke('secrets:migrate'),
+
+    // F39: run a batch of tests at once via real Playwright, `workers` at a time.
+    runSuite: (
+      specs: { id: string; name: string; code: string; sessionFile?: string }[],
+      workers: number,
+      envOverride?: Record<string, string>
+    ): Promise<unknown> =>
+      ipcRenderer.invoke('xbrowser:runSuite', specs, workers, envOverride)
   },
 
   // === Scheduled monitors (F32) ===
@@ -437,6 +482,8 @@ const api = {
       steps: unknown[]
       storageState?: string
       viewport?: { width: number; height: number }
+      deviceId?: string // F36: which device profile that viewport came from
+      tags?: string[] // F38
       dataRows?: Record<string, string>[]
       captureHar?: boolean // F1: bank the captured network with this test
     }): Promise<unknown> => ipcRenderer.invoke('library:save', input),

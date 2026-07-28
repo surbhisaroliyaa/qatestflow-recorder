@@ -20,6 +20,7 @@ import {
 import { join, basename, dirname } from 'path'
 import { execFile } from 'child_process'
 import { writeFile, mkdir, copyFile, readFile, readdir, rm } from 'fs/promises'
+import { existsSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
@@ -27,9 +28,18 @@ import {
   buildActionScript,
   buildFailureMarkScript,
   buildLocateRectScript,
+  buildProbeScript,
+  buildCollectionScript,
   removeFailureMarkScript,
   type ReplayStep
 } from './replay'
+// F37: loops + branching. Shared with the renderer's Playwright export so the
+// app and the exported spec can never disagree about how a loop runs.
+import { analyzeControlFlow, isControlStep, resolveLoopTokens } from '../shared/controlFlow'
+// F40: passwords live in userData, not in the shared test files.
+import { resolveSecrets, getSecrets, migratePlaintextSecrets } from './secrets'
+// F40: export/import the library as a portable, git-committable bundle.
+import { exportBundle, inspectBundle, importBundle, type ImportPlanEntry } from './bundle'
 import {
   saveTest,
   listTests,
@@ -123,7 +133,13 @@ import {
   activeEnvironment,
   type Environment
 } from './environments'
-import { checkPlaywright, runCrossBrowser, type BrowserName } from './xbrowser'
+import {
+  checkPlaywright,
+  runCrossBrowser,
+  runSuiteParallel,
+  type BrowserName,
+  type ParallelSpec
+} from './xbrowser'
 import { runApiStep, type ApiEvidence } from './apiStep'
 import {
   newRunTokens,
@@ -818,6 +834,103 @@ function createWindow(): void {
   // window.innerWidth = this width and responsive layouts switch. Null = fill.
   let viewportOverride: { width: number; height: number } | null = null
 
+  // F36 (device emulation): the four signals a real phone has that a narrow
+  // window does NOT. Size is still handled by viewportOverride above (a real
+  // native resize — the page genuinely lays out at that width); these are the
+  // rest, applied over CDP. Null = a plain desktop browser.
+  let deviceOverride: {
+    userAgent?: string
+    deviceScaleFactor?: number
+    isMobile?: boolean
+    hasTouch?: boolean
+  } | null = null
+
+  // Push the current device signals onto one tab. Called when the device is
+  // chosen, when a new tab is created, and again when replay (re)attaches its
+  // debugger — a detach drops CDP overrides, so re-applying is what keeps a
+  // mobile run mobile all the way through.
+  //
+  // Every command is best-effort: device emulation must never be the reason a
+  // run fails. UA goes through Electron's own setUserAgent (persistent on the
+  // WebContents, survives a debugger detach) AND through CDP so the client-hint
+  // headers (sec-ch-ua-mobile / platform) agree with it — a site that reads
+  // hints instead of the UA string would otherwise still see a desktop.
+  const applyDeviceTo = (wc: Electron.WebContents): void => {
+    if (wc.isDestroyed()) return
+    const dev = deviceOverride
+    try {
+      wc.setUserAgent(dev?.userAgent || wc.session.getUserAgent())
+    } catch {
+      // best-effort
+    }
+    let d: Electron.Debugger
+    try {
+      d = wc.debugger
+      if (!d.isAttached()) d.attach('1.3')
+    } catch {
+      // DevTools already owns the debugger — size emulation still applies, and
+      // the exported spec carries the full device regardless.
+      return
+    }
+    const send = (m: string, p: Record<string, unknown>): void => {
+      d.sendCommand(m, p).catch(() => {})
+    }
+    if (!dev) {
+      // Clear a previous device so the next plain run isn't stuck pretending to
+      // be a phone (same reasoning as the F28 locale else-branch).
+      send('Emulation.clearDeviceMetricsOverride', {})
+      send('Emulation.setTouchEmulationEnabled', { enabled: false })
+      send('Emulation.setEmitTouchEventsForMouse', { enabled: false })
+      send('Network.setUserAgentOverride', { userAgent: wc.session.getUserAgent() })
+      return
+    }
+    // width/height 0 = "don't override the size" — the native resize already did
+    // that, and overriding it here too would fight it.
+    send('Emulation.setDeviceMetricsOverride', {
+      width: 0,
+      height: 0,
+      deviceScaleFactor: dev.deviceScaleFactor ?? 0,
+      mobile: !!dev.isMobile
+    })
+    // maxTouchPoints is deliberately 1, not the 5 a real phone reports.
+    // Verified against real Playwright: `devices['iPhone 13']` leaves
+    // navigator.maxTouchPoints at 0 on BOTH chromium and webkit, while
+    // `ontouchstart` and `@media (pointer: coarse)` are correctly set. Claiming
+    // 5 here would make the in-app run MORE touch-capable than the exported
+    // spec — a test asserting on maxTouchPoints would pass in the app and fail
+    // in CI. Parity with the export beats realism: this app's whole identity is
+    // that a green run can be trusted.
+    send('Emulation.setTouchEmulationEnabled', {
+      enabled: !!dev.hasTouch,
+      maxTouchPoints: dev.hasTouch ? 1 : 0
+    })
+    // Without this, touch is only ADVERTISED (ontouchstart exists) but a click
+    // still arrives as a mouse event, so tap-only handlers never fire.
+    send('Emulation.setEmitTouchEventsForMouse', {
+      enabled: !!dev.hasTouch,
+      configuration: 'mobile'
+    })
+    if (dev.userAgent) {
+      const isIOS = /iPhone|iPad/.test(dev.userAgent)
+      const isAndroid = /Android/.test(dev.userAgent)
+      send('Network.setUserAgentOverride', {
+        userAgent: dev.userAgent,
+        platform: isIOS ? 'iPhone' : isAndroid ? 'Linux armv8l' : undefined,
+        userAgentMetadata: {
+          platform: isIOS ? 'iOS' : isAndroid ? 'Android' : 'Windows',
+          platformVersion: '',
+          architecture: '',
+          model: '',
+          mobile: !!dev.isMobile
+        }
+      })
+    }
+  }
+
+  const applyDeviceToAllTabs = (): void => {
+    for (const t of tabs) applyDeviceTo(t.view.webContents)
+  }
+
   const resizeEmbedded = (): void => {
     if (mainWindow.isDestroyed()) return
     // getContentBounds = the drawable area inside the window frame, so the
@@ -969,12 +1082,68 @@ function createWindow(): void {
     resizeEmbedded()
   })
 
+  // `hasNavigated` exists in BOTH processes, and nothing kept them in step. If
+  // the renderer reloads (Vite HMR in dev; a renderer crash in production) it
+  // comes back believing nothing has been navigated and draws the welcome
+  // screen — while main still thinks a page is open and keeps painting the
+  // native browser view straight over it. Surbhi hit exactly that: a 390px-wide
+  // strip of SauceDemo covering a third of the library.
+  //
+  // The renderer now declares its view state on mount, and main obeys. This is
+  // the same divergence that caused the F39 empty-workspace bug from the other
+  // direction — one process guessing what the other believes.
+  ipcMain.handle('browser:syncNavigated', (_event, navigated: boolean) => {
+    hasNavigated = !!navigated
+    resizeEmbedded()
+  })
+
   // Day 17 (viewport emulation): render at a fixed viewport (or null = fill).
+  // Kept as its own channel — a size-only preset (and every test saved before
+  // F36) goes through here and must behave exactly as it always did.
   ipcMain.handle(
     'browser:setViewport',
     (_event, viewport: { width: number; height: number } | null) => {
       viewportOverride = viewport && viewport.width > 0 && viewport.height > 0 ? viewport : null
+      deviceOverride = null
+      applyDeviceToAllTabs()
       resizeEmbedded()
+    }
+  )
+
+  // F36 (device emulation): size AND the four signals that make it a real phone.
+  // Passing null returns the browser to a plain desktop.
+  ipcMain.handle(
+    'browser:setDevice',
+    (
+      _event,
+      device: {
+        viewport: { width: number; height: number }
+        userAgent?: string
+        deviceScaleFactor?: number
+        isMobile?: boolean
+        hasTouch?: boolean
+      } | null
+    ) => {
+      viewportOverride =
+        device && device.viewport.width > 0 && device.viewport.height > 0 ? device.viewport : null
+      deviceOverride = device
+        ? {
+            userAgent: device.userAgent,
+            deviceScaleFactor: device.deviceScaleFactor,
+            isMobile: device.isMobile,
+            hasTouch: device.hasTouch
+          }
+        : null
+      applyDeviceToAllTabs()
+      resizeEmbedded()
+      // A UA/touch change only takes full effect on the next document — a page
+      // already rendered as desktop keeps its desktop layout otherwise, which
+      // looks exactly like the feature not working.
+      try {
+        if (hasNavigated) activeWC().reload()
+      } catch {
+        // nothing loaded yet — the next navigation picks it up
+      }
     }
   )
 
@@ -1087,6 +1256,10 @@ function createWindow(): void {
       }
     })
     mainWindow.contentView.addChildView(view)
+    // F36: a popup/second tab must be the SAME device as the tab that opened it
+    // — a flow that hops to a new tab mid-way would otherwise silently revert to
+    // desktop halfway through a mobile test.
+    applyDeviceTo(view.webContents)
     return wireTab(view, tabOrdinalSeq++)
   }
 
@@ -2161,6 +2334,40 @@ function createWindow(): void {
           await wait(60)
         }
       }
+      // F37: answer an `if` step's question about the page.
+      //
+      // Deliberately NEVER throws for "the thing isn't there" — that's an
+      // answer, not a failure. The whole point of a conditional is to handle
+      // both outcomes, so treating absence as an error would defeat it. A
+      // genuinely broken probe (page navigating away mid-check) resolves false,
+      // which routes to the else branch — the safe direction, since the else
+      // branch is where "the optional thing didn't happen" logic lives.
+      const evaluateCondition = async (step: ReplayStep): Promise<boolean> => {
+        const kind = step.condKind ?? 'element-visible'
+        if (kind === 'url-contains') {
+          const needle = (step.value ?? '').trim()
+          if (!needle) return false
+          return (currentWC.getURL() || '').includes(needle)
+        }
+        if (kind === 'text-present' || kind === 'text-absent') {
+          const needle = (step.value ?? '').trim()
+          if (!needle) return false
+          const present = (await currentWC
+            .executeJavaScript(
+              `!!(document.body && document.body.innerText.includes(${JSON.stringify(needle)}))`
+            )
+            .catch(() => false)) as boolean
+          return kind === 'text-present' ? present : !present
+        }
+        const probe = (await currentWC
+          .executeJavaScript(buildProbeScript(step as ReplayStep), true)
+          .catch(() => ({ found: false, visible: false }))) as {
+          found: boolean
+          visible: boolean
+        }
+        return kind === 'element-absent' ? !probe.visible : probe.visible
+      }
+
       // F3: wait until `text` appears anywhere on the current page. Throws if it
       // never shows within the timeout — a text that never arrives is a real
       // problem worth surfacing (an implicit "the content loaded" check).
@@ -2245,6 +2452,11 @@ function createWindow(): void {
               d.sendCommand('Emulation.setLocaleOverride', {}).catch(() => {})
               d.sendCommand('Network.setExtraHTTPHeaders', { headers: {} }).catch(() => {})
             }
+            // F36: attaching/detaching the debugger drops CDP emulation, so the
+            // device signals are re-applied here for the run. Without this a
+            // mobile test would replay with mobile SIZE but desktop UA + no
+            // touch — passing while never having tested the mobile path.
+            applyDeviceTo(wcToAttach)
             // F1: with a HAR loaded, intercept the API calls (XHR/fetch) and
             // serve the saved response when we have one; otherwise let it hit the
             // live network (augment mode). We deliberately DON'T intercept the
@@ -2356,6 +2568,11 @@ function createWindow(): void {
 
       // Every exit from the replay goes through here so the CDP debugger is
       // always released, pass or fail.
+      // F37: plain-English notes about control flow that did NOT run this time
+      // (an untaken if-branch, a loop that iterated zero times). Declared here
+      // so finish() can attach them; filled by the run loop below.
+      const controlNotes: string[] = []
+
       const finish = async (outcome: {
         ok: boolean
         failedAt?: number
@@ -2372,6 +2589,11 @@ function createWindow(): void {
         category?: FailureCategory
         aiHealed?: number
         healable?: { index: number; label: string; signals: string[]; score: number; step: ReplayStep }
+        // F37: which if-branches / loops actually executed. A green test whose
+        // checks all sat in a branch that was never taken has verified NOTHING
+        // — the F6 dead-assertion problem in control-flow form — so the run
+        // reports it rather than letting the tick speak for itself.
+        branchNotes?: string[]
       }): Promise<{
         ok: boolean
         failedAt?: number
@@ -2388,6 +2610,11 @@ function createWindow(): void {
         category?: FailureCategory
         aiHealed?: number
         healable?: { index: number; label: string; signals: string[]; score: number; step: ReplayStep }
+        // F37: which if-branches / loops actually executed. A green test whose
+        // checks all sat in a branch that was never taken has verified NOTHING
+        // — the F6 dead-assertion problem in control-flow form — so the run
+        // reports it rather than letting the tick speak for itself.
+        branchNotes?: string[]
       }> => {
         // Detach EVERY tab we touched (console + CDP), and clear the replay flag
         // in each so normal browsing gets its real native dialogs back.
@@ -2478,12 +2705,19 @@ function createWindow(): void {
         // F9/B: how many selectors F4 auto-healed this run — lets a suite report
         // surface "N tests auto-healed" and offer to save the repaired selectors.
         if (aiHealedOnce.size) outcome.aiHealed = aiHealedOnce.size
+        // F37: report any branch/loop that never ran. Only the SKIPPED ones —
+        // listing branches that did run would be noise, and the whole point is
+        // to surface the steps a green tick silently didn't cover.
+        if (controlNotes.length) outcome.branchNotes = controlNotes.slice()
         return outcome
       }
 
       // Local copy so a re-pick can swap in a healed step mid-run without
       // mutating the renderer's array (it sends its own update separately).
-      const list = steps.slice()
+      // F40: put the real password back, HERE in main and on this copy only. The
+      // renderer never receives it, and the saved test still holds only a ref —
+      // so the value exists in memory for the length of the run and nowhere else.
+      const list = (await resolveSecrets(steps.slice())) as typeof steps
       // Day 16: flag replay up front so a dialog fired during the very first
       // load is auto-answered too (armNextDialog re-sets it before each action).
       // Day 16(+): also arm download tracking so `download` steps can verify.
@@ -2969,6 +3203,47 @@ function createWindow(): void {
           return u
         }
       }
+      // === F37: loops + branching ==================================
+      // Pair up the control markers ONCE, before the run. If the structure is
+      // broken (an unclosed repeat, crossed markers) we refuse to run rather
+      // than guess — guessing wrong silently repeats or skips real test steps,
+      // and a test that lies is worse than a test that won't start.
+      const cf = analyzeControlFlow(list as { type: string; disabled?: boolean }[])
+      if (cf.errors.length) {
+        throw new Error(`Test structure problem — ${cf.errors[0]}`)
+      }
+      // One frame per loop currently running. Innermost is last.
+      const loopStack: {
+        start: number
+        end: number
+        index: number
+        total: number
+        texts: string[]
+      }[] = []
+      // "its 1 step was" / "its 3 steps were" — the verb has to agree too, not
+      // just the noun.
+      const stepsWere = (n: number): string =>
+        n === 1 ? 'its 1 step was' : `its ${n} steps were`
+      const stepsNever = (n: number): string =>
+        n === 1 ? 'its 1 step never' : `its ${n} steps never`
+      const stepsThe = (n: number): string =>
+        n === 1 ? 'the 1 step' : `the ${n} steps`
+      // F37 coverage honesty: a branch that never ran verified NOTHING. How
+      // many real (non-marker) steps sit in a span, so a note can say how much
+      // was skipped — "the check you wrote never ran" is the useful part.
+      const bodyStepCount = (from: number, to: number): number => {
+        let n = 0
+        for (let k = from + 1; k < to; k++) {
+          const s = list[k] as { type: string; disabled?: boolean }
+          if (!s.disabled && !isControlStep(s)) n++
+        }
+        return n
+      }
+      // How many times a given loop marker has sent us round. Purely a runaway
+      // guard: a for-each count is fixed up front and a times-loop is bounded,
+      // but a corrupted file shouldn't be able to hang the app forever.
+      const MAX_ITERATIONS = 1000
+
       for (let i = 0; i < list.length; i++) {
         // F24.1: resolve the LATE tokens now, for THIS step. {{env:X}} and data
         // columns were substituted by the renderer before the run; {{uuid}} and
@@ -2976,10 +3251,168 @@ function createWindow(): void {
         // that creates it has run. Resolving on a COPY leaves the saved test
         // untouched (the step list still shows the token, which is what you
         // authored and what you'd want to see).
+        // F37: {{loop:*}} resolves against the INNERMOST enclosing loop, and for
+        // the same reason — its value changes on every iteration of the same step.
+        const activeLoop = loopStack.length ? loopStack[loopStack.length - 1] : null
+        const loopCtx = activeLoop
+          ? {
+              index: activeLoop.index,
+              total: activeLoop.total,
+              text: activeLoop.texts[activeLoop.index]
+            }
+          : null
         const step = resolveRuntimeStep(list[i], runTokens)
+        if (loopCtx) {
+          step.value = resolveLoopTokens(step.value, loopCtx)
+          step.label = resolveLoopTokens(step.label, loopCtx)
+        }
         // Steps turned off in the editor are skipped — leave their row neutral
         // (no running/done/error) so the UI shows them as inert, not run.
         if (step.disabled) continue
+
+        // === F37: control markers ==================================
+        // These decide WHERE the run goes next rather than doing something to
+        // the page, so they're handled before all the per-step machinery below
+        // (trace slices, baselines, element evidence) — none of which applies
+        // to a jump. They report progress so their rows still light up.
+        if (isControlStep(step)) {
+          const span = cf.spans.get(i)
+          mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'running' })
+          try {
+            if (step.type === 'repeat') {
+              if (!span) throw new Error('This loop has no matching endRepeat.')
+              let total = 0
+              let texts: string[] = []
+              if (step.repeatKind === 'each') {
+                // Count the collection ONCE, up front — see buildCollectionScript
+                // for why a live count would be unpredictable.
+                const res = (await currentWC
+                  .executeJavaScript(buildCollectionScript(step), true)
+                  .catch(() => ({ count: 0, texts: [] }))) as {
+                  count: number
+                  texts: string[]
+                }
+                total = res.count
+                texts = res.texts ?? []
+              } else {
+                const n = parseInt(step.value ?? '1', 10)
+                total = Number.isFinite(n) && n > 0 ? Math.min(n, MAX_ITERATIONS) : 0
+              }
+              if (total <= 0) {
+                // Zero iterations: the body never runs. Jump past endRepeat and
+                // record it, because a loop that ran zero times verified nothing
+                // — the same honesty problem as an untaken branch.
+                const skipped = bodyStepCount(i, span.end)
+                controlNotes.push(
+                  step.repeatKind === 'each'
+                    ? `Step ${i + 1}: the "for each" loop matched NO elements, so ${stepsNever(skipped)} ran.`
+                    : `Step ${i + 1}: the loop was set to 0 times, so ${stepsNever(skipped)} ran.`
+                )
+                mainWindow.webContents.send('recorder:replay-progress', {
+                  index: i,
+                  status: 'skipped'
+                })
+                i = span.end
+                continue
+              }
+              loopStack.push({ start: i, end: span.end, index: 0, total, texts })
+            } else if (step.type === 'endRepeat') {
+              const frame = loopStack[loopStack.length - 1]
+              if (frame && frame.end === i) {
+                frame.index++
+                if (frame.index < frame.total) {
+                  // Round again: set i to the loop header so the i++ lands on
+                  // the first body step.
+                  i = frame.start
+                  mainWindow.webContents.send('recorder:replay-progress', {
+                    index: i,
+                    status: 'done'
+                  })
+                  continue
+                }
+                loopStack.pop()
+              }
+            } else if (step.type === 'if') {
+              if (!span) throw new Error('This if has no matching endIf.')
+              const truth = await evaluateCondition(step)
+              if (truth) {
+                // The true branch runs. If there's an else, ITS steps don't —
+                // note that, because any check written there was not performed.
+                if (span.elseAt !== undefined) {
+                  const skipped = bodyStepCount(span.elseAt, span.end)
+                  if (skipped > 0) {
+                    controlNotes.push(
+                      `Step ${span.elseAt + 1}: the "otherwise" branch did not run this time — ${stepsWere(skipped)} not checked.`
+                    )
+                  }
+                }
+              } else {
+                const skipped = bodyStepCount(
+                  i,
+                  span.elseAt !== undefined ? span.elseAt : span.end
+                )
+                if (skipped > 0) {
+                  controlNotes.push(
+                    `Step ${i + 1}: the condition was false, so ${stepsThe(skipped)} inside the "if" did not run.`
+                  )
+                }
+                // Jump to just after `else`, or past `endIf` when there isn't one.
+                const skipTo = span.elseAt !== undefined ? span.elseAt : span.end
+                // The `if` itself DID run — we evaluated its condition. Mark it
+                // done, not skipped; only its untaken body is skipped (and those
+                // rows are never visited, so they correctly stay blank).
+                mainWindow.webContents.send('recorder:replay-progress', {
+                  index: i,
+                  status: 'done'
+                })
+                // And mark where we land. When there's an `else` its branch is
+                // about to run, so "skipped" would have been exactly backwards.
+                mainWindow.webContents.send('recorder:replay-progress', {
+                  index: skipTo,
+                  status: 'done'
+                })
+                i = skipTo
+                continue
+              }
+            } else if (step.type === 'else') {
+              // Reached by FALLING OUT of a true branch, so the true branch ran
+              // and the else branch must not. (When the condition was false we
+              // jumped straight past this marker.)
+              const owner = cf.ownerOf.get(i)
+              const ownerSpan = owner !== undefined ? cf.spans.get(owner) : undefined
+              if (ownerSpan) {
+                // Mark BOTH markers before jumping. Without this the run leaves
+                // "Otherwise" and "End if" blank at the bottom of an otherwise
+                // green test, which reads as "it didn't finish" — the worst
+                // possible signal from a tool whose whole point is trust.
+                // Otherwise = skipped (its branch really didn't run); End if =
+                // done (the branches rejoined and the flow carried on).
+                mainWindow.webContents.send('recorder:replay-progress', {
+                  index: i,
+                  status: 'skipped'
+                })
+                mainWindow.webContents.send('recorder:replay-progress', {
+                  index: ownerSpan.end,
+                  status: 'done'
+                })
+                i = ownerSpan.end
+                continue
+              }
+            }
+            // endIf: nothing to do — it's just where the branches rejoin.
+            mainWindow.webContents.send('recorder:replay-progress', { index: i, status: 'done' })
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            mainWindow.webContents.send('recorder:replay-progress', {
+              index: i,
+              status: 'error',
+              error: message
+            })
+            throw err
+          }
+          continue
+        }
+
         // F8: snapshot the page state this step is about to act on (before it runs).
         if (baselineKey) {
           const snap = await captureSnapshot()
@@ -3905,6 +4338,8 @@ function createWindow(): void {
         steps: unknown[]
         storageState?: string
         viewport?: { width: number; height: number }
+        deviceId?: string // F36
+        tags?: string[] // F38
         dataRows?: Record<string, string>[]
         // F1: renderer signals "bank the captured network with this test"; main
         // supplies the actual HAR log (it lives here, not in the renderer).
@@ -4132,7 +4567,126 @@ function createWindow(): void {
       return runCrossBrowser(specCode, browsers, envVars, session)
     }
   )
+
+  // F39: run a whole batch of tests at once through real Playwright, N at a
+  // time. The renderer decides WHICH tests are safe to run this way (see
+  // headlessBlockers) and generates each spec; main only writes them out and
+  // hands Playwright's scheduler the job.
+  ipcMain.handle(
+    'xbrowser:runSuite',
+    async (
+      _event,
+      specs: { id: string; name: string; code: string; sessionFile?: string }[],
+      workers: number,
+      envOverride?: Record<string, string>
+    ) => {
+      let envVars: Record<string, string> = {}
+      if (envOverride) {
+        envVars = envOverride
+      } else {
+        const env = await activeEnvironment()
+        for (const v of env?.vars ?? []) if (v.name) envVars[v.name] = v.value
+        if (env?.baseURL) envVars.BASE_URL = env.baseURL
+      }
+      const prepared: ParallelSpec[] = (specs ?? []).map((s) => ({
+        id: s.id,
+        name: s.name,
+        code: s.code,
+        sessionPath: s.sessionFile
+          ? join(libraryDir(), '_sessions', s.sessionFile)
+          : undefined
+      }))
+      return runSuiteParallel(prepared, workers, envVars)
+    }
+  )
   ipcMain.handle('library:list', () => listTests())
+
+  // === F40: secrets =================================================
+  // Move any plaintext password left in a test file into the userData store.
+  // Runs once at startup, is idempotent, and backs the whole library up before
+  // touching anything (it rewrites the user's real test files). Returns what it
+  // moved so the UI can say so rather than changing files silently.
+  ipcMain.handle('secrets:migrate', async () => {
+    return migratePlaintextSecrets(
+      libraryDir(),
+      async () => (await listTests()).map((t) => t.fileName),
+      async (f) => (await loadTest(f)) as Record<string, unknown> | null,
+      async (f, data) => {
+        await writeFile(join(libraryDir(), f), JSON.stringify(data, null, 2), 'utf-8')
+      }
+    )
+  })
+
+  // F32/F39: the headless paths run the EXPORTED spec, which reads
+  // process.env.PASSWORD — so those runs need the value resolved. Same machine,
+  // same user, and it never reaches disk in the renderer.
+  ipcMain.handle('secrets:resolve', (_event, refs: string[]) => getSecrets(refs ?? []))
+
+  // === F40: shareable bundles =======================================
+  ipcMain.handle(
+    'bundle:export',
+    async (_event, tests: string[], includeAcs: boolean) => {
+      const picked = await dialog.showOpenDialog(mainWindow, {
+        title: 'Choose a folder for the bundle',
+        properties: ['openDirectory', 'createDirectory'],
+        buttonLabel: 'Export here'
+      })
+      if (picked.canceled || !picked.filePaths[0]) return { ok: false, error: 'cancelled' }
+      // A named subfolder, so exporting into an existing repo folder can't
+      // scatter bundle files among the user's own.
+      const stamp = new Date().toISOString().slice(0, 10)
+      const dest = join(picked.filePaths[0], `qaflow-bundle-${stamp}`)
+      const acs = includeAcs ? await loadAcs() : null
+      return exportBundle(libraryDir(), dest, tests, acs)
+    }
+  )
+
+  // Inspect first, apply second: the renderer shows collisions and gets a
+  // decision per test BEFORE anything is written.
+  ipcMain.handle('bundle:inspect', async () => {
+    const picked = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a bundle folder to import',
+      properties: ['openDirectory'],
+      buttonLabel: 'Inspect'
+    })
+    if (picked.canceled || !picked.filePaths[0]) return { ok: false, tests: [], error: 'cancelled' }
+    const inspection = await inspectBundle(picked.filePaths[0], libraryDir())
+    return { ...inspection, bundleDir: picked.filePaths[0] }
+  })
+
+  ipcMain.handle(
+    'bundle:import',
+    async (_event, bundleDir: string, plan: ImportPlanEntry[]) => {
+      const res = await importBundle(bundleDir, libraryDir(), plan)
+      // Acceptance criteria are additive — a shared AC list should ADD to what
+      // you already track, never replace it.
+      const acPath = join(bundleDir, 'acceptance-criteria.txt')
+      if (existsSync(acPath)) {
+        try {
+          const incoming = (await readFile(acPath, 'utf-8')).split(/\r?\n/)
+          const current = await loadAcs()
+          const lines = current ? current.split(/\r?\n/) : []
+          for (const a of incoming) {
+            const trimmed = a.trim()
+            if (trimmed && !lines.some((l) => l.trim() === trimmed)) lines.push(a)
+          }
+          await saveAcs(lines.join('\n'))
+        } catch {
+          // a malformed AC file must not fail the whole import
+        }
+      }
+      return res
+    }
+  )
+
+  ipcMain.handle('bundle:reveal', async (_event, path: string) => {
+    // OPEN the bundle, don't reveal it. showItemInFolder drops you in the
+    // PARENT with the folder merely selected — which is right for a file, but
+    // after "Bundle exported" you clicked this to see what's INSIDE, and landing
+    // on your Desktop reads as "the export produced nothing".
+    const err = await shell.openPath(path)
+    if (err) shell.showItemInFolder(path) // fall back if the folder won't open
+  })
   ipcMain.handle('library:listSuites', () => listSuites())
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))
   ipcMain.handle('library:delete', (_event, fileName: string) => deleteTest(fileName))

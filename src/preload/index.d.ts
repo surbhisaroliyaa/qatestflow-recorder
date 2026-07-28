@@ -20,6 +20,19 @@ interface BrowserAPI {
   onTabsChanged: (callback: (tabs: TabInfo[]) => void) => () => void
   // Day 17 (viewport emulation): render at a fixed viewport, or null to fill.
   setViewport: (viewport: { width: number; height: number } | null) => Promise<void>
+  // Keep main's view state in step with the renderer's (a renderer reload
+  // otherwise leaves the native browser painted over the welcome screen).
+  syncNavigated: (navigated: boolean) => Promise<void>
+  // F36 (device emulation): size + UA + touch + pixel density, or null = desktop.
+  setDevice: (
+    device: {
+      viewport: { width: number; height: number }
+      userAgent?: string
+      deviceScaleFactor?: number
+      isMobile?: boolean
+      hasTouch?: boolean
+    } | null
+  ) => Promise<void>
 }
 
 interface ReplayProgress {
@@ -55,6 +68,11 @@ interface ReplayResult {
   // confident enough to auto-apply — surfaced so a human can review & accept it
   // (never applied silently in a batch run — a wrong guess would be a false pass).
   healable?: { index: number; label: string; signals: string[]; score: number; step: RecorderStep }
+  // F37: control flow that did NOT run this time — an if-branch whose condition
+  // was false, a loop that matched nothing. A green test whose checks all sat in
+  // a branch that never executed has verified nothing, and the tick alone can't
+  // tell you that (the F6 dead-assertion problem, in control-flow form).
+  branchNotes?: string[]
 }
 
 // Day 18: how aggressively to keep a run trace (mirrors Playwright's `trace`).
@@ -180,6 +198,50 @@ interface XBrowserAPI {
     envOverride?: Record<string, string>,
     sessionFile?: string
   ) => Promise<CrossBrowserResult>
+  // === F40: shareable bundles ===
+  exportBundle: (
+    tests: string[],
+    includeAcs: boolean
+  ) => Promise<{ ok: boolean; path?: string; manifest?: BundleManifest; error?: string }>
+  inspectBundle: () => Promise<{
+    ok: boolean
+    bundleDir?: string
+    manifest?: BundleManifest
+    tests: BundleTestPreview[]
+    error?: string
+  }>
+  importBundle: (
+    bundleDir: string,
+    plan: { file: string; choice: 'keep-both' | 'overwrite' | 'skip' }[]
+  ) => Promise<{
+    ok: boolean
+    imported: number
+    skipped: number
+    overwritten: number
+    keptBoth: number
+    blocks: number
+    uploads: number
+    error?: string
+  }>
+  revealBundle: (path: string) => Promise<void>
+  // F40: resolve secret refs for a headless run (reads process.env.PASSWORD).
+  resolveSecrets: (refs: string[]) => Promise<Record<string, string>>
+  // F40: one-time move of plaintext passwords out of test files into userData.
+  migrateSecrets: () => Promise<{ migrated: number; tests: string[] }>
+  // F39: run a batch of tests through real Playwright, `workers` at a time.
+  // In-app replay can't parallelize (one embedded browser view), so this is the
+  // only path that can — at the cost of being the EXPORTED spec, not the replay
+  // engine. The renderer only sends tests that survive that (headlessBlockers).
+  runSuite: (
+    specs: { id: string; name: string; code: string; sessionFile?: string }[],
+    workers: number,
+    envOverride?: Record<string, string>
+  ) => Promise<{
+    installed: boolean
+    ran: boolean
+    results: { id: string; ok: boolean; error?: string }[]
+    message?: string
+  }>
 }
 
 // === Scheduled monitors (F32) — MIRROR: src/main/monitors.ts ===
@@ -360,6 +422,8 @@ interface LibraryAPI {
     steps: RecorderStep[]
     storageState?: string
     viewport?: { width: number; height: number }
+    deviceId?: string // F36: which device profile that viewport came from
+    tags?: string[] // F38: cross-cutting labels (@smoke, @regression)
     dataRows?: Record<string, string>[] // Day 20: data-driven table rows
     captureHar?: boolean // F1: bank the captured network with this test
   }) => Promise<SavedTestSummary>
@@ -407,6 +471,8 @@ interface DraftAPI {
     suite: string
     storageState?: string
     viewport?: { width: number; height: number }
+    deviceId?: string // F36: which device profile that viewport came from
+    tags?: string[] // F38
     steps: RecorderStep[]
     dataRows?: Record<string, string>[] // Day 20: data-driven table rows
   }) => Promise<void>
@@ -618,6 +684,8 @@ declare global {
     suite: string
     storageState?: string
     viewport?: { width: number; height: number }
+    deviceId?: string // F36: which device profile that viewport came from
+    tags?: string[] // F38
     dataRows?: Record<string, string>[] // Day 20: data-driven table rows
     updatedAt: string
     steps: RecorderStep[]
@@ -646,6 +714,30 @@ declare global {
   }
 
   // One row in the library list (no steps — kept light for listing).
+  // === F40 bundles — MIRROR: src/main/bundle.ts ===
+  interface BundleManifest {
+    bundleVersion: number
+    createdAt: string
+    testCount: number
+    secretsPlaceholdered: string[]
+    dataScrubbed: { test: string; columns: string[] }[]
+    visualWithoutBaseline: string[]
+    blocks: string[]
+    uploads: string[]
+    hasAcceptanceCriteria: boolean
+  }
+
+  interface BundleTestPreview {
+    file: string
+    name: string
+    suite: string
+    stepCount: number
+    tags?: string[]
+    collidesWith?: string
+    existingStepCount?: number
+    existingUpdatedAt?: string
+  }
+
   interface SavedTestSummary {
     // Relative path within the library — includes the section subfolder
     // when present (e.g. "E2E/login-flow.json").
@@ -657,6 +749,9 @@ declare global {
     stepCount: number
     storageState?: string // Day 17: attached session, if any
     har?: string // F1: a captured network archive, if any (drives a 🌐 badge)
+    // F38: cross-cutting labels. In the SUMMARY so the library can filter and
+    // "Run all @smoke" can select without opening every test file on disk.
+    tags?: string[]
     assertCount?: number // F5: how many checks the test makes
     selectorHealth?: number // F5: avg selector stability (0–100)
     lastRun?: RunInfo
@@ -714,6 +809,8 @@ declare global {
     updatedAt: string
     storageState?: string // Day 17: attached session (start logged in)
     viewport?: { width: number; height: number } // Day 17: device emulation
+    deviceId?: string // F36: which device profile that viewport came from
+    tags?: string[] // F38: cross-cutting labels (@smoke, @regression)
     dataRows?: Record<string, string>[] // Day 20: data-driven table rows
     har?: string // F1: a captured network archive to replay against, if any
     versions?: TestVersion[] // F12: previous edits, newest first
@@ -942,6 +1039,16 @@ declare global {
       | 'perf'
       | 'block'
       | 'api'
+      // F37 (loops + branching, completes F26). Flat paired markers rather
+      // than nested children — every index-based feature in this app (trace
+      // evidence, replay progress, self-heal indices, F8 baselines, the F12
+      // version diff) addresses steps by position, and a tree would break all
+      // of them. See src/shared/controlFlow.ts for how they pair up.
+      | 'repeat'
+      | 'endRepeat'
+      | 'if'
+      | 'else'
+      | 'endIf'
     label?: string
     // Pillar 4 (live-link blocks, v2): a 'block' step is a LIVE REFERENCE to a
     // saved block (its file name). It's one step in the array (moves/deletes as a
@@ -972,6 +1079,12 @@ declare global {
     assertKind?: AssertKind // for `assert` steps — which check to make
     attrName?: string // for `attribute` asserts — WHICH attribute to check
     secret?: boolean // password field — value masked on screen / in export
+    // F40: the password itself lives in userData (secrets.json), not in this
+    // file — the test folder is meant to be shared and committed. A ref rather
+    // than a step index because steps get copied constantly (blocks flatten,
+    // data-driven substitutes per row, clone, F20 variants) and a ref survives
+    // all of that. Main puts the value back at replay time, on a copy.
+    secretRef?: string
     disabled?: boolean // turned off in the editor — skipped by replay + export
     // F26 (conditional): this step MAY be absent (e.g. an optional cookie
     // banner / promo popup). Replay skips it instead of failing when its element
@@ -984,6 +1097,16 @@ declare global {
     // F27: this step CREATES persistent data (label = the entity). Tracked so a
     // suite can flag a test that creates data with no teardown to remove it.
     createsData?: string
+    // === F37: loops + branching ===
+    // For a `repeat` step: 'times' runs its body `value` times; 'each' runs it
+    // once per element matching the step's selector (the "for each row in the
+    // table" case). Steps inside can read {{loop:index}} / {{loop:n}} /
+    // {{loop:text}}, which resolve per ITERATION.
+    repeatKind?: 'times' | 'each'
+    // For an `if` step: what decides which branch runs. Element conditions use
+    // the step's own selector ladder (so they self-heal like any other step);
+    // text/url conditions use `value`.
+    condKind?: 'element-visible' | 'element-absent' | 'text-present' | 'text-absent' | 'url-contains'
     url?: string
     // Day 16(+): a `download` step's saved file path (for "Show in folder" and
     // the on-replay file check). The step's `value` holds the EXPECTED filename

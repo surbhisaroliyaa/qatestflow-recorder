@@ -37,6 +37,7 @@ export interface ReplayStep {
   assertKind?: string // for `assert` steps — which check to make (Day 9)
   attrName?: string // for `attribute` asserts — which attribute to check (Day 11)
   secret?: boolean
+  secretRef?: string // F40: the value lives in userData, resolved by main at run time
   disabled?: boolean // turned off in the editor — skipped during replay
   // F26 (conditional): this step MAY be absent (an optional cookie banner /
   // popup). Replay uses a shorter find timeout for it, and a failure is treated
@@ -49,6 +50,13 @@ export interface ReplayStep {
   // Tracked so a suite can flag a test that creates data but has no teardown to
   // remove it — an orphan-data risk. Purely informational at replay (no behaviour).
   createsData?: string
+  // === F37: loops + branching ===
+  // 'times' repeats the body `value` times; 'each' repeats it once per element
+  // matching this step's candidate ladder.
+  repeatKind?: string
+  // What an `if` tests: element-visible | element-absent | text-present |
+  // text-absent | url-contains.
+  condKind?: string
   baselineId?: string // Day 19: a `snapshot` step's baseline image id
   maskSelectors?: string // F15: CSS selectors whose rects are masked out of the diff
   freezeAnimations?: boolean // F15: disable animations before capture (default on)
@@ -191,6 +199,18 @@ function resolverHelpers(): string {
         if (c.kind === 'text' && c.text) return byTextAll(c.text)[at] || null;
       } catch (e) { /* malformed selector — treat as no match */ }
       return null;
+    };
+
+    // F37: EVERY element a candidate matches, for a "for each …" loop. This is
+    // the same traversal findByCandidate uses, minus the .nth pick — so the set
+    // a loop iterates is exactly the set the ladder would have chosen from.
+    const findAllByCandidate = (c) => {
+      try {
+        if (c.css) return deepQueryAll(c.css, document);
+        if (c.kind === 'role' && c.role) return byRoleAll(c.role, c.name);
+        if (c.kind === 'text' && c.text) return byTextAll(c.text);
+      } catch (e) { /* malformed selector — treat as no match */ }
+      return [];
     };`
 }
 
@@ -273,6 +293,63 @@ function findPrelude(candidates: ReplayCandidate[], allowHidden = false, timeout
     }
     el.scrollIntoView({ block: 'center' });`
   )
+}
+
+// =====================================================================
+// F37 — control-flow probes
+//
+// A loop or an `if` asks a QUESTION about the page rather than acting on it, so
+// these deliberately never throw: "the element isn't there" is an ANSWER, not a
+// failure. They also use a short timeout — an `if` that waited the full 8s for
+// an absent element would add 8 seconds to every run of the common
+// "if the cookie banner appeared" case, where absence is the normal outcome.
+// =====================================================================
+
+/** Does this element exist / is it visible? Resolves to {found, visible}. */
+export function buildProbeScript(step: ReplayStep, timeoutMs = 1500): string {
+  return `(async () => {
+    ${ladderPrelude(step.candidates ?? [])}
+    const deadline = Date.now() + ${timeoutMs};
+    let found = null, visible = null;
+    while (Date.now() < deadline) {
+      for (const c of cands) {
+        const cand = findByCandidate(c);
+        if (cand) {
+          found = cand;
+          if (isVisible(cand)) { visible = cand; break; }
+        }
+      }
+      if (visible) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return { found: !!found, visible: !!visible };
+  })()`
+}
+
+/**
+ * For a `repeat … for each` loop: how many elements match, and their visible
+ * text (so {{loop:text}} can be resolved per iteration).
+ *
+ * The count is taken ONCE, before the first iteration. That's deliberate: if
+ * the body of the loop adds or removes matching elements — "for each product,
+ * add it to the cart" on a page where adding one re-renders the list — a live
+ * count could loop forever or stop early. A fixed count is predictable, and
+ * predictable is what a test needs.
+ */
+export function buildCollectionScript(step: ReplayStep, max = 200): string {
+  return `(async () => {
+    ${ladderPrelude(step.candidates ?? [])}
+    let els = [];
+    for (const c of cands) {
+      const all = findAllByCandidate(c);
+      if (all && all.length) { els = all; break; }
+    }
+    els = els.slice(0, ${max});
+    return {
+      count: els.length,
+      texts: els.map((e) => (e.innerText || e.textContent || '').trim().slice(0, 200))
+    };
+  })()`
 }
 
 // Build the full injectable script (an async IIFE returning {ok, error?}).

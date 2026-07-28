@@ -15,6 +15,7 @@
 import { stepText } from './playwrightExport'
 import { envVarNames } from './dataDriven'
 import { findWeakAssertions, type WeakAssertion } from './deadAssertions'
+import { resolveDevice, deviceSummary } from './devices'
 
 // The step types that VERIFY something (vs perform an action) — they populate
 // the "Checks" section, which is the part a reviewer cares about most.
@@ -25,6 +26,8 @@ export interface DocMeta {
   baseURL?: string
   storageState?: string
   viewport?: { width: number; height: number }
+  deviceId?: string // F36
+  tags?: string[] // F38
   dataRows?: Record<string, string>[]
 }
 
@@ -48,8 +51,20 @@ function preconditions(steps: RecorderStep[], meta: DocMeta): string[] {
   if (meta.storageState) {
     out.push(`Starts already logged in (session "${meta.storageState}") — the login steps are skipped.`)
   }
-  if (meta.viewport) {
-    out.push(`Runs at a ${meta.viewport.width}×${meta.viewport.height} viewport (device emulation).`)
+  // F38: what this test is FOR, as opposed to where it files.
+  if (meta.tags && meta.tags.length) {
+    out.push(`Tagged ${meta.tags.join(' ')}.`)
+  }
+  // F36: name the DEVICE when there is one — "runs on an iPhone 13" tells a
+  // reader far more than "runs at 390×664", and it's the difference between a
+  // real mobile test and a narrow desktop window.
+  const device = resolveDevice(meta.deviceId, meta.viewport)
+  if (device) {
+    out.push(
+      device.userAgent
+        ? `Runs as ${device.label} — ${deviceSummary(device)}.`
+        : `Runs at a ${device.viewport.width}×${device.viewport.height} viewport (size only — the page still sees a desktop browser).`
+    )
   }
   if (meta.dataRows && meta.dataRows.length) {
     out.push(`Data-driven: runs once per row of a data table (${meta.dataRows.length} rows).`)
@@ -198,8 +213,19 @@ export function generateSuiteDoc(
       const hasTeardown = t.flat.some((s) => !s.disabled && s.teardown)
       const orphan = created.length > 0 && !hasTeardown
       if (orphan) orphanTotal++
+      // F36/F38: the DEVICE this runs as and the tags it carries belong on the
+      // per-test line. They used to be written into preconditions() — which
+      // only generateTestDoc calls, and that has had no UI entry point since
+      // the per-test 📖 button was dropped, so they never appeared anywhere.
+      const device = resolveDevice(t.meta.deviceId, t.meta.viewport)
+      const deviceNote = device
+        ? device.userAgent
+          ? ` 📱 _(${device.label})_`
+          : ` 🖥 _(${device.viewport.width}×${device.viewport.height}, size only)_`
+        : ''
+      const tagNote = t.meta.tags?.length ? ` ${t.meta.tags.join(' ')}` : ''
       lines.push(
-        `- **${t.name}** — ${plural(actions.length, 'action')}, ${plural(real.length, 'check')}` +
+        `- **${t.name}**${deviceNote}${tagNote} — ${plural(actions.length, 'action')}, ${plural(real.length, 'check')}` +
           (dead > 0 ? ` _(${dead} dead)_` : '') +
           (real.length === 0 ? ' ⚠ _(verifies nothing)_' : '') +
           (created.length

@@ -29,6 +29,12 @@ import { classifyRuns, type FlakyTag } from './flaky'
 import { trustScore } from './trust'
 import { findWeakAssertions } from './deadAssertions'
 import { diffSteps, diffCounts } from './stepDiff'
+import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
+// F37: loops + branching. Shared with the replay engine so the step list, the
+// export and the run all agree on how markers pair up.
+import { analyzeControlFlow, isControlStep, type ConditionKind } from '../../shared/controlFlow'
+import { SUGGESTED_TAGS, parseTags, normalizeTag, allTags, matchesTags } from './tags'
+import { headlessBlockers, blockerSummary, defaultWorkers } from './headless'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
@@ -223,6 +229,17 @@ function App(): React.JSX.Element {
   // opens the assertion chooser panel.
   const [isPicking, setIsPicking] = useState(false)
   const [pickedElement, setPickedElement] = useState<PickedElement | null>(null)
+  // F37: when set, the next picked element BINDS to this existing step index
+  // (a for-each loop's collection / an if's condition target) rather than
+  // creating a new step. A ref because the pick listener is registered once at
+  // mount and would capture a state value stale.
+  const pickBindRef = useRef<number | null>(null)
+  // Found by Surbhi while testing F37: you click ＋ on a step in the MIDDLE of
+  // the list, pick an element — and the check panel opens somewhere else on
+  // screen. Your attention is at the insertion point; the response isn't. It
+  // reads as "nothing happened". Longer lists (which loops encourage) make it
+  // worse. Bring the panel to you instead.
+  const checkPanelRef = useRef<HTMLDivElement | null>(null)
   const [assertKind, setAssertKind] = useState<AssertKind>('visible')
   const [nlClaim, setNlClaim] = useState('') // F19: the plain-English AI-check claim being typed
   const [assertValue, setAssertValue] = useState('')
@@ -292,6 +309,46 @@ function App(): React.JSX.Element {
   // Day 17 — viewport emulation: the device viewport this test renders at
   // (undefined = desktop / fill the window).
   const [viewport, setViewport] = useState<{ width: number; height: number } | undefined>(undefined)
+  // F36 — which DEVICE profile that viewport came from. Kept beside `viewport`
+  // rather than replacing it: `viewport` stays the source of truth for size (so
+  // pre-F36 tests are untouched) and this adds the UA/touch/density signals.
+  const [deviceId, setDeviceId] = useState<string | undefined>(undefined)
+  // F38 — cross-cutting labels on the CURRENT test (@smoke, @regression). One
+  // suite, many tags.
+  const [tags, setTags] = useState<string[]>([])
+  const [tagInput, setTagInput] = useState('')
+  // F38 — which tags the library list is filtered to (AND across them).
+  const [tagFilter, setTagFilter] = useState<Set<string>>(new Set())
+  // F39 — run a batch through headless Playwright, several at a time. OFF by
+  // default and always opt-in: it's faster but it runs the EXPORTED spec, which
+  // has no self-heal and no recovery pause. Sequential in-app stays the default
+  // because it's the more faithful run, not because it's the older one.
+  const [parallelMode, setParallelMode] = useState(false)
+  const [parallelWorkers, setParallelWorkers] = useState(defaultWorkers())
+  // Why a given test was pushed out of the parallel batch (per fileName), so the
+  // report can explain it rather than just showing a slower run.
+  const parallelSkipReasons = useRef<Map<string, string>>(new Map())
+  const [parallelNote, setParallelNote] = useState<string | null>(null)
+  // === F40: shareable bundles ===
+  const [bundleBusy, setBundleBusy] = useState(false)
+  const [bundleResult, setBundleResult] = useState<{
+    path: string
+    manifest: BundleManifest
+  } | null>(null)
+  // An inspected bundle awaiting a per-collision decision. Nothing is written
+  // until the user applies the plan.
+  const [importPlan, setImportPlan] = useState<{
+    bundleDir: string
+    manifest?: BundleManifest
+    tests: BundleTestPreview[]
+    choices: Record<string, 'keep-both' | 'overwrite' | 'skip'>
+  } | null>(null)
+  const [importDone, setImportDone] = useState<string | null>(null)
+  // F40: what the one-time plaintext-secret migration moved, if anything.
+  const [secretMigration, setSecretMigration] = useState<{
+    migrated: number
+    tests: string[]
+  } | null>(null)
   const [savePanelOpen, setSavePanelOpen] = useState(false)
   const [saveNameInput, setSaveNameInput] = useState('')
   // Pillar 4 — reusable step blocks: named, saved step sequences you record once
@@ -583,6 +640,10 @@ function App(): React.JSX.Element {
     screenshotPath?: string
     category?: FailureCategory // B: failure type (for the by-category breakdown)
     healed?: number // B: selectors auto-healed in this test's run
+    // F39: this result came from the headless parallel batch, not the in-app
+    // replay engine. Shown in the report because the two aren't equivalent —
+    // no self-heal, no recovery pause — so the reader should know which ran it.
+    ranParallel?: boolean
   }
   // B: a test whose selectors auto-healed this run, with the repaired steps ready
   // to persist — "Save all healed" in the report writes them all at once.
@@ -596,6 +657,8 @@ function App(): React.JSX.Element {
       steps: RecorderStep[]
       storageState?: string
       viewport?: { width: number; height: number }
+      deviceId?: string // F36: a healed save must not drop the test's device
+      tags?: string[] // F38: …nor its labels
       dataRows?: Record<string, string>[]
     }
   }
@@ -619,6 +682,12 @@ function App(): React.JSX.Element {
     healedSaved?: boolean // B: the user already clicked Save all healed
     healables?: HealableFail[] // Option 2: failed-but-healable tests to review
     accepted?: string[] // Option 2: fileNames whose healable fix was accepted
+    // F39: how many tests are in flight in the parallel batch. While this is
+    // set, the "X of Y" counter is meaningless — one Playwright process runs
+    // them ALL AT ONCE and reports back only at the end, so there is no
+    // step-by-step progress to show. Displaying "0 of 4" the whole time reads
+    // as "nothing is happening", so the progress line switches wording instead.
+    parallelBatch?: number
   } | null>(null)
 
   // Day 20 — data-driven runs. The table of rows this test runs against (each
@@ -658,7 +727,22 @@ function App(): React.JSX.Element {
   // every launch begins compact — section headers only (Surbhi's call);
   // whatever you open stays open for the rest of the session.
   const [openSuites, setOpenSuites] = useState<Set<string>>(new Set())
-  const toggleSuite = (key: string): void => {
+  // While a filter is on, sections default to OPEN so matches aren't hidden.
+  // That used to be absolute — `isOpen = filtering ? true : …` — so clicking a
+  // header did nothing at all: the state changed and the render discarded it.
+  // An explicit click has to beat an implicit rule, so a section you collapse
+  // BY HAND during a filter is remembered here and stays shut.
+  const [filterCollapsed, setFilterCollapsed] = useState<Set<string>>(new Set())
+  const toggleSuite = (key: string, filtering: boolean): void => {
+    if (filtering) {
+      setFilterCollapsed((prev) => {
+        const next = new Set(prev)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+      return
+    }
     const next = new Set(openSuites)
     if (next.has(key)) next.delete(key)
     else next.add(key)
@@ -721,6 +805,8 @@ function App(): React.JSX.Element {
   // for the live count + badge; the fix also rides on the step (healedByAi) so it
   // shows even after a 💾 save/reload.
   const [aiHealedIndices, setAiHealedIndices] = useState<Set<number>>(new Set())
+  // F37: notes about branches/loops that didn't run in the last replay.
+  const [branchNotes, setBranchNotes] = useState<string[]>([])
   // A re-pick landed on an element with no stable hooks — explain why the
   // heal was refused (shown inside the recovery panel).
   const [recoveryWarning, setRecoveryWarning] = useState<string | null>(null)
@@ -756,7 +842,10 @@ function App(): React.JSX.Element {
     return classifyRuns(runs).tag
   }
   const anyLibraryFilter = (): boolean =>
-    librarySearch.trim() !== '' || libraryFilter !== 'all' || failureFilter !== null
+    librarySearch.trim() !== '' ||
+    libraryFilter !== 'all' ||
+    failureFilter !== null ||
+    tagFilter.size > 0 // F38
   // A2 (bulk actions): tests ticked for a bulk operation (run / delete).
   const toggleSelect = (fileName: string): void =>
     setSelectedTests((prev) => {
@@ -789,6 +878,9 @@ function App(): React.JSX.Element {
     if (libraryFilter === 'failing' && t.lastRun?.status !== 'failed') return false
     if (libraryFilter === 'passing' && t.lastRun?.status !== 'passed') return false
     if (libraryFilter === 'flaky' && testFlakyTag(t) !== 'flaky') return false
+    // F38: AND across selected tags, composed with every other filter — so
+    // "@smoke + ✗ Failing" narrows to exactly the smoke tests that are red.
+    if (!matchesTags(t, tagFilter)) return false
     if (
       failureFilter &&
       !(
@@ -839,6 +931,43 @@ function App(): React.JSX.Element {
       window.api.drafts.list().then(setDrafts)
     }
   }, [hasNavigated])
+
+  // F40: move any plaintext password left in a test file into the userData
+  // secret store. Runs ONCE at startup and is idempotent — a library with
+  // nothing to move does nothing and says nothing. It rewrites real test files,
+  // so main backs the whole library up first. Reported rather than silent,
+  // because changing someone's files without telling them is not on.
+  useEffect(() => {
+    let cancelled = false
+    window.api.xbrowser
+      .migrateSecrets()
+      .then((res) => {
+        if (cancelled || !res?.migrated) return
+        setSecretMigration(res)
+      })
+      .catch(() => {
+        // a failed migration must never block startup — the old plaintext form
+        // still runs fine, it's just less shareable.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // On mount, tell main what we're actually showing. The renderer can reload
+  // (HMR in dev, a crash in production) and come back on the welcome screen
+  // while main still believes a page is open — leaving the native browser view
+  // painted over the library. Declaring it once at startup keeps the two in step.
+  useEffect(() => {
+    window.api.browser.syncNavigated(false)
+  }, [])
+
+  // Scroll the check panel into view the moment an element is picked (see
+  // checkPanelRef). `block: 'nearest'` so an already-visible panel doesn't jump.
+  useEffect(() => {
+    if (!pickedElement) return
+    checkPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [pickedElement])
 
   // F25: load the saved environments once (they persist in userData, app-wide).
   useEffect(() => {
@@ -964,6 +1093,8 @@ function App(): React.JSX.Element {
         suite: testSuite,
         storageState,
         viewport,
+        deviceId, // F36
+        tags, // F38
         dataRows,
         steps
       })
@@ -971,7 +1102,7 @@ function App(): React.JSX.Element {
     return () => {
       if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current)
     }
-  }, [steps, testFileName, testName, baseURL, testSuite, storageState, viewport, dataRows])
+  }, [steps, testFileName, testName, baseURL, testSuite, storageState, viewport, deviceId, dataRows])
 
   // Sync the URL bar whenever the embedded browser navigates.
   // Mark hasNavigated true so we switch from welcome -> chrome view.
@@ -1091,6 +1222,27 @@ function App(): React.JSX.Element {
         applyHeal(picked, healIndex)
         return
       }
+      // F37: a `repeat for each` / `if` marker is picking the element it tests
+      // or iterates over. It BINDS to a step that already exists rather than
+      // creating a new one, so it skips the check panel entirely — pick and done.
+      if (pickBindRef.current !== null) {
+        const at = pickBindRef.current
+        pickBindRef.current = null
+        setIsPicking(false)
+        window.api.recorder.setPicking(false)
+        const next = stepsRef.current.slice()
+        if (next[at]) {
+          next[at] = {
+            ...next[at],
+            label: picked.label,
+            selector: picked.selector,
+            candidates: picked.candidates,
+            frame: picked.frame
+          }
+          editSteps(next)
+        }
+        return
+      }
       setPickedElement(picked)
       setAssertKind('visible')
       setAssertValue(picked.text ?? '')
@@ -1174,6 +1326,74 @@ function App(): React.JSX.Element {
   // F6: statically flag dead/weak assertions in the current test, keyed by
   // step index for a quick per-row lookup in the step list.
   const weakByIndex = new Map(findWeakAssertions(steps).map((w) => [w.index, w]))
+  // === F40: bundle handlers =========================================
+  // Export the CURRENT filtered/selected view, so "share the smoke suite" is
+  // just: filter by @smoke → 📦 Export. No separate selection concept.
+  const handleExportBundle = async (): Promise<void> => {
+    const chosen = selectedTests.size
+      ? savedTests.filter((t) => selectedTests.has(t.fileName))
+      : savedTests.filter(matchesLibraryFilters)
+    if (!chosen.length) return
+    setBundleBusy(true)
+    const res = await window.api.xbrowser.exportBundle(
+      chosen.map((t) => t.fileName),
+      true
+    )
+    setBundleBusy(false)
+    if (res.ok && res.path && res.manifest) {
+      setBundleResult({ path: res.path, manifest: res.manifest })
+    } else if (res.error && res.error !== 'cancelled') {
+      window.alert(`Couldn’t export the bundle: ${res.error}`)
+    }
+  }
+
+  const handleInspectBundle = async (): Promise<void> => {
+    setBundleBusy(true)
+    const res = await window.api.xbrowser.inspectBundle()
+    setBundleBusy(false)
+    if (!res.ok) {
+      if (res.error && res.error !== 'cancelled') window.alert(res.error)
+      return
+    }
+    // Default every collision to keep-both: the only choice that can't destroy
+    // work the user hasn't looked at yet.
+    const choices: Record<string, 'keep-both' | 'overwrite' | 'skip'> = {}
+    for (const t of res.tests) choices[t.file] = t.collidesWith ? 'keep-both' : 'overwrite'
+    setImportPlan({
+      bundleDir: res.bundleDir ?? '',
+      manifest: res.manifest,
+      tests: res.tests,
+      choices
+    })
+  }
+
+  const handleApplyImport = async (): Promise<void> => {
+    if (!importPlan) return
+    setBundleBusy(true)
+    const res = await window.api.xbrowser.importBundle(
+      importPlan.bundleDir,
+      importPlan.tests.map((t) => ({ file: t.file, choice: importPlan.choices[t.file] }))
+    )
+    setBundleBusy(false)
+    setImportPlan(null)
+    if (!res.ok) {
+      window.alert(`Import failed: ${res.error}`)
+      return
+    }
+    setSavedTests(await window.api.library.list())
+    const bits = [`${res.imported} test${res.imported === 1 ? '' : 's'} imported`]
+    if (res.keptBoth) bits.push(`${res.keptBoth} kept alongside an existing one`)
+    if (res.overwritten) bits.push(`${res.overwritten} overwritten`)
+    if (res.skipped) bits.push(`${res.skipped} skipped`)
+    if (res.blocks) bits.push(`${res.blocks} block${res.blocks === 1 ? '' : 's'}`)
+    if (res.uploads) bits.push(`${res.uploads} upload file${res.uploads === 1 ? '' : 's'}`)
+    setImportDone(bits.join(' · '))
+  }
+
+  // F37: pair up loop / if markers for the current test — gives the step list
+  // its indentation and surfaces a broken structure BEFORE you hit Replay
+  // (replay refuses to start on one, so catching it here saves a failed run).
+  const controlFlow = analyzeControlFlow(steps)
 
   // F13: the a11y panel is open while a scan runs (spinner) or a result is shown.
   const a11yPanelOpen = a11yScanning || a11yScan !== null
@@ -1226,6 +1446,14 @@ function App(): React.JSX.Element {
         draftOpen || // F22 draft-from-story
         mockOpen || // F35 mock studio
         jiraOpen || // F34 Jira ticket
+        // F40: the newest three. They're triggered from the LIBRARY (the welcome
+        // screen, where the browser is hidden anyway), so today they can't hit
+        // the under-the-pane bug — but they now render in BOTH views, and the
+        // comment above exists precisely because "it can't happen yet" is how
+        // this trap gets laid for the next feature.
+        secretMigration !== null ||
+        bundleResult !== null ||
+        importPlan !== null ||
         apiPanelIndex !== null
     )
   }, [
@@ -1258,6 +1486,9 @@ function App(): React.JSX.Element {
     draftOpen,
     mockOpen,
     jiraOpen,
+    secretMigration, // F40
+    bundleResult, // F40
+    importPlan, // F40
     apiPanelIndex
   ])
 
@@ -1425,6 +1656,8 @@ function App(): React.JSX.Element {
         suite: testSuite,
         storageState,
         viewport,
+        deviceId, // F36
+        tags, // F38
         dataRows,
         steps
       })
@@ -1454,6 +1687,8 @@ function App(): React.JSX.Element {
     setEdgeReportOpen(false)
     setEdgeRunHistory([])
     applyViewport(undefined)
+    setTags([]) // F38: a fresh test starts untagged
+    setTagInput('')
     setTestSuite('')
     setSavePanelOpen(false)
     setSuiteRun(null)
@@ -1471,6 +1706,7 @@ function App(): React.JSX.Element {
     setSkippedIndices(new Set())
     setHealedIndices(new Set())
     setAiHealedIndices(new Set())
+    setBranchNotes([]) // F37: notes describe the run that just ended
     // Day 13: the analysis described a run that no longer exists.
     closeAnalysis()
     setLastEvidence(null)
@@ -1499,6 +1735,13 @@ function App(): React.JSX.Element {
       baseURL: baseURL || deriveBaseURL(flat) || undefined,
       storageState,
       viewport,
+      // F36: the device travels into the exported spec too, so a mobile test
+      // stays mobile in CI. A real preset becomes `...devices['iPhone 13']`;
+      // a size-only preset stays a bare `viewport:` (see deviceUse).
+      device: deviceId ? deviceById(deviceId) : undefined,
+      // F38: tags → Playwright's `{ tag: [...] }`, so `--grep @smoke` in CI
+      // selects the same set the in-app tag filter does.
+      tags,
       // Day 20: pass the data table so a data-driven test exports as a
       // `for (const data of dataset)` loop. The generators ignore it when
       // there are no columns/rows, so a plain test stays byte-identical.
@@ -1661,7 +1904,13 @@ function App(): React.JSX.Element {
         authorChecks // F21b
       )
     } catch (err) {
-      result = { ok: false, error: err instanceof Error ? err.message : String(err) }
+      // Electron wraps a main-process throw as "Error invoking remote method
+      // 'recorder:replay': Error: <the real message>". That plumbing is not
+      // something a QA should ever read, so strip it back to the message main
+      // actually meant to send.
+      const raw = err instanceof Error ? err.message : String(err)
+      const clean = raw.replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, '')
+      result = { ok: false, error: clean }
     } finally {
       setIsReplaying(false)
       setReplayingIndex(null)
@@ -1675,6 +1924,9 @@ function App(): React.JSX.Element {
     // variant and renders them in its own report.
     if (!silent) {
       setLastTraceId(result.traceId ?? null)
+      // F37: surface untaken branches / empty loops on PASS as well as fail —
+      // a green run that skipped its checks is exactly the case worth flagging.
+      setBranchNotes(result.branchNotes ?? [])
       // F1: surface how the HAR was used this run (absent when no HAR was in play).
       setLastHarUsage(
         result.harServed !== undefined
@@ -2319,7 +2571,8 @@ function App(): React.JSX.Element {
     const code = generateEdgeSuite(cases, {
       name: testName || 'recorded flow',
       baseURL: baseURL || deriveBaseURL(withSteps?.steps ?? edgeFlat),
-      viewport
+      viewport,
+      device: deviceId ? deviceById(deviceId) : undefined // F36
     })
     const path = await window.api.recorder.exportTest(code)
     if (path) setEdgeSuiteSaved(path)
@@ -2344,7 +2597,11 @@ function App(): React.JSX.Element {
     const code = generatePlaywrightTest(flat, {
       name: testName || 'recorded flow',
       baseURL: baseURL || deriveBaseURL(flat),
-      viewport
+      viewport,
+      // F36: an iPhone/iPad preset is a WebKit device in Playwright's catalogue,
+      // so running it on the webkit project here is the one place the emulation
+      // is the REAL engine and not Chromium in a costume.
+      device: deviceId ? deviceById(deviceId) : undefined
     })
     setXbRunning(true)
     setXbResult(null)
@@ -2388,6 +2645,8 @@ function App(): React.JSX.Element {
           baseURL: data.baseURL,
           storageState: data.storageState,
           viewport: data.viewport,
+          deviceId: data.deviceId, // F36
+          tags: data.tags, // F38
           dataRows: data.dataRows
         }
       })
@@ -2776,9 +3035,56 @@ function App(): React.JSX.Element {
 
   // Day 17 (viewport emulation): set the device viewport and apply it live so
   // the embedded browser re-renders at that size immediately.
+  //
+  // F36: this is now the back-compat entry point — it's what a saved test with
+  // only a `viewport` (no deviceId) goes through, and it deliberately clears any
+  // device signals so that test behaves exactly as it did before F36.
   const applyViewport = (vp: { width: number; height: number } | undefined): void => {
     setViewport(vp)
+    setDeviceId(undefined)
     window.api.browser.setViewport(vp ?? null)
+  }
+
+  // F36: choose a device by id — applies size AND userAgent/touch/pixel-density
+  // to the live browser. Passing undefined returns it to a plain desktop.
+  const applyDevice = (id: string | undefined): void => {
+    const profile = deviceById(id)
+    setDeviceId(profile ? id : undefined)
+    setViewport(profile?.viewport)
+    window.api.browser.setDevice(
+      profile
+        ? {
+            viewport: profile.viewport,
+            userAgent: profile.userAgent,
+            deviceScaleFactor: profile.deviceScaleFactor,
+            isMobile: profile.isMobile,
+            hasTouch: profile.hasTouch
+          }
+        : null
+    )
+  }
+
+  // F36: re-apply a loaded test's saved device. resolveDevice handles the three
+  // cases — a known profile, an unknown id (fall back to the saved size, never
+  // silently to desktop), and a pre-F36 test that has only a viewport.
+  const applySavedDevice = (
+    savedDeviceId: string | undefined,
+    savedViewport: { width: number; height: number } | undefined
+  ): void => {
+    const profile = resolveDevice(savedDeviceId, savedViewport)
+    setDeviceId(savedDeviceId)
+    setViewport(profile?.viewport)
+    window.api.browser.setDevice(
+      profile
+        ? {
+            viewport: profile.viewport,
+            userAgent: profile.userAgent,
+            deviceScaleFactor: profile.deviceScaleFactor,
+            isMobile: profile.isMobile,
+            hasTouch: profile.hasTouch
+          }
+        : null
+    )
   }
 
   // Day 17 (session reuse): capture the embedded browser's CURRENT state (after
@@ -2829,6 +3135,8 @@ function App(): React.JSX.Element {
       steps,
       storageState,
       viewport,
+      deviceId, // F36: the device profile travels with the test
+      tags, // F38: the labels travel with it too
       dataRows, // Day 20: data-driven table travels with the test
       captureHar: harCount > 0 // F1: bank the just-captured network, if any
     })
@@ -2878,7 +3186,8 @@ function App(): React.JSX.Element {
     setEdgeRun(null)
     setEdgeReportOpen(false)
     refreshEdgeHistory(fileName)
-    applyViewport(test.viewport)
+    applySavedDevice(test.deviceId, test.viewport)
+    setTags(test.tags ?? []) // F38
     setDataRows(test.dataRows ?? []) // Day 20: data-driven table
     setDataPanelOpen(false)
     setHasNavigated(true)
@@ -2901,7 +3210,8 @@ function App(): React.JSX.Element {
     setTestSuite(d.suite || '')
     setBaseURL(d.baseURL || '')
     setStorageState(d.storageState)
-    applyViewport(d.viewport)
+    applySavedDevice(d.deviceId, d.viewport)
+    setTags(d.tags ?? []) // F38
     setDataRows(d.dataRows ?? []) // Day 20: data-driven table
     setDataPanelOpen(false)
     draftIdRef.current = d.id
@@ -2959,7 +3269,16 @@ function App(): React.JSX.Element {
     const suiteChoice = await confirmRetargetFor(bases)
     if (suiteChoice === 'cancel') return
     const suiteNoEnv = suiteChoice === 'noenv'
-    setHasNavigated(true)
+    // A sequential run drives the embedded browser, so it belongs in the
+    // workspace. A PARALLEL batch doesn't touch that browser at all — it shells
+    // out to headless Playwright — so switching to the workspace would show a
+    // large empty pane with nothing in it (main only reveals the browser once
+    // something has really navigated it, which never happens here). Stay in the
+    // library instead; the progress bar and the report both render there.
+    if (!parallelMode) setHasNavigated(true)
+    // F39: these describe THIS run, not the last one.
+    parallelSkipReasons.current = new Map()
+    setParallelNote(null)
     setSuiteRun({
       suite,
       total: tests.length,
@@ -2968,9 +3287,136 @@ function App(): React.JSX.Element {
       results: [],
       running: true
     })
-    for (let i = 0; i < tests.length; i++) {
-      const t = tests[i]
-      setSuiteRun((prev) => (prev ? { ...prev, current: i + 1, currentName: t.name } : prev))
+
+    // === F39: parallel pre-pass ===================================
+    // When parallel mode is on, run everything that MEANS THE SAME THING
+    // headlessly in one Playwright process with N workers, then fall through to
+    // the normal sequential loop for the rest. Nothing is skipped — a test that
+    // can't run headless runs the old way, and the report says which is which.
+    let parallelDone = new Map<string, SuiteRunEntry>()
+    const sequentialTests: SavedTestSummary[] = []
+    if (parallelMode) {
+      const safe: {
+        test: SavedTestSummary
+        code: string
+        sessionFile?: string
+        refs: (string | undefined)[] // F40: secret refs this test needs resolved
+      }[] = []
+      for (const t of tests) {
+        const data = await window.api.library.load(t.fileName)
+        if (!data) {
+          sequentialTests.push(t) // let the sequential loop report the read error
+          continue
+        }
+        const blockers = headlessBlockers(data.steps as RecorderStep[])
+        if (blockers.length) {
+          // Would not mean the same thing headlessly — see headless.ts. Runs
+          // sequentially instead, with the reason kept for the report.
+          sequentialTests.push(t)
+          parallelSkipReasons.current.set(t.fileName, blockerSummary(blockers))
+          continue
+        }
+        const { flat } = await buildRunPlan(data.steps as RecorderStep[])
+        const cols = dataColumns(flat)
+        const rows = data.dataRows ?? []
+        safe.push({
+          test: t,
+          code: generatePlaywrightTest(flat, {
+            name: data.name,
+            baseURL: data.baseURL || deriveBaseURL(flat),
+            viewport: data.viewport,
+            device: data.deviceId ? deviceById(data.deviceId) : undefined, // F36
+            tags: data.tags, // F38
+            data: cols.length > 0 && rows.length > 0 ? { columns: cols, rows } : undefined
+          }),
+          sessionFile: data.storageState || undefined,
+          refs: flat.map((s) => s.secretRef)
+        })
+      }
+      if (safe.length) {
+        setSuiteRun((prev) => (prev ? { ...prev, parallelBatch: safe.length } : prev))
+        // F40: the exported specs read process.env.PASSWORD, and the value now
+        // lives in userData rather than in the steps — resolve it for this run.
+        const secretRefs = safe
+          .flatMap((s) => s.refs)
+          .filter((r): r is string => typeof r === 'string' && !!r)
+        let batchEnv: Record<string, string> | undefined = suiteNoEnv ? {} : undefined
+        if (secretRefs.length) {
+          const resolved = await window.api.xbrowser.resolveSecrets(secretRefs)
+          const password = secretRefs.map((r) => resolved[r]).find((v) => v)
+          if (password) batchEnv = { ...(batchEnv ?? {}), PASSWORD: password }
+        }
+        const res = await window.api.xbrowser.runSuite(
+          safe.map((s) => ({
+            id: s.test.fileName,
+            name: s.test.name,
+            code: s.code,
+            sessionFile: s.sessionFile
+          })),
+          parallelWorkers,
+          batchEnv
+        )
+        if (!res.installed || !res.ran) {
+          // Fall back to sequential rather than failing the whole suite — the
+          // tests are fine, the runner isn't available.
+          setParallelNote(
+            `${res.message ?? 'The parallel runner could not start'} — ran everything sequentially instead.`
+          )
+          sequentialTests.push(...safe.map((s) => s.test))
+        } else {
+          parallelDone = new Map(
+            res.results.map((r) => {
+              const t = safe.find((s) => s.test.fileName === r.id)!.test
+              return [
+                r.id,
+                {
+                  fileName: r.id,
+                  name: t.name,
+                  status: r.ok ? ('passed' as const) : ('failed' as const),
+                  error: r.error,
+                  ranParallel: true
+                }
+              ]
+            })
+          )
+          // A parallel result is still a real run — record it in the history so
+          // the library dots and F2 flaky analytics don't silently miss it.
+          for (const [fileName, entry] of parallelDone) {
+            await window.api.library.recordRun(fileName, {
+              status: entry.status,
+              at: new Date().toISOString(),
+              error: entry.error
+            })
+          }
+          setSuiteRun((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  results: [...prev.results, ...parallelDone.values()],
+                  // Batch over — back to a real per-test counter for any
+                  // sequential leftovers.
+                  parallelBatch: undefined,
+                  current: parallelDone.size
+                }
+              : prev
+          )
+        }
+      }
+    }
+    // In parallel mode the sequential loop only handles the leftovers.
+    const toRunSequentially = parallelMode ? sequentialTests : tests
+    // Those leftovers DO drive the embedded browser, so now the workspace is
+    // the right place to be. An all-parallel batch never gets here and stays in
+    // the library.
+    if (toRunSequentially.length > 0) setHasNavigated(true)
+
+    for (let i = 0; i < toRunSequentially.length; i++) {
+      const t = toRunSequentially[i]
+      // Progress counts the parallel batch too, so "12 of 40" stays honest.
+      const doneBefore = parallelDone.size
+      setSuiteRun((prev) =>
+        prev ? { ...prev, current: doneBefore + i + 1, currentName: t.name } : prev
+      )
       const data = await window.api.library.load(t.fileName)
       let entry: SuiteRunEntry
       if (!data) {
@@ -2991,6 +3437,14 @@ function App(): React.JSX.Element {
         setTestFileName(t.fileName)
         setTestSuite(suite)
         setBaseURL(data.baseURL)
+        // F36 (fixes a Day-17 gap): apply THIS test's device before replaying
+        // it. The suite loop already honours each test's own session, HAR and
+        // base URL — the viewport was the one saved property it ignored, so a
+        // mobile test in a Run All silently rendered at whatever size the
+        // workspace happened to be on. A suite of mixed devices was testing the
+        // wrong one for most of its tests.
+        applySavedDevice(data.deviceId, data.viewport)
+        setTags(data.tags ?? []) // F38
         // Live-link: expand any linked blocks before running (a block ref must
         // never reach the replay engine — it only understands real steps).
         const { flat: flatSuite, map: suiteMap } = await buildRunPlan(data.steps as RecorderStep[])
@@ -3095,6 +3549,8 @@ function App(): React.JSX.Element {
               steps: stepsRef.current.slice(),
               storageState: data.storageState,
               viewport: data.viewport,
+              deviceId: data.deviceId, // F36
+              tags: data.tags, // F38
               dataRows: data.dataRows
             }
           }
@@ -3165,6 +3621,8 @@ function App(): React.JSX.Element {
       steps,
       storageState: data.storageState,
       viewport: data.viewport,
+      deviceId: data.deviceId, // F36
+      tags: data.tags, // F38
       dataRows: data.dataRows
     })
     setSavedTests(await window.api.library.list())
@@ -3254,6 +3712,8 @@ function App(): React.JSX.Element {
       steps: full.steps,
       storageState: full.storageState,
       viewport: full.viewport,
+      deviceId: full.deviceId, // F36: a clone is the same device as its original
+      tags: full.tags, // F38: and carries the same labels
       dataRows: full.dataRows
     })
     setSavedTests(await window.api.library.list())
@@ -3433,7 +3893,20 @@ function App(): React.JSX.Element {
   const handleStartPick = async (at: number | null): Promise<void> => {
     setInsertMenuIndex(null)
     setPickedElement(null)
+    pickBindRef.current = null
     setInsertAt(at)
+    setIsPicking(true)
+    await window.api.recorder.setPicking(true)
+  }
+
+  // F37: pick an element FOR an existing step (a for-each loop's collection, or
+  // an if's condition target) instead of creating a new step from it. Kept in a
+  // ref, not state, because the pick arrives on an IPC callback registered once
+  // at mount — a state value would be captured stale in that closure.
+  const handleStartPickFor = async (index: number): Promise<void> => {
+    setInsertMenuIndex(null)
+    setPickedElement(null)
+    pickBindRef.current = index
     setIsPicking(true)
     await window.api.recorder.setPicking(true)
   }
@@ -3447,6 +3920,16 @@ function App(): React.JSX.Element {
   const insertStep = (step: RecorderStep, at: number | null): void => {
     const i = at ?? steps.length
     editSteps([...steps.slice(0, i), step, ...steps.slice(i)])
+  }
+
+  // F37: patch fields on one step in place (a loop's count, an if's condition).
+  // Goes through editSteps so it joins the normal undo/version/auto-save flow
+  // rather than mutating behind their backs.
+  const updateStepField = (index: number, patch: Partial<RecorderStep>): void => {
+    const next = steps.slice()
+    if (!next[index]) return
+    next[index] = { ...next[index], ...patch }
+    editSteps(next)
   }
 
   // === Pillar 4: reusable step blocks ================================
@@ -3588,6 +4071,10 @@ function App(): React.JSX.Element {
         name: test.name || 'monitored flow',
         baseURL: test.baseURL || deriveBaseURL(flat),
         viewport: test.viewport,
+        // F36: a monitor watches the test AS SAVED — including its device. The
+        // spec's test.use() overrides the run config, so a mobile monitor really
+        // runs mobile.
+        device: test.deviceId ? deviceById(test.deviceId) : undefined,
         data: cols.length > 0 && rows.length > 0 ? { columns: cols, rows } : undefined
       })
       // F32: run against the monitor's PINNED environment, not the global "Run
@@ -3600,10 +4087,24 @@ function App(): React.JSX.Element {
       // A monitor re-runs YOUR OWN saved test on YOUR machine — the secret is on
       // disk already — so use it (a pinned env's PASSWORD still wins).
       if (envVars.PASSWORD === undefined) {
-        const secretStep = flat.find(
-          (s) => s.type === 'type' && s.secret && s.value && !s.value.includes('{{')
-        )
-        if (secretStep?.value) envVars.PASSWORD = secretStep.value
+        // F40: the password is no longer in the step — the step carries a ref and
+        // the value lives in userData. Ask main for it (same machine, same user).
+        // A pre-F40 test that still holds a literal is honoured too, so a monitor
+        // keeps working in the window between upgrading and the migration run.
+        const refs = flat
+          .map((s) => s.secretRef)
+          .filter((r): r is string => typeof r === 'string' && !!r)
+        if (refs.length) {
+          const resolved = await window.api.xbrowser.resolveSecrets(refs)
+          const first = refs.map((r) => resolved[r]).find((v) => v)
+          if (first) envVars.PASSWORD = first
+        }
+        if (envVars.PASSWORD === undefined) {
+          const secretStep = flat.find(
+            (s) => s.type === 'type' && s.secret && s.value && !s.value.includes('{{')
+          )
+          if (secretStep?.value) envVars.PASSWORD = secretStep.value
+        }
       }
       session = test.storageState || undefined
     } catch (e) {
@@ -3966,6 +4467,40 @@ function App(): React.JSX.Element {
     else insertStep({ type: 'wait', waitKind: 'time', value: '2' }, at)
   }
 
+  // === F37: loops + branching =======================================
+  // Both handlers insert a matched PAIR of markers in one go. That's deliberate:
+  // if you could add a `repeat` on its own, the very first thing you'd have is a
+  // test that refuses to run ("loop is never closed"). Inserting the pair means
+  // the structure is valid at every moment, and building a loop is "add it, then
+  // drag the steps you want inside" — which is also how it reads.
+  const handleAddRepeat = (at: number | null, kind: 'times' | 'each'): void => {
+    setInsertMenuIndex(null)
+    const i = at ?? steps.length
+    const open: RecorderStep =
+      kind === 'each'
+        ? { type: 'repeat', repeatKind: 'each', label: '' }
+        : { type: 'repeat', repeatKind: 'times', value: '2' }
+    const close: RecorderStep = { type: 'endRepeat' }
+    editSteps([...steps.slice(0, i), open, close, ...steps.slice(i)])
+    // A for-each has no element yet — send the user straight into the picker,
+    // because an unpicked for-each loop iterates zero times and would look
+    // broken rather than unfinished.
+    if (kind === 'each') handleStartPickFor(i)
+  }
+
+  const handleAddIf = (at: number | null): void => {
+    setInsertMenuIndex(null)
+    const i = at ?? steps.length
+    editSteps([
+      ...steps.slice(0, i),
+      { type: 'if', condKind: 'element-visible', label: '' } as RecorderStep,
+      { type: 'else' } as RecorderStep,
+      { type: 'endIf' } as RecorderStep,
+      ...steps.slice(i)
+    ])
+    handleStartPickFor(i)
+  }
+
   // F24: insert an API-request step and immediately open its editor (an api step
   // has several fields — endpoint, method, headers, body, expected response — so
   // it needs a form, not an inline value like a wait).
@@ -4292,6 +4827,11 @@ function App(): React.JSX.Element {
       }
       return { tone: 'failed', text: `✗ Failed at step ${failedIndex + 1}: ${replayError}` }
     }
+    // A run can fail BEFORE any step runs — F37 refuses a broken loop/if
+    // structure up front, so there's no step to point at. Without this branch
+    // the error is stored and never shown, and pressing Replay looks like it
+    // did nothing.
+    if (replayError) return { tone: 'failed', text: `✗ ${replayError}` }
     if (doneIndices.size > 0 && doneIndices.size + skippedIndices.size === enabledCount) {
       return skippedIndices.size > 0
         ? {
@@ -6065,10 +6605,610 @@ function App(): React.JSX.Element {
     </div>
   )
 
+  // === F40 modals (shared by BOTH views) ==============================
+  // These live in a variable, not inline in the workspace JSX, because the
+  // welcome view returns EARLY — and all three are triggered from there: the
+  // secret migration fires at startup, and Export/Import bundle live in the
+  // library, which IS the welcome screen. Inline, they were unreachable.
+  const f40Modals = (
+    <>
+        {
+          /* F40: the app just rewrote the user's test files. Say so, plainly, with
+             what changed and where the backup is — a silent file rewrite would be
+             indefensible even when it's an improvement.
+             NOTE: top-level, NOT inside the suite-report block — it fires at
+             STARTUP, when no suite run exists. */
+          secretMigration && (
+            <div className="modal-backdrop" onClick={() => setSecretMigration(null)}>
+              <div className="modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <span className="modal-title">🔑 Passwords moved out of your test files</span>
+                  <button
+                    className="modal-close"
+                    onClick={() => setSecretMigration(null)}
+                    aria-label="Close"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="modal-body bundle-body">
+                  <p>
+                    Until now, a password field marked <strong>secret</strong> was masked on screen
+                    and kept out of the export — but the value itself was still written into the
+                    test&apos;s JSON file, in plain text, in a folder meant to be shared and
+                    committed.
+                  </p>
+                  <p>
+                    <strong>{secretMigration.migrated}</strong> test
+                    {secretMigration.migrated === 1 ? '' : 's'} updated. The passwords now live in
+                    your app data alongside your environments; each step keeps only a reference.
+                    <strong> Nothing about how your tests run has changed.</strong>
+                  </p>
+                  <ul>
+                    {secretMigration.tests.slice(0, 10).map((t) => (
+                      <li key={t}>
+                        <code>{t}</code>
+                      </li>
+                    ))}
+                    {secretMigration.tests.length > 10 && (
+                      <li>…and {secretMigration.tests.length - 10} more</li>
+                    )}
+                  </ul>
+                  <p className="import-note">
+                    A full copy of your library was saved to{' '}
+                    <code>QATestFlow Tests/_backups/</code> before anything was changed.
+                  </p>
+                </div>
+                <div className="assert-actions">
+                  <button className="modal-btn primary" onClick={() => setSecretMigration(null)}>
+                    Got it
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        }
+        {
+          /* F40: what the export actually produced — and, just as importantly,
+             what it deliberately left out. */
+          bundleResult && (
+            <div className="modal-backdrop" onClick={() => setBundleResult(null)}>
+              <div className="modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <span className="modal-title">
+                    📦 Bundle exported — {bundleResult.manifest.testCount} test
+                    {bundleResult.manifest.testCount === 1 ? '' : 's'}
+                  </span>
+                  <button
+                    className="modal-close"
+                    onClick={() => setBundleResult(null)}
+                    aria-label="Close"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="modal-body bundle-body">
+                  <p className="bundle-path">
+                    <code>{bundleResult.path}</code>
+                  </p>
+                  <p>
+                    It’s a plain folder — commit it to git so test changes show up in pull
+                    requests, or zip it and send it.
+                  </p>
+                  <h4>Included</h4>
+                  <ul>
+                    <li>
+                      {bundleResult.manifest.testCount} test
+                      {bundleResult.manifest.testCount === 1 ? '' : 's'}
+                    </li>
+                    {bundleResult.manifest.blocks.length > 0 && (
+                      <li>
+                        {bundleResult.manifest.blocks.length} linked block
+                        {bundleResult.manifest.blocks.length === 1 ? '' : 's'} — without these the
+                        🧩 steps would be broken
+                      </li>
+                    )}
+                    {bundleResult.manifest.uploads.length > 0 && (
+                      <li>
+                        {bundleResult.manifest.uploads.length} upload file
+                        {bundleResult.manifest.uploads.length === 1 ? '' : 's'}
+                      </li>
+                    )}
+                    {bundleResult.manifest.hasAcceptanceCriteria && <li>Acceptance criteria</li>}
+                  </ul>
+                  <h4>Deliberately left out</h4>
+                  <ul className="bundle-omitted">
+                    {bundleResult.manifest.secretsPlaceholdered.length > 0 && (
+                      <li>
+                        <strong>Passwords</strong> —{' '}
+                        {bundleResult.manifest.secretsPlaceholdered.length} test
+                        {bundleResult.manifest.secretsPlaceholdered.length === 1 ? '' : 's'} carry{' '}
+                        <code>{'{{env:PASSWORD}}'}</code> instead. Safe to commit.
+                      </li>
+                    )}
+                    {bundleResult.manifest.dataScrubbed.length > 0 && (
+                      <li>
+                        <strong>Sensitive data columns</strong> —{' '}
+                        {bundleResult.manifest.dataScrubbed
+                          .map((d) => d.columns.join(', '))
+                          .join('; ')}{' '}
+                        replaced with env tokens.
+                      </li>
+                    )}
+                    <li>
+                      <strong>Saved sessions</strong> — a session file is a credential, and it
+                      expires. They record their own.
+                    </li>
+                    <li>
+                      <strong>Run history &amp; trust scores</strong> — those describe your machine.
+                      Every test arrives as “new / untested”, which is the truth for them.
+                    </li>
+                    {bundleResult.manifest.visualWithoutBaseline.length > 0 && (
+                      <li>
+                        <strong>Visual baselines</strong> —{' '}
+                        {bundleResult.manifest.visualWithoutBaseline.length} test
+                        {bundleResult.manifest.visualWithoutBaseline.length === 1 ? '' : 's'} take a
+                        snapshot. A baseline is tied to the screen it was captured on, so a shared
+                        one fails elsewhere for no real reason. Their <em>first</em> run creates
+                        theirs and passes without comparing anything — the second run is the first
+                        real check. The README says so.
+                      </li>
+                    )}
+                  </ul>
+                </div>
+                <div className="assert-actions">
+                  <button
+                    className="modal-btn"
+                    onClick={() => window.api.xbrowser.revealBundle(bundleResult.path)}
+                  >
+                    📂 Show in folder
+                  </button>
+                  <button className="modal-btn primary" onClick={() => setBundleResult(null)}>
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        }
+        {
+          /* F40: decide every collision BEFORE anything is written. */
+          importPlan && (
+            <div className="modal-backdrop" onClick={() => setImportPlan(null)}>
+              <div className="modal" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <span className="modal-title">
+                    📥 Import bundle — {importPlan.tests.length} test
+                    {importPlan.tests.length === 1 ? '' : 's'}
+                  </span>
+                  <button
+                    className="modal-close"
+                    onClick={() => setImportPlan(null)}
+                    aria-label="Close"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="modal-body bundle-body">
+                  {(() => {
+                    const clashes = importPlan.tests.filter((t) => t.collidesWith)
+                    if (!clashes.length) {
+                      return <p>No name clashes — everything here is new to your library.</p>
+                    }
+                    return (
+                      <>
+                        <p>
+                          <strong>{clashes.length}</strong> of these already exist here. Choose what
+                          happens to each — nothing is written until you hit Import.
+                        </p>
+                        <div className="import-allrow">
+                          Apply to all clashes:
+                          {(['keep-both', 'overwrite', 'skip'] as const).map((c) => (
+                            <button
+                              key={c}
+                              type="button"
+                              // Show which one is in force. Without this the
+                              // button you click never changes, so on a long
+                              // list (56 rows, most of them off-screen) it reads
+                              // as "the button doesn't work" — the rows DID all
+                              // change, you just couldn't see it happen.
+                              // Derived, not remembered: it lights up whenever
+                              // every clashing row already agrees, so picking
+                              // rows individually keeps it honest too.
+                              className={`modal-btn${
+                                clashes.length > 0 &&
+                                clashes.every((t) => importPlan.choices[t.file] === c)
+                                  ? ' primary'
+                                  : ''
+                              }`}
+                              onClick={() =>
+                                setImportPlan((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        choices: Object.fromEntries(
+                                          prev.tests.map((t) => [
+                                            t.file,
+                                            t.collidesWith ? c : 'overwrite'
+                                          ])
+                                        )
+                                      }
+                                    : prev
+                                )
+                              }
+                            >
+                              {c === 'keep-both'
+                                ? 'Keep both'
+                                : c === 'overwrite'
+                                  ? 'Overwrite'
+                                  : 'Skip'}
+                            </button>
+                          ))}
+                          {/* At 56 rows — let alone a real team library — you
+                              can't judge an import by reading every row. Say
+                              what the current choices ADD UP TO. */}
+                          {(() => {
+                            const vals = Object.values(importPlan.choices)
+                            const n = (c: string): number =>
+                              importPlan.tests.filter(
+                                (t) => t.collidesWith && importPlan.choices[t.file] === c
+                              ).length
+                            const fresh = importPlan.tests.length - clashes.length
+                            return (
+                              <span className="import-tally">
+                                {fresh > 0 && (
+                                  <>
+                                    <strong>{fresh}</strong> new ·{' '}
+                                  </>
+                                )}
+                                <strong>{n('keep-both')}</strong> kept alongside ·{' '}
+                                <strong>{n('overwrite')}</strong> overwritten ·{' '}
+                                <strong>{n('skip')}</strong> skipped
+                                {vals.length === 0 && ' — nothing selected'}
+                              </span>
+                            )
+                          })()}
+                        </div>
+                      </>
+                    )
+                  })()}
+                  <ul className="import-list">
+                    {importPlan.tests.map((t) => (
+                      <li key={t.file} className={t.collidesWith ? 'clash' : ''}>
+                        <div className="import-name">
+                          <strong>{t.name}</strong>
+                          {t.suite && <span className="import-suite">{t.suite}</span>}
+                          <span className="import-meta">{t.stepCount} steps</span>
+                          {(t.tags ?? []).map((tag) => (
+                            <span key={tag} className="tag-chip">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                        {t.collidesWith ? (
+                          <div className="import-choice">
+                            <span className="import-warn">
+                              already exists ({t.existingStepCount} steps
+                              {t.existingUpdatedAt
+                                ? `, edited ${new Date(t.existingUpdatedAt).toLocaleDateString()}`
+                                : ''}
+                              )
+                            </span>
+                            {(['keep-both', 'overwrite', 'skip'] as const).map((c) => (
+                              <button
+                                key={c}
+                                type="button"
+                                className={`assert-kind${
+                                  importPlan.choices[t.file] === c ? ' chosen' : ''
+                                }`}
+                                onClick={() =>
+                                  setImportPlan((prev) =>
+                                    prev
+                                      ? { ...prev, choices: { ...prev.choices, [t.file]: c } }
+                                      : prev
+                                  )
+                                }
+                              >
+                                {c === 'keep-both'
+                                  ? 'Keep both'
+                                  : c === 'overwrite'
+                                    ? 'Overwrite'
+                                    : 'Skip'}
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="import-new">new</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  {importPlan.manifest?.visualWithoutBaseline?.length ? (
+                    <p className="import-note">
+                      ⚠{' '}
+                      {importPlan.manifest.visualWithoutBaseline.length} of these take a visual
+                      snapshot, and baselines aren’t shared (they’re tied to the screen they were
+                      captured on). Your <strong>first</strong> run creates your own baseline and
+                      passes without comparing anything — the second run is the first real check.
+                    </p>
+                  ) : null}
+                  {importPlan.manifest?.secretsPlaceholdered?.length ? (
+                    <p className="import-note">
+                      🔑 {importPlan.manifest.secretsPlaceholdered.length} test
+                      {importPlan.manifest.secretsPlaceholdered.length === 1 ? '' : 's'} need a
+                      password. Set <code>PASSWORD</code> in your environment (🌐 Run against →
+                      manage) before running them.
+                    </p>
+                  ) : null}
+                </div>
+                <div className="assert-actions">
+                  <button className="modal-btn" onClick={() => setImportPlan(null)}>
+                    Cancel
+                  </button>
+                  <button
+                    className="modal-btn primary"
+                    disabled={bundleBusy}
+                    onClick={handleApplyImport}
+                  >
+                    Import
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        }
+    </>
+  )
+
+  // === Suite-run report (shared by BOTH views) ========================
+  // In a variable, not inline, because a PARALLEL batch never leaves the
+  // library — it does not touch the embedded browser, so switching to the
+  // workspace would just show an empty pane. The report therefore has to be
+  // reachable from the welcome view too. Same reasoning as f40Modals.
+  const suiteReport = (
+    <>
+        {
+          /* Day 11.5 + B: the suite-run REPORT — only once the run has FINISHED
+             (suiteSummaryOpen). Without that gate it pops open mid-run and covers
+             the live progress. */
+          suiteSummaryOpen &&
+          suiteRun &&
+          (() => {
+            const r = suiteRun.results
+            const passed = r.filter((x) => x.status === 'passed').length
+            const failed = r.length - passed
+            const healedCount = r.reduce((s, x) => s + (x.healed ?? 0), 0)
+            const healedSaves = suiteRun.healedSaves ?? []
+            const byCat = new Map<string, number>()
+            for (const x of r) {
+              if (x.status === 'failed') {
+                const c = x.category ?? 'unknown'
+                byCat.set(c, (byCat.get(c) ?? 0) + 1)
+              }
+            }
+            const cats = [...byCat.entries()].sort((a, b) => b[1] - a[1])
+            return (
+              <div className="modal-backdrop" onClick={() => setSuiteRun(null)}>
+                <div className="modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="modal-header">
+                    <span className="modal-title">
+                      {suiteRun.suite}: {passed} passed, {failed} failed
+                      {healedCount ? ` · ${healedCount} auto-healed` : ''}
+                    </span>
+                    <button
+                      className="modal-close"
+                      onClick={() => setSuiteRun(null)}
+                      aria-label="Close"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {/* F39: which engine ran what. A parallel result comes from the
+                      exported spec, so it carries none of the in-app resilience —
+                      the reader has to be able to tell the two apart. */}
+                  {(() => {
+                    const par = r.filter((x) => x.ranParallel).length
+                    const skipped = r.filter(
+                      (x) => !x.ranParallel && parallelSkipReasons.current.has(x.fileName)
+                    )
+                    if (!parallelMode && !parallelNote) return null
+                    return (
+                      <div className="parallel-summary">
+                        {parallelNote ? (
+                          <div className="parallel-warn">⚠ {parallelNote}</div>
+                        ) : (
+                          <div>
+                            ⚡ <strong>{par}</strong> ran in parallel ({parallelWorkers} at a time,
+                            headless Playwright) · <strong>{r.length - par}</strong> ran in the app.
+                          </div>
+                        )}
+                        {skipped.length > 0 && (
+                          <details className="parallel-skips">
+                            <summary>
+                              {skipped.length} test{skipped.length === 1 ? '' : 's'} couldn’t run in
+                              parallel — why?
+                            </summary>
+                            <ul>
+                              {skipped.map((x) => (
+                                <li key={x.fileName}>
+                                  <strong>{x.name}</strong> —{' '}
+                                  {parallelSkipReasons.current.get(x.fileName)}
+                                </li>
+                              ))}
+                            </ul>
+                            <p>
+                              These ran the normal way instead. Running them headless would have
+                              skipped those checks and still come back green — a false pass.
+                            </p>
+                          </details>
+                        )}
+                      </div>
+                    )
+                  })()}
+
+                  {/* B: failures grouped by cause (the suite-level triage view). */}
+                  {cats.length > 0 && (
+                    <div className="failure-breakdown">
+                      <span className="failure-breakdown-label">Failures by type:</span>
+                      {cats.map(([c, n]) => (
+                        <span key={c} className={`category-chip cat-${c}`}>
+                          {CATEGORY_LABELS[c as FailureCategory] ?? c} <strong>{n}</strong>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* B: heal review — persist every auto-healed selector in one click. */}
+                  {healedSaves.length > 0 && (
+                    <div className={`blast-radius${suiteRun.healedSaved ? ' blast-radius-safe' : ''}`}>
+                      {suiteRun.healedSaved ? (
+                        <span className="blast-radius-head">
+                          ✓ Saved the repaired selectors for {healedSaves.length} test
+                          {healedSaves.length > 1 ? 's' : ''}.
+                        </span>
+                      ) : (
+                        <>
+                          <span className="blast-radius-head">
+                            🤖 {healedCount} selector{healedCount > 1 ? 's' : ''} auto-healed across{' '}
+                            {healedSaves.length} test{healedSaves.length > 1 ? 's' : ''} — keep the
+                            fixes:
+                          </span>
+                          <ul className="blast-list">
+                            {healedSaves.map((h) => (
+                              <li key={h.fileName}>{h.name}</li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Option 2: failed tests self-heal COULD fix — review & accept.
+                      We never auto-applied these (a low-confidence heal that "works"
+                      could be a false pass); a human confirms before they go green. */}
+                  {(suiteRun.healables ?? []).length > 0 && (
+                    <div className="healable-review">
+                      <div className="healable-head">
+                        🔧 {suiteRun.healables!.length} failed test
+                        {suiteRun.healables!.length > 1 ? 's' : ''} could be self-healed — review before
+                        accepting (a low-confidence heal may target the wrong element):
+                      </div>
+                      <ul className="blast-list">
+                        {suiteRun.healables!.map((hf) => {
+                          const accepted = suiteRun.accepted?.includes(hf.fileName)
+                          return (
+                            <li key={hf.fileName} className="healable-row">
+                              <span>
+                                <strong>{hf.name}</strong> → suggests “{hf.healable.label}”{' '}
+                                <span className="healable-meta">
+                                  ({hf.healable.signals.join(' + ')} · {hf.healable.score}/100)
+                                </span>
+                              </span>
+                              {accepted ? (
+                                <span className="healable-accepted">✓ accepted</span>
+                              ) : (
+                                <span className="healable-actions">
+                                  <button
+                                    type="button"
+                                    className="modal-btn"
+                                    onClick={() => handleLoadTest(hf.fileName)}
+                                    title="Open the test to replay + verify the fix yourself"
+                                  >
+                                    Open
+                                  </button>
+                                  {!hf.hasBlocks && (
+                                    <button
+                                      type="button"
+                                      className="modal-btn"
+                                      onClick={() => handleAcceptHealable(hf)}
+                                      title="Trust this heal — patch the selector and save"
+                                    >
+                                      Accept &amp; save
+                                    </button>
+                                  )}
+                                </span>
+                              )}
+                            </li>
+                          )
+                        })}
+                      </ul>
+                      {suiteRun.healables!.some(
+                        (hf) => !hf.hasBlocks && !suiteRun.accepted?.includes(hf.fileName)
+                      ) && (
+                        <button
+                          type="button"
+                          className="modal-btn"
+                          onClick={handleAcceptAllHealable}
+                        >
+                          Accept &amp; save all
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  <ul className="suite-summary">
+                    {r.map((x) => (
+                      <li key={x.fileName} className="suite-result">
+                        <span className={`run-dot ${x.status}`} />
+                        <span className="suite-result-name">{x.name}</span>
+                        {x.healed ? (
+                          <span className="healed-tag ai-healed-tag">🤖 {x.healed}</span>
+                        ) : null}
+                        {x.status === 'failed' && x.category && (
+                          <span className={`category-chip cat-${x.category}`}>
+                            {CATEGORY_LABELS[x.category] ?? x.category}
+                          </span>
+                        )}
+                        {x.status === 'failed' && (
+                          <span className="suite-result-error">
+                            {x.failedAt !== undefined ? `step ${x.failedAt + 1} — ` : ''}
+                            {x.error}
+                          </span>
+                        )}
+                        {x.screenshotPath && (
+                          <button
+                            type="button"
+                            className="shot-link"
+                            onClick={() => window.api.library.openScreenshot(x.screenshotPath!)}
+                            title="Open the failure screenshot"
+                          >
+                            📷
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+
+                  <div className="modal-footer">
+                    {healedSaves.length > 0 && !suiteRun.healedSaved && (
+                      <button className="modal-btn primary" onClick={handleSaveAllHealed}>
+                        💾 Save all healed ({healedSaves.length})
+                      </button>
+                    )}
+                    <button className="modal-btn" onClick={handleCopySuiteReport}>
+                      Copy report
+                    </button>
+                    <button className="modal-btn" onClick={handleSaveSuiteReport}>
+                      Save .md
+                    </button>
+                    <button className="modal-btn" onClick={() => setSuiteRun(null)}>
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )
+          })()}
+    </>
+  )
+
   // === Welcome view — shown before any navigation ===
   if (!hasNavigated) {
     return (
       <div className="welcome">
+        {f40Modals}
+        {suiteReport}
         {envManagerModal}
         {docsModal}
         {acModal}
@@ -6222,6 +7362,26 @@ function App(): React.JSX.Element {
           {/* === Day 11 + 11.5: saved-test library, grouped into sections === */}
           {(savedTests.length > 0 || suites.length > 0) && (
             <div className="test-library">
+              {/* F39: a parallel batch stays HERE rather than switching to the
+                  workspace (it never drives the embedded browser, so that view
+                  would just be an empty pane). So the progress line has to live
+                  in the library too. */}
+              {suiteRun?.running && (
+                <div className="replay-status running">
+                  {suiteRun.parallelBatch ? (
+                    <>
+                      Running {suiteRun.parallelBatch} test
+                      {suiteRun.parallelBatch === 1 ? '' : 's'} at once, {parallelWorkers} at a
+                      time…
+                    </>
+                  ) : (
+                    <>
+                      Running {suiteRun.suite} — {suiteRun.current} of {suiteRun.total}
+                      {suiteRun.currentName ? `: ${suiteRun.currentName}` : ''}
+                    </>
+                  )}
+                </div>
+              )}
               <div className="library-heading">
                 <span className="library-heading-title">Test Library</span>
                 <span className="library-heading-sub">
@@ -6381,6 +7541,10 @@ function App(): React.JSX.Element {
                           setLibrarySearch('')
                           setLibraryFilter('all')
                           setFailureFilter(null)
+                          setTagFilter(new Set()) // F38
+                          // Collapses you made DURING a filter belonged to that
+                          // filter — don't carry them into the unfiltered view.
+                          setFilterCollapsed(new Set())
                         }}
                       >
                         clear ✕
@@ -6399,6 +7563,140 @@ function App(): React.JSX.Element {
                       select all{anyLibraryFilter() ? ' shown' : ''}
                     </button>
                   </div>
+                  {/* F40: share the library. Exports whatever the filters/ticks
+                      currently show — so "share the smoke suite" is just
+                      filter by @smoke, then 📦 Export. */}
+                  <div className="library-filters bundle-bar">
+                    <button
+                      type="button"
+                      className="library-filter-clear"
+                      disabled={bundleBusy}
+                      onClick={handleExportBundle}
+                      title="Export the tests currently shown (or ticked) as a portable folder you can commit to git or zip and send"
+                    >
+                      📦 Export bundle
+                      {selectedTests.size
+                        ? ` (${selectedTests.size} ticked)`
+                        : anyLibraryFilter()
+                          ? ' (shown)'
+                          : ' (all)'}
+                    </button>
+                    <button
+                      type="button"
+                      className="library-filter-clear"
+                      disabled={bundleBusy}
+                      onClick={handleInspectBundle}
+                      title="Import a bundle someone shared with you"
+                    >
+                      📥 Import bundle
+                    </button>
+                    {importDone && (
+                      <span className="bundle-done">
+                        ✓ {importDone}
+                        <button type="button" className="tag-x" onClick={() => setImportDone(null)}>
+                          ×
+                        </button>
+                      </span>
+                    )}
+                  </div>
+
+                  {/* F39: parallel mode. Opt-in, and the note explains the
+                      trade honestly — this is faster because it's a DIFFERENT
+                      engine, not because the old one was wasting time. */}
+                  <div className="library-filters parallel-bar">
+                    <label className="parallel-toggle">
+                      <input
+                        type="checkbox"
+                        checked={parallelMode}
+                        onChange={(e) => setParallelMode(e.target.checked)}
+                      />
+                      ⚡ Run in parallel
+                    </label>
+                    {parallelMode && (
+                      <>
+                        <label className="parallel-workers">
+                          workers
+                          <input
+                            type="number"
+                            min={1}
+                            max={16}
+                            value={parallelWorkers}
+                            onChange={(e) =>
+                              setParallelWorkers(
+                                Math.max(1, Math.min(16, parseInt(e.target.value, 10) || 1))
+                              )
+                            }
+                          />
+                        </label>
+                        <span className="parallel-hint">
+                          Runs {parallelWorkers} tests at once through real Playwright, headless.{' '}
+                          <strong>Not the in-app engine</strong> — no self-heal, no recovery pause.
+                          Tests with AI checks, manual steps, a11y or visual snapshots run the
+                          normal way instead (the report says which).
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  {/* F38: tag filters, on their own row so they don't crowd the
+                      status chips. Only rendered once something IS tagged —
+                      an empty filter row would just be clutter. */}
+                  {(() => {
+                    const tagList = allTags(savedTests)
+                    if (!tagList.length) return null
+                    return (
+                      <div className="library-filters library-tagbar">
+                        <span className="tagbar-label">Tags:</span>
+                        {tagList.map(({ tag, count }) => (
+                          <button
+                            key={tag}
+                            type="button"
+                            className={`tag-chip filter${tagFilter.has(tag) ? ' active' : ''}`}
+                            onClick={() =>
+                              setTagFilter((prev) => {
+                                const next = new Set(prev)
+                                if (next.has(tag)) next.delete(tag)
+                                else next.add(tag)
+                                return next
+                              })
+                            }
+                            title={`${count} test${count === 1 ? '' : 's'} tagged ${tag}`}
+                          >
+                            {tag} <strong>{count}</strong>
+                          </button>
+                        ))}
+                        {tagFilter.size > 0 && (
+                          <>
+                            {/* The payoff: select every test carrying these tags,
+                                then ▶ Run selected. "Run all @smoke" without
+                                keeping a second list of which tests those are. */}
+                            <button
+                              type="button"
+                              className="library-filter-clear runtag"
+                              onClick={() =>
+                                setSelectedTests(
+                                  new Set(
+                                    savedTests
+                                      .filter(matchesLibraryFilters)
+                                      .map((t) => t.fileName)
+                                  )
+                                )
+                              }
+                              title="Tick every test matching these tags, ready to ▶ Run selected"
+                            >
+                              ▶ select all {[...tagFilter].join(' + ')}
+                            </button>
+                            <button
+                              type="button"
+                              className="library-filter-clear"
+                              onClick={() => setTagFilter(new Set())}
+                            >
+                              clear tags ✕
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </div>
               )}
 
@@ -6447,14 +7745,16 @@ function App(): React.JSX.Element {
                   // With any filter active, hide sections that have nothing to show,
                   // and force sections open so the matches are visible.
                   if (filtering && tests.length === 0) return null
-                  const isOpen = filtering ? true : openSuites.has(suiteKey)
+                  const isOpen = filtering
+                    ? !filterCollapsed.has(suiteKey)
+                    : openSuites.has(suiteKey)
                   return (
                     <div key={suiteKey} className="library-section">
                       <div className="library-section-header">
                         <button
                           type="button"
                           className="section-toggle"
-                          onClick={() => toggleSuite(suiteKey)}
+                          onClick={() => toggleSuite(suiteKey, filtering)}
                           aria-expanded={isOpen}
                           title={isOpen ? 'Collapse section' : 'Expand section'}
                         >
@@ -6580,6 +7880,29 @@ function App(): React.JSX.Element {
                                     >
                                       {trust.grade} · {trust.score}
                                     </span>
+                                    {/* F38: this test's labels, clickable to filter
+                                        the library down to them. */}
+                                    {(test.tags ?? []).map((tag) => (
+                                      <span
+                                        key={tag}
+                                        className={`tag-chip row${tagFilter.has(tag) ? ' active' : ''}`}
+                                        onClick={(e) => {
+                                          // The whole row is a button that OPENS the
+                                          // test — stop the click so tapping a tag
+                                          // filters instead of navigating away.
+                                          e.stopPropagation()
+                                          setTagFilter((prev) => {
+                                            const next = new Set(prev)
+                                            if (next.has(tag)) next.delete(tag)
+                                            else next.add(tag)
+                                            return next
+                                          })
+                                        }}
+                                        title={`Filter the library to ${tag}`}
+                                      >
+                                        {tag}
+                                      </span>
+                                    ))}
                                     <span className="library-meta">
                                       {test.stepCount} steps ·{' '}
                                       {new Date(test.updatedAt).toLocaleDateString()}
@@ -6783,6 +8106,44 @@ function App(): React.JSX.Element {
               Go
             </button>
           </form>
+          {/* F36: the device belongs HERE, next to the URL, not buried in the
+              save panel. The save panel only opens once a test has steps — so
+              until Surbhi hit this, there was NO WAY to choose a device before
+              recording. That's backwards for the whole point of mobile testing:
+              a responsive site shows different elements at phone width (a
+              hamburger where desktop has a nav bar), so recording desktop-first
+              captures selectors for elements the mobile layout doesn't have.
+              This is also where a browser puts device mode, so it's where you'd
+              look. The save panel keeps its copy — they share `deviceId`. */}
+          <select
+            className="device-select"
+            value={deviceId ?? (viewport ? 'custom' : 'desktop')}
+            disabled={isRecording || isReplaying}
+            title="Render the page as this device — set it BEFORE recording so you capture the right layout"
+            onChange={(e) => {
+              const v = e.target.value
+              applyDevice(v === 'desktop' ? undefined : v)
+            }}
+          >
+            <option value="desktop">🖥 Desktop</option>
+            {DEVICES.filter((d) => d.group === 'Basic').map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.label.replace(' (size only)', ' (size)')}
+              </option>
+            ))}
+            {DEVICES.filter((d) => d.group !== 'Basic').map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.group === 'Tablet' ? '📲' : '📱'} {d.label}
+              </option>
+            ))}
+            {/* A pre-F36 test carries a bare viewport and no device id — show it
+                rather than silently displaying "Desktop" while it isn't. */}
+            {!deviceId && viewport && (
+              <option value="custom">
+                🖥 {viewport.width}×{viewport.height} (size)
+              </option>
+            )}
+          </select>
           <button
             className={`record-btn${isRecording ? ' recording' : ''}`}
             onClick={handleRecordToggle}
@@ -7254,8 +8615,17 @@ function App(): React.JSX.Element {
           {/* Day 11.5: suite-run progress line ("test 2 of 5") */}
           {suiteRun?.running && (
             <div className="replay-status running">
-              Running section {suiteRun.suite} — test {suiteRun.current} of {suiteRun.total}
-              {suiteRun.currentName ? `: ${suiteRun.currentName}` : ''}
+              {suiteRun.parallelBatch ? (
+                <>
+                  Running {suiteRun.parallelBatch} test
+                  {suiteRun.parallelBatch === 1 ? '' : 's'} at once, {parallelWorkers} at a time…
+                </>
+              ) : (
+                <>
+                  Running section {suiteRun.suite} — test {suiteRun.current} of {suiteRun.total}
+                  {suiteRun.currentName ? `: ${suiteRun.currentName}` : ''}
+                </>
+              )}
             </div>
           )}
           {/* Day 20: data-driven run progress ("row 2 of 5: locked_out_user") */}
@@ -7954,6 +9324,24 @@ function App(): React.JSX.Element {
             </div>
           )}
 
+          {/* F37: control flow that did NOT run. Shown on a PASSING run too —
+              that's the whole point. A green tick on a test whose checks all sat
+              in an untaken branch looks identical to one that checked everything,
+              and this is the only thing that tells them apart. */}
+          {branchNotes.length > 0 && !isReplaying && (
+            <div className="replay-status branch-note">
+              <strong>🔀 Some steps didn’t run this time</strong>
+              {branchNotes.map((n, k) => (
+                <div key={k}>{n}</div>
+              ))}
+              <div className="branch-note-why">
+                That’s expected when a condition is false or a loop matches nothing — but any check
+                inside those steps was <strong>not performed</strong>, so this run doesn’t vouch
+                for it.
+              </div>
+            </div>
+          )}
+
           {/* F4 (self-heal 2.0): steps main repaired ON ITS OWN mid-run */}
           {aiHealedIndices.size > 0 && !isReplaying && (
             <div className="replay-status healed">
@@ -8307,36 +9695,145 @@ function App(): React.JSX.Element {
                   </button>
                 </div>
               </div>
-              {/* Day 17: viewport / device emulation */}
+              {/* F38: tags. Sits BELOW the section chips deliberately — the two
+                  look similar but mean different things, and the note spells the
+                  difference out so they don't get used interchangeably. */}
               <div className="session-block">
-                <label className="session-label">Viewport (device):</label>
+                <label className="session-label">Tags:</label>
+                <div className="tag-row">
+                  {tags.map((t) => (
+                    <span key={t} className="tag-chip editable">
+                      {t}
+                      <button
+                        type="button"
+                        className="tag-x"
+                        onClick={() => setTags(tags.filter((x) => x !== t))}
+                        title={`Remove ${t}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    className="tag-input"
+                    value={tagInput}
+                    placeholder="@smoke…"
+                    onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Enter / comma commits; comma too because typing a list is
+                      // the natural thing to do in a box that shows several.
+                      if (e.key === 'Enter' || e.key === ',') {
+                        e.preventDefault()
+                        const added = parseTags(tagInput).filter((t) => !tags.includes(t))
+                        if (added.length) setTags([...tags, ...added])
+                        setTagInput('')
+                      } else if (e.key === 'Backspace' && !tagInput && tags.length) {
+                        setTags(tags.slice(0, -1))
+                      }
+                    }}
+                    onBlur={() => {
+                      const added = parseTags(tagInput).filter((t) => !tags.includes(t))
+                      if (added.length) setTags([...tags, ...added])
+                      setTagInput('')
+                    }}
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="tag-suggest">
+                  {SUGGESTED_TAGS.filter((t) => !tags.includes(t)).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      className="tag-add"
+                      onClick={() => setTags([...tags, normalizeTag(t)])}
+                    >
+                      + {t}
+                    </button>
+                  ))}
+                </div>
+                <p className="tag-note">
+                  A test lives in <strong>one section</strong> but can carry{' '}
+                  <strong>many tags</strong> — that&apos;s the difference. The section is where it
+                  files; tags are what it&apos;s <em>for</em>. Tag the fast, critical ones{' '}
+                  <code>@smoke</code> and you can run just those before a merge, then{' '}
+                  <code>npx playwright test --grep @smoke</code> does the same in CI.
+                </p>
+              </div>
+
+              {/* Day 17 viewport → F36 device emulation. Desktop and the two
+                  "size only" presets are Day-17 behaviour, unchanged. The real
+                  devices below them add userAgent + touch + pixel density. */}
+              <div className="session-block">
+                <label className="session-label">Device:</label>
                 <div className="assert-kinds">
-                  {[
-                    {
-                      label: 'Desktop',
-                      vp: undefined as { width: number; height: number } | undefined
-                    },
-                    { label: 'Tablet · 768×1024', vp: { width: 768, height: 1024 } },
-                    { label: 'Mobile · 375×667', vp: { width: 375, height: 667 } }
-                  ].map((p) => {
+                  <button
+                    type="button"
+                    className={`assert-kind${!viewport && !deviceId ? ' chosen' : ''}`}
+                    onClick={() => applyDevice(undefined)}
+                  >
+                    Desktop
+                  </button>
+                  {DEVICES.filter((d) => d.group === 'Basic').map((d) => {
+                    // A pre-F36 test has no deviceId — match it on SIZE so its
+                    // saved viewport still lights up the right chip.
                     const active =
-                      (!viewport && !p.vp) ||
-                      (!!viewport &&
-                        !!p.vp &&
-                        viewport.width === p.vp.width &&
-                        viewport.height === p.vp.height)
+                      deviceId === d.id ||
+                      (!deviceId &&
+                        !!viewport &&
+                        viewport.width === d.viewport.width &&
+                        viewport.height === d.viewport.height)
                     return (
                       <button
-                        key={p.label}
+                        key={d.id}
                         type="button"
                         className={`assert-kind${active ? ' chosen' : ''}`}
-                        onClick={() => applyViewport(p.vp)}
+                        onClick={() => applyDevice(d.id)}
                       >
-                        {p.label}
+                        {d.label.replace(' (size only)', '')}
                       </button>
                     )
                   })}
                 </div>
+                <div className="assert-kinds device-real">
+                  {DEVICES.filter((d) => d.group !== 'Basic').map((d) => (
+                    <button
+                      key={d.id}
+                      type="button"
+                      className={`assert-kind${deviceId === d.id ? ' chosen' : ''}`}
+                      onClick={() => applyDevice(d.id)}
+                      title={deviceSummary(d)}
+                    >
+                      {d.group === 'Tablet' ? '📲' : '📱'} {d.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="device-note">
+                  {deviceId && deviceById(deviceId)?.userAgent ? (
+                    <>
+                      <strong>{deviceSummary(deviceById(deviceId))}</strong>
+                      <br />
+                      The page sees a real phone: mobile user-agent, touch events, and{' '}
+                      {deviceById(deviceId)?.deviceScaleFactor}× pixel density — so layouts that
+                      switch on UA or <code>pointer: coarse</code> switch here too.
+                      {deviceById(deviceId)?.realEngine === 'webkit' && (
+                        <>
+                          {' '}
+                          <em>
+                            Note: in-app this runs on Chromium wearing an iOS costume — the embedded
+                            browser is Chromium-only. The export and 🧭 cross-browser run it on real
+                            WebKit.
+                          </em>
+                        </>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      &ldquo;Size only&rdquo; resizes the window and nothing else — the page still
+                      sees a desktop browser with no touch. Pick a real device below to test the
+                      mobile path properly.
+                    </>
+                  )}
+                </p>
               </div>
               <div className="assert-actions">
                 <button className="modal-btn" onClick={() => setSavePanelOpen(false)}>
@@ -8473,7 +9970,7 @@ function App(): React.JSX.Element {
 
           {/* === Assertion chooser — opens when an element was picked === */}
           {pickedElement && (
-            <div className="assert-panel">
+            <div className="assert-panel" ref={checkPanelRef}>
               <div className="assert-target">
                 <span className="assert-title">Add check:</span>
                 <span className="assert-label">{pickedElement.label}</span>
@@ -8579,17 +10076,34 @@ function App(): React.JSX.Element {
             </>
           ) : (
             <ol className="steps-list">
+              {/* F37: a broken loop/if structure stops replay before it starts,
+                  so say so HERE rather than letting Replay fail — the fix is a
+                  step edit, not a test problem. */}
+              {controlFlow.errors.length > 0 && (
+                <li className="control-error">
+                  <strong>⚠ This test can’t run yet</strong>
+                  {controlFlow.errors.map((e, n) => (
+                    <div key={n}>{e}</div>
+                  ))}
+                </li>
+              )}
               {steps.map((step, i) => {
                 // Day 16(+): upload steps aren't text-editable but DO get a ✎ —
                 // it opens a file picker to swap the uploaded file.
                 const editable = editableValue(step) !== null || step.type === 'upload'
                 const canEdit = !isRecording && !isReplaying
+                // F37: indent by nesting depth so a loop/if body reads as being
+                // INSIDE it — the flat list is how it's stored, not how it should
+                // look.
+                const stepDepth = controlFlow.depth[i] ?? 0
+                const isControl = isControlStep(step)
                 return (
                   <li
                     key={i}
+                    style={stepDepth > 0 ? { marginLeft: stepDepth * 16 } : undefined}
                     className={`step-item${step.disabled ? ' disabled' : ''}${
                       step.optional ? ' optional' : ''
-                    }${
+                    }${isControl ? ' control-step' : ''}${
                       i === failedIndex
                         ? ' failed'
                         : i === replayingIndex
@@ -8658,6 +10172,82 @@ function App(): React.JSX.Element {
                             </span>
                           )}
                         </span>
+                      ) : step.type === 'repeat' ? (
+                        /* F37: a loop header edits inline — how many times, or
+                           which element to iterate over. */
+                        <span className="step-text step-text-control">
+                          🔁 Repeat
+                          {step.repeatKind === 'each' ? (
+                            <>
+                              {' for each '}
+                              <button
+                                type="button"
+                                className="control-pick"
+                                disabled={!canEdit}
+                                onClick={() => handleStartPickFor(i)}
+                                title="Pick the element to loop over — the loop runs once per match"
+                              >
+                                {step.label ? `"${step.label}"` : 'pick an element…'}
+                              </button>
+                              {' on the page'}
+                            </>
+                          ) : (
+                            <>
+                              {' '}
+                              <input
+                                className="control-num"
+                                type="number"
+                                min={1}
+                                value={step.value ?? '1'}
+                                disabled={!canEdit}
+                                onChange={(e) => updateStepField(i, { value: e.target.value })}
+                              />
+                              {' times'}
+                            </>
+                          )}
+                        </span>
+                      ) : step.type === 'if' ? (
+                        /* F37: the condition — what decides which branch runs. */
+                        <span className="step-text step-text-control">
+                          🔀 If{' '}
+                          <select
+                            className="control-sel"
+                            value={step.condKind ?? 'element-visible'}
+                            disabled={!canEdit}
+                            onChange={(e) =>
+                              updateStepField(i, { condKind: e.target.value as ConditionKind })
+                            }
+                          >
+                            <option value="element-visible">element is visible</option>
+                            <option value="element-absent">element is NOT there</option>
+                            <option value="text-present">page contains text</option>
+                            <option value="text-absent">page does NOT contain text</option>
+                            <option value="url-contains">URL contains</option>
+                          </select>{' '}
+                          {step.condKind === 'text-present' ||
+                          step.condKind === 'text-absent' ||
+                          step.condKind === 'url-contains' ? (
+                            <input
+                              className="control-text"
+                              value={step.value ?? ''}
+                              placeholder="text…"
+                              disabled={!canEdit}
+                              onChange={(e) => updateStepField(i, { value: e.target.value })}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="control-pick"
+                              disabled={!canEdit}
+                              onClick={() => handleStartPickFor(i)}
+                              title="Pick the element this condition tests"
+                            >
+                              {step.label ? `"${step.label}"` : 'pick an element…'}
+                            </button>
+                          )}
+                        </span>
+                      ) : isControl ? (
+                        <span className="step-text step-text-control">{stepText(step)}</span>
                       ) : (
                         <span className="step-text">{stepText(step)}</span>
                       )}
@@ -8850,6 +10440,31 @@ function App(): React.JSX.Element {
                           <button type="button" onClick={() => openBlocksPanel(i + 1)}>
                             🧩 Insert block here
                           </button>
+                          {/* F37: loops + branching. Each inserts a matched PAIR
+                              of markers, so the structure is always valid — you
+                              can't create an unclosed loop by accident, and the
+                              steps you want inside just get dragged in. */}
+                          <button
+                            type="button"
+                            onClick={() => handleAddRepeat(i + 1, 'times')}
+                            title="Repeat the steps inside this loop a fixed number of times"
+                          >
+                            🔁 Repeat N times…
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddRepeat(i + 1, 'each')}
+                            title="Repeat the steps inside once per matching element — pick the element after adding"
+                          >
+                            🔁 For each element…
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddIf(i + 1)}
+                            title="Run the steps inside only when a condition is true (e.g. a cookie banner appeared)"
+                          >
+                            🔀 If… / Otherwise
+                          </button>
                         </div>
                       )}
                       {expandedIndex === i && step.candidates && step.candidates.length > 0 && (
@@ -9038,193 +10653,8 @@ function App(): React.JSX.Element {
         </aside>
       </div>
 
-      {/* === Day 11.5 + B: suite-run REPORT (shown when the run finishes) === */}
-      {suiteSummaryOpen &&
-        suiteRun &&
-        (() => {
-          const r = suiteRun.results
-          const passed = r.filter((x) => x.status === 'passed').length
-          const failed = r.length - passed
-          const healedCount = r.reduce((s, x) => s + (x.healed ?? 0), 0)
-          const healedSaves = suiteRun.healedSaves ?? []
-          const byCat = new Map<string, number>()
-          for (const x of r) {
-            if (x.status === 'failed') {
-              const c = x.category ?? 'unknown'
-              byCat.set(c, (byCat.get(c) ?? 0) + 1)
-            }
-          }
-          const cats = [...byCat.entries()].sort((a, b) => b[1] - a[1])
-          return (
-            <div className="modal-backdrop" onClick={() => setSuiteRun(null)}>
-              <div className="modal" onClick={(e) => e.stopPropagation()}>
-                <div className="modal-header">
-                  <span className="modal-title">
-                    {suiteRun.suite}: {passed} passed, {failed} failed
-                    {healedCount ? ` · ${healedCount} auto-healed` : ''}
-                  </span>
-                  <button
-                    className="modal-close"
-                    onClick={() => setSuiteRun(null)}
-                    aria-label="Close"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                {/* B: failures grouped by cause (the suite-level triage view). */}
-                {cats.length > 0 && (
-                  <div className="failure-breakdown">
-                    <span className="failure-breakdown-label">Failures by type:</span>
-                    {cats.map(([c, n]) => (
-                      <span key={c} className={`category-chip cat-${c}`}>
-                        {CATEGORY_LABELS[c as FailureCategory] ?? c} <strong>{n}</strong>
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                {/* B: heal review — persist every auto-healed selector in one click. */}
-                {healedSaves.length > 0 && (
-                  <div className={`blast-radius${suiteRun.healedSaved ? ' blast-radius-safe' : ''}`}>
-                    {suiteRun.healedSaved ? (
-                      <span className="blast-radius-head">
-                        ✓ Saved the repaired selectors for {healedSaves.length} test
-                        {healedSaves.length > 1 ? 's' : ''}.
-                      </span>
-                    ) : (
-                      <>
-                        <span className="blast-radius-head">
-                          🤖 {healedCount} selector{healedCount > 1 ? 's' : ''} auto-healed across{' '}
-                          {healedSaves.length} test{healedSaves.length > 1 ? 's' : ''} — keep the
-                          fixes:
-                        </span>
-                        <ul className="blast-list">
-                          {healedSaves.map((h) => (
-                            <li key={h.fileName}>{h.name}</li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {/* Option 2: failed tests self-heal COULD fix — review & accept.
-                    We never auto-applied these (a low-confidence heal that "works"
-                    could be a false pass); a human confirms before they go green. */}
-                {(suiteRun.healables ?? []).length > 0 && (
-                  <div className="healable-review">
-                    <div className="healable-head">
-                      🔧 {suiteRun.healables!.length} failed test
-                      {suiteRun.healables!.length > 1 ? 's' : ''} could be self-healed — review before
-                      accepting (a low-confidence heal may target the wrong element):
-                    </div>
-                    <ul className="blast-list">
-                      {suiteRun.healables!.map((hf) => {
-                        const accepted = suiteRun.accepted?.includes(hf.fileName)
-                        return (
-                          <li key={hf.fileName} className="healable-row">
-                            <span>
-                              <strong>{hf.name}</strong> → suggests “{hf.healable.label}”{' '}
-                              <span className="healable-meta">
-                                ({hf.healable.signals.join(' + ')} · {hf.healable.score}/100)
-                              </span>
-                            </span>
-                            {accepted ? (
-                              <span className="healable-accepted">✓ accepted</span>
-                            ) : (
-                              <span className="healable-actions">
-                                <button
-                                  type="button"
-                                  className="modal-btn"
-                                  onClick={() => handleLoadTest(hf.fileName)}
-                                  title="Open the test to replay + verify the fix yourself"
-                                >
-                                  Open
-                                </button>
-                                {!hf.hasBlocks && (
-                                  <button
-                                    type="button"
-                                    className="modal-btn"
-                                    onClick={() => handleAcceptHealable(hf)}
-                                    title="Trust this heal — patch the selector and save"
-                                  >
-                                    Accept &amp; save
-                                  </button>
-                                )}
-                              </span>
-                            )}
-                          </li>
-                        )
-                      })}
-                    </ul>
-                    {suiteRun.healables!.some(
-                      (hf) => !hf.hasBlocks && !suiteRun.accepted?.includes(hf.fileName)
-                    ) && (
-                      <button
-                        type="button"
-                        className="modal-btn"
-                        onClick={handleAcceptAllHealable}
-                      >
-                        Accept &amp; save all
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                <ul className="suite-summary">
-                  {r.map((x) => (
-                    <li key={x.fileName} className="suite-result">
-                      <span className={`run-dot ${x.status}`} />
-                      <span className="suite-result-name">{x.name}</span>
-                      {x.healed ? (
-                        <span className="healed-tag ai-healed-tag">🤖 {x.healed}</span>
-                      ) : null}
-                      {x.status === 'failed' && x.category && (
-                        <span className={`category-chip cat-${x.category}`}>
-                          {CATEGORY_LABELS[x.category] ?? x.category}
-                        </span>
-                      )}
-                      {x.status === 'failed' && (
-                        <span className="suite-result-error">
-                          {x.failedAt !== undefined ? `step ${x.failedAt + 1} — ` : ''}
-                          {x.error}
-                        </span>
-                      )}
-                      {x.screenshotPath && (
-                        <button
-                          type="button"
-                          className="shot-link"
-                          onClick={() => window.api.library.openScreenshot(x.screenshotPath!)}
-                          title="Open the failure screenshot"
-                        >
-                          📷
-                        </button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-
-                <div className="modal-footer">
-                  {healedSaves.length > 0 && !suiteRun.healedSaved && (
-                    <button className="modal-btn primary" onClick={handleSaveAllHealed}>
-                      💾 Save all healed ({healedSaves.length})
-                    </button>
-                  )}
-                  <button className="modal-btn" onClick={handleCopySuiteReport}>
-                    Copy report
-                  </button>
-                  <button className="modal-btn" onClick={handleSaveSuiteReport}>
-                    Save .md
-                  </button>
-                  <button className="modal-btn" onClick={() => setSuiteRun(null)}>
-                    Close
-                  </button>
-                </div>
-              </div>
-            </div>
-          )
-        })()}
+      {f40Modals}
+      {suiteReport}
 
       {/* === Day 20: data-run overview popup — auto-appears when the matrix
            finishes (which rows passed / failed). Drilling into a row's

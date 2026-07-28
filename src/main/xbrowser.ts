@@ -99,6 +99,226 @@ ${projects}
 `
 }
 
+// =====================================================================
+// F39 — PARALLEL SUITE RUN
+//
+// Run All replays each test one at a time in the embedded browser
+// (`await runOnce(...)` in a for-loop). That is not a bug — there is exactly
+// ONE WebContentsView, so two tests genuinely cannot drive it at once. In-app
+// parallelism isn't a matter of adding workers; it's architecturally impossible.
+//
+// The headless path CAN parallelize, because it shells out to real Playwright,
+// which has its own scheduler. So instead of N separate child processes, we
+// write EVERY selected test as its own spec file into one temp directory and
+// let a single Playwright run schedule them across `workers`. Playwright
+// parallelizes across files by default, so this is its native mode.
+//
+// == The honesty problem this creates ==
+//
+// A headless run executes the EXPORTED spec, not the in-app replay engine. The
+// two are not equivalent: self-heal, the recovery pause, and AI (`nl`) checks
+// exist only in the app. An `nl` check exports as a COMMENT — so a test whose
+// only real assertion is an AI check would run headlessly, assert nothing, and
+// come back GREEN. That is a false pass, which is the single worst outcome for
+// a tool whose identity is "a green run can be trusted".
+//
+// So `headlessBlockers()` (renderer) finds those tests up front and the caller
+// runs them the normal sequential way instead. Nothing is skipped; the report
+// says which test went down which path.
+// =====================================================================
+
+export interface ParallelSpec {
+  /** Stable id (the test's fileName) so results map back to the right test. */
+  id: string
+  name: string
+  code: string
+  /** A saved session to copy in, if this test starts logged in. */
+  sessionPath?: string
+}
+
+export interface ParallelTestResult {
+  id: string
+  ok: boolean
+  error?: string
+}
+
+export interface ParallelRunResult {
+  installed: boolean
+  ran: boolean
+  results: ParallelTestResult[]
+  message?: string
+}
+
+/** A filename-safe token for one spec, unique per test. */
+function specSlug(id: string, index: number): string {
+  const base = id
+    .replace(/\.json$/i, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50)
+  // The index keeps two tests with the same slug in different suites apart.
+  return `${index}-${base || 'test'}`
+}
+
+/**
+ * Run many tests at once through real Playwright.
+ *
+ * One process, N workers, one spec file per test. Playwright owns the
+ * scheduling — we only map its JSON report back onto our test ids.
+ */
+export async function runSuiteParallel(
+  specs: ParallelSpec[],
+  workers: number,
+  envVars: Record<string, string> = {}
+): Promise<ParallelRunResult> {
+  const { installed, root } = checkPlaywright()
+  if (!installed || !root) {
+    return {
+      installed: false,
+      ran: false,
+      results: [],
+      message:
+        'Playwright isn’t installed in this project. Run once:  npm i -D @playwright/test && npx playwright install'
+    }
+  }
+  if (!specs.length) return { installed: true, ran: true, results: [] }
+  const cli = playwrightCli(root)!
+  const workDir = join(root, '.qaflow-parallel')
+  const specDir = join(workDir, 'specs')
+  // spec file base name → our test id, so the report maps back.
+  const idBySlug = new Map<string, string>()
+  try {
+    await rm(workDir, { recursive: true, force: true })
+    await mkdir(specDir, { recursive: true })
+    await mkdir(join(workDir, 'sessions'), { recursive: true })
+    for (let i = 0; i < specs.length; i++) {
+      const spec = specs[i]
+      const slug = specSlug(spec.id, i)
+      idBySlug.set(slug, spec.id)
+      let code = spec.code
+      if (spec.sessionPath) {
+        // Each test carries its OWN session, so storageState can't live in the
+        // shared config the way the single-test runner does it — it's injected
+        // into this spec's own test.use instead.
+        const dst = join(workDir, 'sessions', `${slug}.json`)
+        try {
+          await copyFile(spec.sessionPath, dst)
+          code = `${code}\ntest.use({ storageState: ${JSON.stringify(dst)} })\n`
+        } catch {
+          // missing session — run without it; the test fails honestly, exactly
+          // as it would in the app if the session file were gone.
+        }
+      }
+      await writeFile(join(specDir, `${slug}.spec.ts`), code, 'utf-8')
+    }
+    await writeFile(
+      join(workDir, 'playwright.config.ts'),
+      `import { defineConfig, devices } from '@playwright/test'
+export default defineConfig({
+  testDir: ${JSON.stringify(specDir)},
+  fullyParallel: true,
+  workers: ${Math.max(1, Math.floor(workers))},
+  // A suite run reports every result; one red test must not stop the rest.
+  maxFailures: 0,
+  reporter: 'null',
+  use: { headless: true },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]
+})
+`,
+      'utf-8'
+    )
+
+    const json = await new Promise<string>((resolve, reject) => {
+      let out = ''
+      let err = ''
+      const child = spawn(
+        process.execPath,
+        [cli, 'test', '--config', join(workDir, 'playwright.config.ts'), '--reporter=json'],
+        { cwd: root, env: { ...process.env, ...envVars, ELECTRON_RUN_AS_NODE: '1' } }
+      )
+      // Scaled to the suite: a big fleet legitimately takes longer than one
+      // test, but it must still be bounded so a hung run can't wedge the app.
+      const timeoutMs = Math.min(30 * 60_000, 120_000 + specs.length * 60_000)
+      const timer = setTimeout(() => {
+        child.kill()
+        reject(new Error(`Parallel run timed out after ${Math.round(timeoutMs / 60000)} minutes`))
+      }, timeoutMs)
+      child.stdout.on('data', (d) => (out += d.toString()))
+      child.stderr.on('data', (d) => (err += d.toString()))
+      child.on('error', (e) => {
+        clearTimeout(timer)
+        reject(e)
+      })
+      child.on('close', () => {
+        clearTimeout(timer)
+        if (out.trim().startsWith('{')) resolve(out)
+        else reject(new Error(err.trim() || out.trim() || 'Playwright produced no report'))
+      })
+    })
+
+    // Walk the report and attribute each spec FILE back to its test id.
+    const report = JSON.parse(json) as { suites?: unknown[] }
+    const byId = new Map<string, ParallelTestResult>()
+    const walk = (suite: {
+      file?: string
+      specs?: unknown[]
+      suites?: unknown[]
+      title?: string
+    }): void => {
+      for (const specRaw of suite.specs ?? []) {
+        const s = specRaw as { title?: string; tests?: unknown[] }
+        const file = (suite.file || suite.title || '').replace(/\\/g, '/')
+        const slug = (file.split('/').pop() || '').replace(/\.spec\.ts$/, '')
+        const id = idBySlug.get(slug)
+        if (!id) continue
+        for (const testRaw of s.tests ?? []) {
+          const t = testRaw as { results?: { status?: string; error?: { message?: string } }[] }
+          const results = t.results ?? []
+          const ok = results.length > 0 && results.every((r) => r.status === 'passed')
+          const firstErr = results.find((r) => r.error?.message)?.error?.message
+          const prev = byId.get(id)
+          // A data-driven test is several `test()` blocks in one file — the file
+          // is green only if every one of them passed.
+          byId.set(id, {
+            id,
+            ok: (prev?.ok ?? true) && ok,
+            error:
+              prev?.error ??
+              (firstErr ? stripAnsi(firstErr).replace(/\s+/g, ' ').slice(0, 300) : undefined)
+          })
+        }
+      }
+      for (const inner of suite.suites ?? []) walk(inner as never)
+    }
+    for (const s of report.suites ?? []) walk(s as never)
+
+    // A spec that produced no result at all didn't run (compile error, crash) —
+    // report it as failed rather than silently dropping it from the suite.
+    const results: ParallelTestResult[] = specs.map(
+      (s) =>
+        byId.get(s.id) ?? {
+          id: s.id,
+          ok: false,
+          error: 'No result — the generated spec did not run (it may not compile headlessly).'
+        }
+    )
+    return { installed: true, ran: true, results }
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e)
+    const needsInstall = /Executable doesn.t exist|playwright install/i.test(m)
+    return {
+      installed: true,
+      ran: false,
+      results: [],
+      message: needsInstall
+        ? 'Browser binaries aren’t installed. Run once:  npx playwright install'
+        : `Parallel run failed: ${m.slice(0, 300)}`
+    }
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
 // Remove ANSI colour escapes (ESC "[" … "m") from Playwright's error text: the
 // raw escapes rendered as literal "[31m…" in the results modal AND ate into the
 // 300-char budget, hiding the useful part of the message. The ESC is required in

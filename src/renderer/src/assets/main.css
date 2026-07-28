@@ -2389,6 +2389,525 @@ body {
   color: #cce4ff;
 }
 
+/* F36 — device picker in the browser toolbar. Sits between the URL bar and
+   Record because that is the order you use them in: choose the device, then
+   record. Narrow so it doesn't crowd row 1 (whose height is locked to
+   CHROME_HEIGHT). */
+.device-select {
+  flex: none;
+  max-width: 150px;
+  padding: 5px 6px;
+  background: #1e1e1e;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  color: #ddd;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.device-select:hover:not(:disabled) {
+  border-color: #58a6ff;
+}
+
+.device-select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* === F40: shareable bundles === */
+.bundle-bar {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #333;
+}
+
+.bundle-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #7ee787;
+  font-size: 11.5px;
+}
+
+.bundle-body {
+  max-height: 60vh;
+  overflow-y: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #bbb;
+}
+
+.bundle-body h4 {
+  margin: 12px 0 4px;
+  color: #ddd;
+  font-size: 12.5px;
+}
+
+.bundle-body ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.bundle-path code {
+  display: block;
+  padding: 6px 8px;
+  background: #1e1e1e;
+  border-radius: 4px;
+  color: #9ecbff;
+  word-break: break-all;
+  font-size: 11.5px;
+}
+
+/* Omissions are the part people skim past, so they get their own tint. */
+.bundle-omitted li {
+  margin-bottom: 4px;
+  color: #a8a8a8;
+}
+
+.bundle-omitted strong {
+  color: #d9a84e;
+}
+
+.import-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.import-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #2c2c2c;
+}
+
+.import-list li.clash {
+  background: rgba(217, 168, 78, 0.07);
+}
+
+.import-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.import-suite,
+.import-meta {
+  color: #777;
+  font-size: 11px;
+}
+
+.import-new {
+  color: #7ee787;
+  font-size: 11px;
+}
+
+.import-warn {
+  color: #d9a84e;
+  font-size: 11px;
+}
+
+.import-choice {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+/* Sticky: this row scrolls INSIDE .bundle-body, so on a big import (56 rows
+   here, hundreds in a real team library) it slid off the top and the bulk
+   control became unreachable exactly when it mattered most. Pinned to the top
+   of the scroll area instead, with a background so rows don't show through. */
+.import-allrow {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 6px 0;
+  background: #2c2c2c;
+  color: #999;
+  font-size: 11.5px;
+}
+
+/* What the current choices add up to — so a 500-row import can be judged
+   without scrolling every row. */
+.import-tally {
+  margin-left: auto;
+  color: #bbb;
+}
+
+.import-tally strong {
+  color: #cce4ff;
+}
+
+.import-note {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  background: rgba(217, 168, 78, 0.1);
+  border-left: 2px solid #d9a84e;
+  border-radius: 4px;
+  color: #d8c49a;
+  font-size: 11.5px;
+}
+
+/* === F39: parallel run ===
+   Deliberately understated. Parallel is a trade (speed for fidelity), not an
+   upgrade, so it must not look like the recommended button. */
+.parallel-bar {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #333;
+  align-items: flex-start;
+}
+
+.parallel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #bbb;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.parallel-workers {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #999;
+  font-size: 11.5px;
+}
+
+.parallel-workers input {
+  width: 46px;
+  padding: 1px 4px;
+  background: #1e1e1e;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #ddd;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.parallel-hint {
+  flex: 1;
+  min-width: 220px;
+  color: #8a8a8a;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.parallel-hint strong {
+  color: #d9a84e;
+}
+
+.parallel-summary {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  background: #232323;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  color: #bbb;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.parallel-warn {
+  color: #e8c883;
+}
+
+.parallel-skips summary {
+  margin-top: 5px;
+  color: #9ecbff;
+  cursor: pointer;
+  font-size: 11.5px;
+}
+
+.parallel-skips ul {
+  margin: 5px 0 0;
+  padding-left: 18px;
+  font-size: 11.5px;
+  color: #aaa;
+}
+
+.parallel-skips p {
+  margin: 5px 0 0;
+  color: #8a8a8a;
+  font-size: 11px;
+  font-style: italic;
+}
+
+/* === F38: tags ===
+   Purple, distinct from the blue status filters and the section chips — a tag
+   answers a different question ("what is this test FOR") and shouldn't read as
+   another status. */
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  background: rgba(163, 113, 247, 0.12);
+  border: 1px solid rgba(163, 113, 247, 0.45);
+  border-radius: 10px;
+  color: #d2b3ff;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.tag-chip.filter,
+.tag-chip.row {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.tag-chip.filter:hover,
+.tag-chip.row:hover {
+  border-color: #a371f7;
+  color: #e6d5ff;
+}
+
+.tag-chip.active {
+  background: #3d2a63;
+  border-color: #a371f7;
+  color: #e6d5ff;
+}
+
+.tag-chip strong {
+  opacity: 0.75;
+  font-weight: 600;
+}
+
+.tag-x {
+  padding: 0;
+  background: none;
+  border: none;
+  color: #d2b3ff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tag-x:hover {
+  color: #ff8a80;
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.tag-input {
+  flex: 1;
+  min-width: 90px;
+  padding: 2px 6px;
+  background: #1e1e1e;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #ddd;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.tag-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.tag-add {
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px dashed #3a3a3a;
+  border-radius: 10px;
+  color: #999;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tag-add:hover {
+  border-color: #a371f7;
+  color: #d2b3ff;
+}
+
+.library-tagbar {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #333;
+}
+
+.tagbar-label {
+  color: #777;
+  font-size: 11px;
+}
+
+.library-filter-clear.runtag {
+  border-color: #a371f7;
+  color: #d2b3ff;
+}
+
+/* F37 — untaken branches. Amber, not red: nothing FAILED, but the green tick
+   covers less than it appears to, and that's worth a second look. */
+.replay-status.branch-note {
+  background: rgba(217, 168, 78, 0.1);
+  border: 1px solid #d9a84e;
+  color: #e8c883;
+  text-align: left;
+  line-height: 1.6;
+}
+
+.replay-status.branch-note strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #f0d9a8;
+}
+
+.branch-note-why {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(217, 168, 78, 0.3);
+  font-size: 11.5px;
+  color: #c8b18a;
+}
+
+/* === F37: loops + branching ===
+   A control marker is scaffolding, not an action — tinted and left-barred so
+   the eye separates "the shape of the test" from "what the test does". */
+.step-item.control-step {
+  background: rgba(88, 166, 255, 0.06);
+  border-left: 2px solid #58a6ff;
+}
+
+.step-text-control {
+  color: #9ecbff;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.control-num {
+  width: 48px;
+  padding: 1px 4px;
+  background: #1e1e1e;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #ddd;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.control-sel,
+.control-text {
+  padding: 1px 4px;
+  background: #1e1e1e;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #ddd;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.control-text {
+  min-width: 110px;
+}
+
+/* An unpicked element reads as an unfinished blank to fill in, not a label. */
+.control-pick {
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px dashed #58a6ff;
+  border-radius: 4px;
+  color: #9ecbff;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.control-pick:hover:not(:disabled) {
+  background: rgba(88, 166, 255, 0.14);
+}
+
+.control-pick:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.control-error {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid #f85149;
+  border-radius: 6px;
+  color: #ffb4ae;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.control-error strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #ff8a80;
+}
+
+/* F36 — the real-device row sits under the size-only presets, visually set
+   apart so the difference between "narrow window" and "actual phone" reads at a
+   glance rather than needing the note below it. */
+.device-real {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #3a3a3a;
+}
+
+.device-real .assert-kind.chosen {
+  background: #1d3b2a;
+  border-color: #7ee787;
+  color: #b9f6c5;
+}
+
+/* The explanatory line under the Device picker (F36) and under Tags (F38).
+   Two classes, one ruleset: they LOOK the same but say different things, and a
+   shared class name made it impossible to target either one on its own. */
+.device-note,
+.tag-note {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #9a9a9a;
+}
+
+.device-note strong,
+.tag-note strong {
+  color: #cce4ff;
+}
+
+.device-note em,
+.tag-note em {
+  color: #d9a84e;
+  font-style: normal;
+}
+
+.device-note code,
+.tag-note code {
+  background: #2a2a2a;
+  padding: 0 3px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
 .assert-value {
   height: 28px;
   padding: 0 8px;
