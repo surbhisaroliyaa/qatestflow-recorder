@@ -816,6 +816,41 @@ function dialogHandler(step: RecorderStep, pageVar: string): string {
 // a both-attribute CSS locator, which is correct without any config.
 // =====================================================================
 
+/**
+ * Put the quotes back on a bare `getBy…()` argument.
+ *
+ * A handful of tests carry `getByTestId(username)` instead of
+ * `getByTestId("username")`. The app's replay engine parses the selector itself
+ * and doesn't care — but the EXPORT is real JavaScript, so `getByTestId(username)`
+ * is a reference to a variable that was never declared. The spec dies with
+ * `ReferenceError: username is not defined` before a single step runs, and
+ * `getByTestId(login-button)` is worse still: valid syntax, read as subtraction.
+ *
+ * That made those tests silently un-exportable — their generated spec had never
+ * compiled, in CI or anywhere else. F39 (parallel) was simply the first thing
+ * that ever RAN an export, which is how it surfaced (Surbhi, Test 7).
+ *
+ * Only rewrites an argument that is a plain unquoted token: no quotes, commas,
+ * braces or parens. `getByRole('button', { name: 'Go' })` is already quoted and
+ * is left exactly as it is.
+ */
+export function repairSelector(sel: string | undefined): string | undefined {
+  if (!sel) return sel
+  return sel.replace(
+    /^(getBy(?:TestId|Text|Label|Placeholder|AltText|Title))\(\s*([A-Za-z0-9_\-.:#[\] ]+?)\s*\)/,
+    (_m, fn: string, arg: string) => `${fn}(${quote(arg)})`
+  )
+}
+
+/** Same, for a whole step list — the one place every exporter starts from. */
+export function repairSteps(steps: RecorderStep[]): RecorderStep[] {
+  return steps.map((s) =>
+    s.selector && repairSelector(s.selector) !== s.selector
+      ? { ...s, selector: repairSelector(s.selector) }
+      : s
+  )
+}
+
 // Does this step's primary selector use getByTestId? Returns the trailing
 // modifiers (e.g. `.nth(1)`) so a rewrite can preserve them.
 function testIdParts(step: RecorderStep): { value: string; suffix: string } | null {
@@ -1310,7 +1345,9 @@ export function generatePlaywrightTest(
   }
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
-  const enabled = steps.filter((step) => !step.disabled)
+  // Quote any bare getBy…() argument before anything reads a selector — an
+  // unquoted one compiles to a reference to a variable that doesn't exist.
+  const enabled = repairSteps(steps).filter((step) => !step.disabled)
   // Day 20: data mode is on only when there are both columns and rows.
   const dataMode = !!(options?.data && options.data.rows.length && options.data.columns.length)
   const columns = dataMode ? options!.data!.columns : []
@@ -1463,6 +1500,22 @@ export function generatePlaywrightTest(
     }
     lines.push(`${healNote}  // ${stepText(step)}\n  ${action}`)
   }
+  // F37: close any block whose end marker is missing. A 🔁 Repeat or 🔀 If with
+  // no matching end left the file with an unbalanced `{`, and Playwright treats a
+  // spec that won't parse as a fatal LOAD error — it abandons the WHOLE run, so
+  // one malformed test took down all 58 (Surbhi, Test 7). The app itself refuses
+  // to run a test with a mismatched marker; the exporter didn't check at all.
+  //
+  // Closing to the end of the test is the only reading that loses nothing: every
+  // remaining step stays inside the block, which is what "the author never closed
+  // it" most plausibly meant. The comment says so out loud, so nobody reads the
+  // exported file as the author's own structure.
+  while (depth > 0) {
+    depth--
+    syncDepth()
+    lines.push(`  } // ⚠ auto-closed — this block had no matching end marker`)
+    syncDepth()
+  }
   syncDepth()
   // F37: apply the nesting indent once, at the end. Each entry may be several
   // lines, so every line inside it is padded — blank lines are left blank
@@ -1570,9 +1623,27 @@ export function generatePlaywrightTest(
     const rows = options!.data!.rows
     const dataset = rows.map((r) => `  ${rowLiteral(r, columns)}`).join(',\n')
     const disc = columns[0]
-    const discRef = isIdent(disc) ? `data.${disc}` : `data[${quote(disc)}]`
-    const base = (options?.name || 'recorded flow').replace(/[`\\$]/g, '\\$&')
-    const title = '`' + base + ' — ${' + discRef + '}`'
+    const base = options?.name || 'recorded flow'
+    // Day 20 named each row's test after its first column, built at RUNTIME as a
+    // template literal. Two rows with the same value in that column therefore
+    // produced two identical test titles — and Playwright treats a duplicate
+    // title as a fatal LOAD error that aborts the entire run, not just that file.
+    // One negative-login table with `standard_user` twice took down all 12 tests
+    // in the batch, every one of them reported as failed (Surbhi, Test 7).
+    //
+    // So titles are now computed HERE, where every row is visible at once, and a
+    // repeat gets its row number appended. An empty cell (a legitimate negative
+    // case — "username is required") becomes "(empty)" rather than a title that
+    // trails off after the dash.
+    const seenTitles = new Map<string, number>()
+    const titles = rows.map((r, i) => {
+      const cell = (r[disc] ?? '').trim()
+      const label = cell === '' ? '(empty)' : cell
+      const n = (seenTitles.get(label.toLowerCase()) ?? 0) + 1
+      seenTitles.set(label.toLowerCase(), n)
+      return `${base} — ${label}${n > 1 ? ` (row ${i + 1})` : ''}`
+    })
+    const titleList = titles.map((t) => `  ${quote(t)}`).join(',\n')
     // Re-indent the body one level deeper (inside the for-loop). Indentation is
     // cosmetic to Playwright; this just keeps the file readable.
     const inner = body
@@ -1584,8 +1655,14 @@ const dataset = [
 ${dataset}
 ]
 
-for (const data of dataset) {
-  test(${title}${tagArg}, async (${fixtures}) => {
+// One test per row. Titles are pre-computed so no two can collide — Playwright
+// aborts the whole run on a duplicate test title, not just the offending file.
+const titles = [
+${titleList}
+]
+
+for (const [i, data] of dataset.entries()) {
+  test(titles[i]${tagArg}, async (${fixtures}) => {
 ${inner}
   })
 }
@@ -1636,11 +1713,13 @@ export function generateEdgeSuite(
   const variants = cases.filter((c) => !c.baseline)
   // Test-id portability, decided once across every variant's steps (they share
   // the same flow, so the policy is uniform for the whole file).
-  const idPolicy = testIdPolicy(cases.flatMap((c) => c.steps).filter((s) => !s.disabled))
+  const idPolicy = testIdPolicy(
+    cases.flatMap((c) => repairSteps(c.steps)).filter((s) => !s.disabled)
+  )
 
   const testBlocks: string[] = []
   for (const c of variants) {
-    const enabled = c.steps.filter((s) => !s.disabled)
+    const enabled = repairSteps(c.steps).filter((s) => !s.disabled)
     // Split the flow: the actions drive the form; the (deterministic) assert
     // steps are the success criteria we negate. Snapshots/a11y/perf aren't a
     // pass/fail signal for "was the input accepted", so they're left out here.
@@ -1774,7 +1853,9 @@ export function generatePageObjectTest(
     har?: string
   }
 ): { spec: string; page: string; pageFileName: string; className: string } | null {
-  const enabled = steps.filter((s) => !s.disabled)
+  // Same bare-selector repair as the inline export — a POM class field would
+  // otherwise compile to `page.getByTestId(username)` just the same.
+  const enabled = repairSteps(steps).filter((s) => !s.disabled)
   const multiWindow = enabled.some((s) => (s.windowId ?? 0) > 0 || s.opensWindow !== undefined)
   const hasFrames = enabled.some((s) => s.frame?.length)
   const hasAwkward = enabled.some((s) => s.type === 'dialog' || s.type === 'download')

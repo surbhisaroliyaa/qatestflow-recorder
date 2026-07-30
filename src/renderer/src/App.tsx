@@ -188,6 +188,47 @@ interface LocaleResult {
   totalTexts: number
 }
 
+/**
+ * F39.1 — the blocking screen shown while a parallel batch runs.
+ *
+ * A parallel run has nothing to watch: it's a headless Playwright process, so
+ * the embedded browser sits idle and the only feedback used to be a one-line
+ * status at the very top of the library — nowhere near the button you pressed.
+ * The honest reading of that was "nothing happened", so you click other things,
+ * during a run that is writing to your test files.
+ *
+ * So: a banner pinned to the window, not to the page. `position: fixed` is the
+ * whole point — the old status line was in the library's normal flow at the very
+ * top, so by the time you'd scrolled down to the button that starts the run, the
+ * only thing telling you it HAD started was off-screen.
+ *
+ * It does NOT block the app, and `pointer-events: none` means it can never eat a
+ * click — it reports, nothing more. Deliberately no elapsed clock and no counter:
+ * a number invites you to read something into it, and Playwright tells us nothing
+ * until the whole batch returns. Spinner says "alive", sentence says what's
+ * happening, and that's the entire message.
+ */
+function ParallelRunBanner({
+  count,
+  workers
+}: {
+  count: number
+  workers: number
+}): React.JSX.Element {
+  return (
+    <div className="run-banner" role="status" aria-live="polite">
+      <span className="run-banner-spinner" aria-hidden="true" />
+      <span>
+        <strong>
+          Running {count} test{count === 1 ? '' : 's'}…
+        </strong>{' '}
+        {workers} at a time, in the background. This takes a couple of minutes — your results appear
+        when it finishes.
+      </span>
+    </div>
+  )
+}
+
 function App(): React.JSX.Element {
   const [urlInput, setUrlInput] = useState('')
   const [hasNavigated, setHasNavigated] = useState(false)
@@ -280,6 +321,11 @@ function App(): React.JSX.Element {
   // logged in), and the list of saved sessions to pick from.
   const [storageState, setStorageState] = useState<string | undefined>(undefined)
   const [sessions, setSessions] = useState<string[]>([])
+  // F39.2: per-session expiry, keyed by file name. Drives the "expired" labels
+  // and the run-report warning — see refreshSessions.
+  const [sessionStatus, setSessionStatus] = useState<
+    Record<string, { expiresAt: number | null; expired: boolean }>
+  >({})
   // F1 (HAR): the capture toggle, how many responses the last capture kept, the
   // loaded test's saved HAR (replayed against when present), and the last run's
   // HAR usage (served vs live) for the readout.
@@ -1128,10 +1174,46 @@ function App(): React.JSX.Element {
   // Day 17 (session reuse): load the saved-session list once.
   const refreshSessions = (): void => {
     window.api.session.list().then(setSessions)
+    // F39.2: and how stale each one is. A saved login expires silently, and the
+    // embedded browser keeps the test green long after the FILE stopped working
+    // — so the app has to say the expiry out loud or it reports a pass for a
+    // test that fails everywhere else.
+    window.api.session.status().then((rows) => {
+      const next: Record<string, { expiresAt: number | null; expired: boolean }> = {}
+      for (const r of rows) next[r.file] = { expiresAt: r.expiresAt, expired: r.expired }
+      setSessionStatus(next)
+    })
   }
   useEffect(() => {
     refreshSessions()
   }, [])
+
+  // F39.2: "expired 3 days ago" / "expires in 8 minutes" for a saved session.
+  // Returns null when there's nothing worth saying — no file, no dated cookie,
+  // or an expiry comfortably far off. Silence is the right output for healthy.
+  //
+  // Minutes matter, not just days: SauceDemo's login cookie lives about TEN
+  // MINUTES. A day-granularity label would have called that "expires today",
+  // which reads as "fine for now" when the honest answer is "already gone by the
+  // time you finish reading this".
+  const sessionAge = (file?: string): { expired: boolean; text: string } | null => {
+    if (!file) return null
+    const st = sessionStatus[file]
+    if (!st || st.expiresAt === null) return null
+    const ms = st.expiresAt - Date.now()
+    const span = (abs: number): string => {
+      const mins = Math.round(abs / 60_000)
+      if (mins < 60) return `${Math.max(1, mins)} minute${mins === 1 ? '' : 's'}`
+      const hrs = Math.round(mins / 60)
+      if (hrs < 48) return `${hrs} hour${hrs === 1 ? '' : 's'}`
+      return `${Math.round(hrs / 24)} days`
+    }
+    if (ms <= 0) return { expired: true, text: `expired ${span(-ms)} ago` }
+    // Only warn about a session that's about to die — a login good for another
+    // three months is not news, and a label on everything trains you to skip it.
+    if (ms <= 3 * 86_400_000) return { expired: false, text: `expires in ${span(ms)}` }
+    return null
+  }
 
   // Apply a re-pick heal: same step, new eyes — keep what it DOES (type/value/
   // check), replace how it FINDS the element (label + ladder + frame), and retry.
@@ -1320,6 +1402,14 @@ function App(): React.JSX.Element {
   // any full-window overlay is open (export modal, suite summary) we ask main
   // to hide it (else it covers the modal).
   const suiteSummaryOpen = suiteRun !== null && !suiteRun.running
+  // F39.1: a parallel batch is running. Nothing about it is watchable — it's a
+  // headless Playwright process, the embedded browser sits idle — so the app
+  // shows a blocking overlay instead of a one-line status the user has to go
+  // looking for. Surbhi clicked ▶ Run selected, saw no change where she was
+  // looking (the status line renders at the TOP of the library, far above the
+  // button), and concluded nothing had happened. Worse, the app stayed fully
+  // clickable during a run that rewrites test files underneath you.
+  const parallelRunning = !!(suiteRun?.running && suiteRun.parallelBatch)
   // Day 20: the overview popup auto-appears when a data run finishes; the
   // detailed tabs live inline in the panel (no overlay needed for those).
   const dataPopupOpen = dataRun !== null && !dataRun.running && !dataPopupDismissed
@@ -1454,6 +1544,12 @@ function App(): React.JSX.Element {
         secretMigration !== null ||
         bundleResult !== null ||
         importPlan !== null ||
+        // F39.1: while a parallel batch runs. Not a modal — the app stays fully
+        // usable — but the embedded browser is idle for the whole batch (it's a
+        // headless Playwright process), and a native pane paints straight over
+        // the running banner. Keeping it down for the duration costs nothing and
+        // is what guarantees the banner is actually visible.
+        parallelRunning ||
         apiPanelIndex !== null
     )
   }, [
@@ -1489,6 +1585,7 @@ function App(): React.JSX.Element {
     secretMigration, // F40
     bundleResult, // F40
     importPlan, // F40
+    parallelRunning, // F39.1
     apiPanelIndex
   ])
 
@@ -3248,8 +3345,16 @@ function App(): React.JSX.Element {
   // Run every test in a section, one after another, CONTINUING past failures
   // (each test starts from a clean browser state, so one red can't poison the
   // next) — then show the full picture, like a CI run.
-  const handleRunSuite = async (suite: string, tests: SavedTestSummary[]): Promise<void> => {
+  const handleRunSuite = async (
+    suite: string,
+    tests: SavedTestSummary[],
+    // F39.1: force the in-app path even with parallel mode ticked. Used by
+    // "re-run the failures in the app" — the whole point of that button is to
+    // re-run them through the engine that HAS self-heal and the recovery pause.
+    opts?: { forceSequential?: boolean }
+  ): Promise<void> => {
     if (tests.length === 0) return
+    const useParallel = parallelMode && !opts?.forceSequential
     // F25 guard, BEFORE we navigate away from the library: a suite spans several
     // sites, so read each test's RECORDED base URL and warn once with the full
     // picture. This is where the trap bites hardest — one active env silently
@@ -3275,7 +3380,7 @@ function App(): React.JSX.Element {
     // large empty pane with nothing in it (main only reveals the browser once
     // something has really navigated it, which never happens here). Stay in the
     // library instead; the progress bar and the report both render there.
-    if (!parallelMode) setHasNavigated(true)
+    if (!useParallel) setHasNavigated(true)
     // F39: these describe THIS run, not the last one.
     parallelSkipReasons.current = new Map()
     setParallelNote(null)
@@ -3295,7 +3400,7 @@ function App(): React.JSX.Element {
     // can't run headless runs the old way, and the report says which is which.
     let parallelDone = new Map<string, SuiteRunEntry>()
     const sequentialTests: SavedTestSummary[] = []
-    if (parallelMode) {
+    if (useParallel) {
       const safe: {
         test: SavedTestSummary
         code: string
@@ -3317,6 +3422,19 @@ function App(): React.JSX.Element {
           continue
         }
         const { flat } = await buildRunPlan(data.steps as RecorderStep[])
+        // F37 × F39: a test with a mismatched loop/if marker has no single
+        // correct structure — the app refuses to run one for exactly that
+        // reason. The exporter now auto-closes the block so the spec at least
+        // parses (an unbalanced brace is a fatal LOAD error that abandons the
+        // whole batch), but running our GUESS at the structure headless and
+        // reporting the result as fact is not something this app should do.
+        // Send it down the sequential path, where the app's own check applies.
+        const cfErrors = analyzeControlFlow(flat).errors
+        if (cfErrors.length) {
+          sequentialTests.push(t)
+          parallelSkipReasons.current.set(t.fileName, cfErrors[0])
+          continue
+        }
         const cols = dataColumns(flat)
         const rows = data.dataRows ?? []
         safe.push({
@@ -3362,6 +3480,13 @@ function App(): React.JSX.Element {
           setParallelNote(
             `${res.message ?? 'The parallel runner could not start'} — ran everything sequentially instead.`
           )
+          // The batch is over — it never started. Only the SUCCESS path used to
+          // clear this, so after a fallback the progress line went on claiming
+          // "Running 55 tests at once, 4 at a time…" for the entire sequential
+          // run that followed, and the running banner stayed up with it. The
+          // screen said parallel while the app was visibly replaying one test at
+          // a time (Surbhi, Test 7).
+          setSuiteRun((prev) => (prev ? { ...prev, parallelBatch: undefined } : prev))
           sequentialTests.push(...safe.map((s) => s.test))
         } else {
           parallelDone = new Map(
@@ -3404,7 +3529,7 @@ function App(): React.JSX.Element {
       }
     }
     // In parallel mode the sequential loop only handles the leftovers.
-    const toRunSequentially = parallelMode ? sequentialTests : tests
+    const toRunSequentially = useParallel ? sequentialTests : tests
     // Those leftovers DO drive the embedded browser, so now the workspace is
     // the right place to be. An all-parallel batch never gets here and stays in
     // the library.
@@ -3576,6 +3701,13 @@ function App(): React.JSX.Element {
       setSuiteRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
     }
     setSuiteRun((prev) => (prev ? { ...prev, running: false } : prev))
+    // F39.2: re-read the sessions and the library before the report renders.
+    // Both were loaded at startup, so the report could name an expiry that had
+    // already been replaced, and count tests whose session was already removed —
+    // a warning that is itself out of date is worse than none, because it sends
+    // you to fix something you have already fixed (Surbhi, Test 7).
+    refreshSessions()
+    setSavedTests(await window.api.library.list())
   }
 
   const handleDeleteTest = async (test: SavedTestSummary): Promise<void> => {
@@ -7012,6 +7144,14 @@ function App(): React.JSX.Element {
                     const skipped = r.filter(
                       (x) => !x.ranParallel && parallelSkipReasons.current.has(x.fileName)
                     )
+                    // F39.1: the failures that came from the HEADLESS runner, as
+                    // library entries so they can be handed straight back to
+                    // handleRunSuite. A test missing from the library (deleted
+                    // mid-run) is dropped rather than crashing the report.
+                    const parFailedFiles = new Set(
+                      r.filter((x) => x.ranParallel && x.status === 'failed').map((x) => x.fileName)
+                    )
+                    const parFailed = savedTests.filter((t) => parFailedFiles.has(t.fileName))
                     if (!parallelMode && !parallelNote) return null
                     return (
                       <div className="parallel-summary">
@@ -7043,6 +7183,66 @@ function App(): React.JSX.Element {
                             </p>
                           </details>
                         )}
+                        {/* F39.1: the OTHER direction — a false FAIL.
+                            headlessBlockers catches steps that would silently
+                            check nothing headless. It cannot catch a test that
+                            depends on SELF-HEAL, because healing happens when a
+                            selector misses at RUNTIME — nothing static can
+                            predict it. Surbhi's three F4 heal demos passed in the
+                            app and timed out here, for exactly that reason.
+                            So instead of pretending we can filter them out up
+                            front, say it plainly and make re-checking one click. */}
+                        {parFailed.length > 0 && (
+                          <div className="parallel-recheck">
+                            <div>
+                              ⚠ <strong>{parFailed.length}</strong> failed headless. The headless
+                              runner has <strong>no self-heal and no recovery pause</strong> — a
+                              test that leans on either fails here but passes in the app.
+                            </div>
+                            <button
+                              type="button"
+                              className="modal-btn"
+                              onClick={() => {
+                                setSuiteRun(null)
+                                handleRunSuite(
+                                  `${parFailed.length} failed test${parFailed.length === 1 ? '' : 's'}`,
+                                  parFailed,
+                                  { forceSequential: true }
+                                )
+                              }}
+                              title="Replay just these in the app, where self-heal and the recovery pause exist"
+                            >
+                              ↻ Re-run {parFailed.length} in the app
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
+
+                  {/* F39.2: any test in this run that started from a session
+                      which has already expired. Shown whether it passed or
+                      failed — a PASS is the dangerous case, because in the app
+                      it rides on the embedded browser still being logged in
+                      from ordinary use, and nothing else will be. */}
+                  {(() => {
+                    const stale = r
+                      .map((x) => savedTests.find((t) => t.fileName === x.fileName))
+                      .filter(
+                        (t): t is SavedTestSummary =>
+                          !!t?.storageState && !!sessionAge(t.storageState)?.expired
+                      )
+                    if (!stale.length) return null
+                    const files = [...new Set(stale.map((t) => t.storageState!))]
+                    return (
+                      <div className="parallel-recheck session-stale">
+                        <div>
+                          ⚠ <strong>{stale.length}</strong> test
+                          {stale.length === 1 ? '' : 's'} started from a session that has{' '}
+                          <strong>{sessionAge(files[0])?.text}</strong> ({files.join(', ')}). In the
+                          app these can still pass on the browser&apos;s leftover login — headless
+                          and in CI they will not. Log in again and save over the session.
+                        </div>
                       </div>
                     )
                   })()}
@@ -7160,6 +7360,18 @@ function App(): React.JSX.Element {
                             {CATEGORY_LABELS[x.category] ?? x.category}
                           </span>
                         )}
+                        {/* F39.1: a red from the headless runner is NOT the same
+                            claim as a red from the app — no self-heal, no
+                            recovery pause. Mark it on the row, so the reader
+                            never has to remember which engine ran what. */}
+                        {x.status === 'failed' && x.ranParallel && (
+                          <span
+                            className="headless-tag"
+                            title="Ran headless in the parallel batch — no self-heal, no recovery pause. Re-run it in the app to confirm."
+                          >
+                            ⚡ headless
+                          </span>
+                        )}
                         {x.status === 'failed' && (
                           <span className="suite-result-error">
                             {x.failedAt !== undefined ? `step ${x.failedAt + 1} — ` : ''}
@@ -7216,6 +7428,12 @@ function App(): React.JSX.Element {
         {/* Run All is launched from here; its host-mismatch warning must render
             on this screen too, before the suite navigates to the workspace. */}
         {envWarnModal}
+        {/* F39.1: a parallel batch is launched from the library, which lives on
+            THIS screen — so the banner has to render here or the one run it
+            exists for is the one run it never shows up in. */}
+        {parallelRunning && (
+          <ParallelRunBanner count={suiteRun!.parallelBatch!} workers={parallelWorkers} />
+        )}
         {/* F32b: the in-app alert toast must also render on the WELCOME screen —
             the 📡 Monitors dashboard lives here, so a monitor-failure toast fired
             from it has nowhere to show otherwise (the workspace toast is a
@@ -7666,9 +7884,14 @@ function App(): React.JSX.Element {
                         ))}
                         {tagFilter.size > 0 && (
                           <>
-                            {/* The payoff: select every test carrying these tags,
-                                then ▶ Run selected. "Run all @smoke" without
-                                keeping a second list of which tests those are. */}
+                            {/* The payoff: tick everything currently listed, then
+                                ▶ Run selected. "Run all @smoke" without keeping a
+                                second list of which tests those are.
+                                Labelled "shown", NOT "@smoke": it ticks what the
+                                WHOLE filter bar is showing — tags plus any search,
+                                status or section drill-in. Naming it after the tags
+                                alone promised 4 and delivered 1 the moment a search
+                                was also active (Surbhi, Test 6). */}
                             <button
                               type="button"
                               className="library-filter-clear runtag"
@@ -7681,9 +7904,9 @@ function App(): React.JSX.Element {
                                   )
                                 )
                               }
-                              title="Tick every test matching these tags, ready to ▶ Run selected"
+                              title="Tick every test currently shown — these tags plus any search, status or section filter — ready to ▶ Run selected"
                             >
-                              ▶ select all {[...tagFilter].join(' + ')}
+                              ▶ select all shown
                             </button>
                             <button
                               type="button"
@@ -7751,6 +7974,48 @@ function App(): React.JSX.Element {
                   return (
                     <div key={suiteKey} className="library-section">
                       <div className="library-section-header">
+                        {/* Tick the whole section. Sections were the one grouping
+                            bulk actions couldn't reach: search/status/tags all
+                            NARROW the list so "select all shown" can follow them,
+                            but a section only expands — so with 58 tests the only
+                            select-all ticked all 58 (Surbhi, Test 7).
+                            Operates on `tests`, the section's tests AFTER filters,
+                            so it means the same "all shown" as the top button.
+                            Adds to the existing selection rather than replacing it,
+                            so E2E + three extras works.
+                            ONLY WHEN THE SECTION IS OPEN: on every collapsed header
+                            it made a column of bright squares down the left edge —
+                            an unchecked box ignores accent-color, so it reads as a
+                            white block on a dark card — and it competed with the
+                            caret and title for the start of the row. Collapsed is
+                            also when you can't see what you'd be ticking. Open, it
+                            sits directly above the row ticks it controls. */}
+                        {isOpen && tests.length > 0 && (
+                          <input
+                            type="checkbox"
+                            className="library-check section-check"
+                            checked={tests.every((t) => selectedTests.has(t.fileName))}
+                            ref={(el) => {
+                              if (el) {
+                                const n = tests.filter((t) => selectedTests.has(t.fileName)).length
+                                el.indeterminate = n > 0 && n < tests.length
+                              }
+                            }}
+                            onChange={() =>
+                              setSelectedTests((prev) => {
+                                const next = new Set(prev)
+                                const all = tests.every((t) => next.has(t.fileName))
+                                for (const t of tests) {
+                                  if (all) next.delete(t.fileName)
+                                  else next.add(t.fileName)
+                                }
+                                return next
+                              })
+                            }
+                            title={`Select all ${tests.length} test${tests.length === 1 ? '' : 's'} in ${suite || 'Unsorted'}`}
+                            aria-label={`Select all tests in ${suite || 'Unsorted'}`}
+                          />
+                        )}
                         <button
                           type="button"
                           className="section-toggle"
@@ -9670,12 +9935,30 @@ function App(): React.JSX.Element {
                   onChange={(e) => setStorageState(e.target.value || undefined)}
                 >
                   <option value="">None — fresh login each run</option>
-                  {sessions.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
+                  {sessions.map((s) => {
+                    // F39.2: an expired login is the single most misleading thing
+                    // a test can carry, so it's named right in the picker.
+                    const age = sessionAge(s)
+                    return (
+                      <option key={s} value={s}>
+                        {s}
+                        {age ? ` — ⚠ ${age.text}` : ''}
+                      </option>
+                    )
+                  })}
                 </select>
+                {(() => {
+                  const age = sessionAge(storageState)
+                  if (!age) return null
+                  return (
+                    <p className="session-expiry-warn">
+                      ⚠ This session <strong>{age.text}</strong>.
+                      {age.expired
+                        ? ' A run in the app may still pass — the embedded browser is probably still logged in from ordinary use — but the saved file no longer works, so this test will fail headless, in a parallel run, and in CI. Log in again and save over it.'
+                        : ' Save it again before it lapses, or this test starts failing everywhere except in the app.'}
+                    </p>
+                  )
+                })()}
                 <div className="session-save-row">
                   <input
                     className="assert-value"
@@ -11298,6 +11581,13 @@ function App(): React.JSX.Element {
 
       {/* F25 guard: host-mismatch warning, blocks the run until answered. */}
       {envWarnModal}
+
+      {/* F39.1: same banner in the workspace return — the welcome view returns
+          EARLY, so anything rendered in only one of the two is invisible in the
+          other half the time. */}
+      {parallelRunning && (
+        <ParallelRunBanner count={suiteRun!.parallelBatch!} workers={parallelWorkers} />
+      )}
 
       {/* F24: the API-request step editor. */}
       {apiEditorModal}

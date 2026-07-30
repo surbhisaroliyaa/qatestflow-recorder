@@ -509,6 +509,11 @@ const api = {
   session: {
     save: (name: string): Promise<string | null> => ipcRenderer.invoke('session:save', name),
     list: (): Promise<string[]> => ipcRenderer.invoke('session:list'),
+    // When each saved session's earliest cookie expires. An expired session is
+    // a test that passes in the app (the embedded browser is still logged in
+    // from ordinary use) and fails everywhere else — see session:status.
+    status: (): Promise<{ file: string; expiresAt: number | null; expired: boolean }[]> =>
+      ipcRenderer.invoke('session:status'),
     // Day 17(+): seed a saved session into the LIVE browser so recording starts
     // logged in. Resolves { ok, url? } — the page it opened.
     apply: (file: string, url?: string): Promise<{ ok: boolean; url?: string; error?: string }> =>

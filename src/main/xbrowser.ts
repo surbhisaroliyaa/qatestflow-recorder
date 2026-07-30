@@ -257,7 +257,17 @@ export default defineConfig({
     })
 
     // Walk the report and attribute each spec FILE back to its test id.
-    const report = JSON.parse(json) as { suites?: unknown[] }
+    const report = JSON.parse(json) as {
+      suites?: unknown[]
+      // Playwright reports a failure to LOAD (bad config, a spec that doesn't
+      // compile, "no tests found") here — not as test results. We used to parse
+      // only `suites`, so any of those came back as an empty report and every
+      // test in the batch was labelled "did not run" — i.e. the app told you 12
+      // tests FAILED when in truth zero of them had been attempted. For a tool
+      // whose whole claim is that a result can be trusted, inventing 12 failures
+      // is worse than the original error (Surbhi, Test 7).
+      errors?: { message?: string; location?: { file?: string; line?: number } }[]
+    }
     const byId = new Map<string, ParallelTestResult>()
     const walk = (suite: {
       file?: string
@@ -292,14 +302,50 @@ export default defineConfig({
     }
     for (const s of report.suites ?? []) walk(s as never)
 
-    // A spec that produced no result at all didn't run (compile error, crash) —
-    // report it as failed rather than silently dropping it from the suite.
+    const loadErrors = (report.errors ?? [])
+      .map((e) => {
+        const where = e.location?.file
+          ? ` (${e.location.file.split(/[\\/]/).pop()}${e.location.line ? `:${e.location.line}` : ''})`
+          : ''
+        return `${stripAnsi(e.message ?? '').replace(/\s+/g, ' ').trim()}${where}`
+      })
+      .filter(Boolean)
+
+    // NOTHING ran. That is a failure of the RUNNER, not of the tests, and the two
+    // must never be conflated: claiming 12 red tests when Playwright never opened
+    // a browser is a fabricated result. Hand back ran:false with the real reason
+    // and let the caller do what it already does when the runner is unavailable —
+    // run the whole batch the normal way instead, so the user still gets answers.
+    if (byId.size === 0) {
+      return {
+        installed: true,
+        ran: false,
+        results: [],
+        message:
+          loadErrors[0] ??
+          'Playwright started but found no tests to run (nothing was written to the spec folder).'
+      }
+    }
+
+    // A spec that produced no result while OTHERS did is a per-test problem —
+    // that one didn't compile or crashed on load. Say which, using Playwright's
+    // own error for that file when it gave us one.
+    const errByFile = new Map<string, string>()
+    for (const e of report.errors ?? []) {
+      const f = e.location?.file?.split(/[\\/]/).pop()?.replace(/\.spec\.ts$/, '')
+      const id = f ? idBySlug.get(f) : undefined
+      if (id && e.message) {
+        errByFile.set(id, stripAnsi(e.message).replace(/\s+/g, ' ').slice(0, 300))
+      }
+    }
     const results: ParallelTestResult[] = specs.map(
       (s) =>
         byId.get(s.id) ?? {
           id: s.id,
           ok: false,
-          error: 'No result — the generated spec did not run (it may not compile headlessly).'
+          error:
+            errByFile.get(s.id) ??
+            'No result — the generated spec did not run (it may not compile headlessly).'
         }
     )
     return { installed: true, ran: true, results }

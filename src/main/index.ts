@@ -1664,6 +1664,44 @@ function createWindow(): void {
     }
   })
 
+  /**
+   * When does each saved session expire?
+   *
+   * A saved session is a login that quietly rots. Surbhi's `saucedemo-auth`
+   * cookie expired on 26 June; four tests went on PASSING in the app for another
+   * month, because the embedded browser was still logged in from ordinary use —
+   * the session file was never what made them green. Headless, where no such
+   * leftover state exists, all four failed. So the app was reporting green for
+   * tests that would fail on anybody else's machine and in CI: the exact
+   * false-green this whole app exists to prevent, hiding inside a "pass".
+   *
+   * We report the EARLIEST real expiry: a session is only as alive as the first
+   * cookie to die, and it's usually the auth one. Session-scoped cookies (no
+   * expiry) can't be judged from the file and are ignored rather than guessed at.
+   */
+  ipcMain.handle(
+    'session:status',
+    async (): Promise<{ file: string; expiresAt: number | null; expired: boolean }[]> => {
+      const files = await readdir(sessionsDir).catch(() => [] as string[])
+      const out: { file: string; expiresAt: number | null; expired: boolean }[] = []
+      for (const file of files.filter((f) => f.endsWith('.json'))) {
+        try {
+          const raw = await readFile(join(sessionsDir, file), 'utf-8')
+          const state = JSON.parse(raw) as PWStorageState
+          const stamps = (state.cookies ?? [])
+            .map((c) => c.expires)
+            .filter((e): e is number => typeof e === 'number' && e > 0)
+          const expiresAt = stamps.length ? Math.min(...stamps) * 1000 : null
+          out.push({ file, expiresAt, expired: expiresAt !== null && expiresAt < Date.now() })
+        } catch {
+          // Unreadable file: say nothing rather than claim it's fine or broken.
+          out.push({ file, expiresAt: null, expired: false })
+        }
+      }
+      return out
+    }
+  )
+
   // Seed a saved session into the browser before a replay so it starts logged in.
   // Cookies are set up front (they apply pre-navigation). localStorage is handed
   // back to the caller to inject after the first navigation reaches its origin

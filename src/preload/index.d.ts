@@ -448,6 +448,10 @@ interface SessionAPI {
   save: (name: string) => Promise<string | null>
   // List the saved session file names.
   list: () => Promise<string[]>
+  // Earliest cookie expiry per saved session. An expired session still "passes"
+  // in the app (the embedded browser is logged in from ordinary use) and fails
+  // headless and in CI — a false green hiding inside a pass.
+  status: () => Promise<{ file: string; expiresAt: number | null; expired: boolean }[]>
   // Day 17(+): seed a saved session into the LIVE browser so recording starts
   // logged in. Resolves { ok, url? } — the page it opened.
   apply: (file: string, url?: string) => Promise<{ ok: boolean; url?: string; error?: string }>
