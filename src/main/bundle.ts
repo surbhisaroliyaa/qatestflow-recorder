@@ -218,12 +218,16 @@ function readmeFor(m: BundleManifest): string {
     '  Every test arrives as "new / untested", which is the truth for you.'
   ]
   if (m.visualWithoutBaseline.length) {
+    const n = m.visualWithoutBaseline.length
+    // "1 test(s) here take" — this file is read by a colleague, and clumsy
+    // pluralisation is exactly what a reviewer notices first.
+    const subject = n === 1 ? '1 test here takes' : `${n} tests here take`
     lines.push(
       '- **Visual baselines.** A baseline is specific to the screen and pixel density it',
       '  was captured on, so a shared one would fail on your monitor for no real reason.',
-      `  ${m.visualWithoutBaseline.length} test(s) here take a visual snapshot: your FIRST run`,
-      '  creates your own baseline and will pass without comparing anything. The second run',
-      '  is the first one that actually checks.'
+      `  ${subject} a visual snapshot: your FIRST run creates your own baseline and will`,
+      '  pass without comparing anything. The second run is the first one that actually',
+      '  checks.'
     )
   }
   if (m.dataScrubbed.length) {

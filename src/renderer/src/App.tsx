@@ -6950,9 +6950,10 @@ function App(): React.JSX.Element {
                     {bundleResult.manifest.visualWithoutBaseline.length > 0 && (
                       <li>
                         <strong>Visual baselines</strong> —{' '}
-                        {bundleResult.manifest.visualWithoutBaseline.length} test
-                        {bundleResult.manifest.visualWithoutBaseline.length === 1 ? '' : 's'} take a
-                        snapshot. A baseline is tied to the screen it was captured on, so a shared
+                        {bundleResult.manifest.visualWithoutBaseline.length === 1
+                          ? '1 test takes a snapshot'
+                          : `${bundleResult.manifest.visualWithoutBaseline.length} tests take a snapshot`}
+                        . A baseline is tied to the screen it was captured on, so a shared
                         one fails elsewhere for no real reason. Their <em>first</em> run creates
                         theirs and passes without comparing anything — the second run is the first
                         real check. The README says so.
@@ -7130,17 +7131,21 @@ function App(): React.JSX.Element {
                   {importPlan.manifest?.visualWithoutBaseline?.length ? (
                     <p className="import-note">
                       ⚠{' '}
-                      {importPlan.manifest.visualWithoutBaseline.length} of these take a visual
-                      snapshot, and baselines aren’t shared (they’re tied to the screen they were
+                      {importPlan.manifest.visualWithoutBaseline.length === 1
+                        ? '1 of these takes a visual snapshot'
+                        : `${importPlan.manifest.visualWithoutBaseline.length} of these take a visual snapshot`}
+                      , and baselines aren’t shared (they’re tied to the screen they were
                       captured on). Your <strong>first</strong> run creates your own baseline and
                       passes without comparing anything — the second run is the first real check.
                     </p>
                   ) : null}
                   {importPlan.manifest?.secretsPlaceholdered?.length ? (
                     <p className="import-note">
-                      🔑 {importPlan.manifest.secretsPlaceholdered.length} test
-                      {importPlan.manifest.secretsPlaceholdered.length === 1 ? '' : 's'} need a
-                      password. Set <code>PASSWORD</code> in your environment (🌐 Run against →
+                      🔑{' '}
+                      {importPlan.manifest.secretsPlaceholdered.length === 1
+                        ? '1 test needs a password'
+                        : `${importPlan.manifest.secretsPlaceholdered.length} tests need a password`}
+                      . Set <code>PASSWORD</code> in your environment (🌐 Run against →
                       manage) before running them.
                     </p>
                   ) : null}
