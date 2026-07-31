@@ -162,6 +162,35 @@ import {
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * Turn a thrown fetch error into something a user can act on.
+ *
+ * Node's fetch reports every connection-level problem as the bare string
+ * "fetch failed" — no host, no cause, no hint. Surfaced raw (as Jira and the
+ * webhook both used to), it tells someone who mistyped a URL or whose VPN is
+ * down precisely nothing, and it breaks the pattern set by the rest of these
+ * errors ("Unauthorized — check the email + API token").
+ */
+function reachError(e: unknown, url: string): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  const host = (() => {
+    try {
+      return new URL(url).host
+    } catch {
+      return url
+    }
+  })()
+  if (/fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET/i.test(raw)) {
+    // `cause` is where Node hides the actual reason; include it when it's there.
+    const cause = (e as { cause?: { code?: string } })?.cause?.code
+    return `Couldn’t reach ${host} — check the URL and your connection.${cause ? ` (${cause})` : ''}`
+  }
+  if (/certificate|self.signed|CERT_/i.test(raw)) {
+    return `Couldn’t verify the HTTPS certificate for ${host}. (${raw})`
+  }
+  return raw
+}
+
 // F29 (chaos): the latency of Chrome DevTools' "Slow 3G" profile. ONE constant, so
 // the CDP throttle applied to the browser tab and the delay applied to API steps
 // (which run on Node's fetch, out of CDP's reach) can never drift apart — a chaos
@@ -4802,7 +4831,7 @@ function createWindow(): void {
         })
         return res.ok ? { ok: true } : { ok: false, error: `Webhook returned ${res.status}` }
       } catch (e) {
-        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+        return { ok: false, error: reachError(e, hook) }
       }
     }
   )
@@ -5413,7 +5442,21 @@ function createWindow(): void {
       }
     ): Promise<{ ok: boolean; key?: string; url?: string; error?: string }> => {
       const base = (cfg.baseUrl || '').trim().replace(/\/+$/, '')
-      if (!/^https?:\/\//.test(base)) return { ok: false, error: 'Jira site URL must start with https://' }
+      // This request carries Basic auth — base64(email:apiToken) — and base64 is
+      // encoding, not encryption. Over plain http the token is readable by anyone
+      // on the path, so remote http is refused outright. localhost is allowed
+      // because that traffic never reaches a network (and it's how F34 is tested
+      // against a mock Jira without a real account).
+      if (!/^https?:\/\//.test(base)) {
+        return { ok: false, error: 'Jira site URL must start with https://' }
+      }
+      if (/^http:\/\//.test(base) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(base)) {
+        return {
+          ok: false,
+          error:
+            'Refusing to send your API token over plain http — that would put it on the network in readable form. Use https:// for the Jira site.'
+        }
+      }
       if (!cfg.email || !cfg.apiToken) return { ok: false, error: 'Email and API token are required.' }
       if (!cfg.projectKey) return { ok: false, error: 'A project key (e.g. QA) is required.' }
       try {
@@ -5452,7 +5495,7 @@ function createWindow(): void {
         const j = JSON.parse(text)
         return { ok: true, key: j.key, url: `${base}/browse/${j.key}` }
       } catch (e) {
-        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+        return { ok: false, error: reachError(e, base) }
       }
     }
   )

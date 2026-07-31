@@ -265,7 +265,7 @@ export async function installBrowsers(
       resolve({
         ok: false,
         message:
-          stripAnsi(err).split(/[\r\n]+/).filter(Boolean).slice(-3).join(' ').slice(0, 300) ||
+          stripAnsi(err).split(/[\r\n]+/).filter(Boolean).slice(-3).join(' ') ||
           `The download failed (exit code ${code}).`
       })
     })
@@ -517,7 +517,7 @@ export default defineConfig({
             ok: (prev?.ok ?? true) && ok,
             error:
               prev?.error ??
-              (firstErr ? stripAnsi(firstErr).replace(/\s+/g, ' ').slice(0, 300) : undefined)
+              (firstErr ? clip(stripAnsi(firstErr).replace(/\s+/g, ' ')) : undefined)
           })
         }
       }
@@ -558,7 +558,7 @@ export default defineConfig({
       const f = e.location?.file?.split(/[\\/]/).pop()?.replace(/\.spec\.ts$/, '')
       const id = f ? idBySlug.get(f) : undefined
       if (id && e.message) {
-        errByFile.set(id, stripAnsi(e.message).replace(/\s+/g, ' ').slice(0, 300))
+        errByFile.set(id, clip(stripAnsi(e.message).replace(/\s+/g, ' ')))
       }
     }
     const results: ParallelTestResult[] = specs.map(
@@ -580,7 +580,7 @@ export default defineConfig({
       ran: false,
       results: [],
       needsBrowsers: needsInstall || undefined,
-      message: needsInstall ? missingBrowsersMessage() : `Parallel run failed: ${m.slice(0, 300)}`
+      message: needsInstall ? missingBrowsersMessage() : `Parallel run failed: ${clip(m)}`
     }
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {})
@@ -595,6 +595,21 @@ const ESC = String.fromCharCode(27)
 const ANSI_RE = new RegExp(ESC + '\\[[0-9;]*m', 'g')
 function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
+}
+
+/**
+ * Shorten to `max` characters, but break at a word boundary.
+ *
+ * A blunt slice() cut Playwright's call log mid-word — a webhook alert ended
+ * "...8 × loca", which reads as a broken message rather than a trimmed one.
+ * Backs up to the last space when one is reasonably close, and marks the cut
+ * with an ellipsis so it's clearly deliberate.
+ */
+function clip(s: string, max = 300): string {
+  if (s.length <= max) return s
+  const cut = s.slice(0, max)
+  const space = cut.lastIndexOf(' ')
+  return (space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd() + '…'
 }
 
 // Walk the Playwright JSON report and collect every test with its project name.
@@ -627,7 +642,7 @@ function collectTests(
           // Playwright colourises its messages; the raw ANSI escapes rendered as
           // literal "[31m…" in the UI AND ate into the 300-char budget, hiding
           // the useful part (the call log, e.g. "waiting for getByTestId(…)").
-          error: firstErr ? stripAnsi(firstErr).replace(/\s+/g, ' ').slice(0, 300) : undefined
+          error: firstErr ? clip(stripAnsi(firstErr).replace(/\s+/g, ' ')) : undefined
         })
       }
     }
@@ -769,7 +784,7 @@ export async function runCrossBrowser(
       needsBrowsers: needsInstall || undefined,
       message: needsInstall
         ? missingBrowsersMessage()
-        : `Cross-browser run failed: ${m.slice(0, 300)}`
+        : `Cross-browser run failed: ${clip(m)}`
     }
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {})

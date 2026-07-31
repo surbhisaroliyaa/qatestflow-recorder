@@ -45,6 +45,18 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+/**
+ * Shorten text but break at a word boundary — a blunt slice() ends messages
+ * mid-word ("…8 × loca"), which reads as broken rather than trimmed. Mirrors
+ * clip() in main/xbrowser.ts, which trims the same errors upstream.
+ */
+function clip(s: string, max = 300): string {
+  if (s.length <= max) return s
+  const cut = s.slice(0, max)
+  const space = cut.lastIndexOf(' ')
+  return (space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd() + '…'
+}
+
 // Day 9: the checks offered by the assertion chooser, in display order.
 // checked/unchecked only make sense on a checkbox/radio — the chooser hides
 // them unless the picked element reported a live `checked` state (Day 11).
@@ -4233,13 +4245,38 @@ function App(): React.JSX.Element {
     // In-app alert: a visible toast INSIDE the app — the reliable channel, since
     // Windows desktop toasts only show for a packaged/installed app, not in dev.
     // Kept up longer than a normal toast so a background failure isn't missed.
-    const short = body.length > 160 ? body.slice(0, 159) + '…' : body
+    const short = clip(body, 160)
     setAiToast({ tone: 'fail', msg: `🔔 ${title} — ${short}` })
-    window.setTimeout(() => setAiToast(null), 12000)
+    // ONE toast slot exists, so the webhook outcome can't arrive as a second
+    // toast — it would wipe the failure message before it had been read. It
+    // amends THIS toast instead, as soon as the send resolves (usually well
+    // under a second), and the dismiss timer restarts so the added line gets
+    // its own reading time. Waiting for the first toast to expire and then
+    // showing a second was the earlier approach: correct, but the warning
+    // landed 12s later, by which point nobody is looking.
+    let dismiss = window.setTimeout(() => setAiToast(null), 12000)
+    const amend = (extra: string): void => {
+      window.clearTimeout(dismiss)
+      setAiToast({ tone: 'fail', msg: `🔔 ${title} — ${short}\n${extra}` })
+      dismiss = window.setTimeout(() => setAiToast(null), 12000)
+    }
     // Desktop toast (fires in a packaged build) + the optional webhook.
     window.api.notify.show(title, body)
     const hook = (localStorage.getItem('monitor.webhookUrl') || '').trim()
-    if (hook) await window.api.notify.webhook(hook, title, body).catch(() => {})
+    if (!hook) return
+    // A webhook that fails must not break the run — but it must not fail SILENTLY
+    // either. The result used to be discarded entirely, so a wrong or expired URL
+    // looked exactly like a successful send: you'd believe your alerts were
+    // reaching Slack for weeks while they went nowhere. Not breaking the run and
+    // never telling anyone are different things.
+    const sent = await window.api.notify
+      .webhook(hook, title, body)
+      .catch((e: unknown) => ({ ok: false, error: e instanceof Error ? e.message : String(e) }))
+    if (!sent?.ok) {
+      amend(
+        `⚠ The alert webhook didn’t send — ${sent?.error || 'unknown error'} (the monitor result itself is unaffected).`
+      )
+    }
   }
 
   // F32b: retry a FAILING run before alerting — a single transient blip (a slow

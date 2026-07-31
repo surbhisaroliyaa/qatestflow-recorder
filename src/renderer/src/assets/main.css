@@ -4418,6 +4418,11 @@ body {
   font-weight: 600;
   color: #fff;
   word-break: break-word;
+  /* A monitor alert can gain a second line when its webhook fails to send.
+     Without this the newline collapses to a space and the warning reads as
+     part of the failure text. pre-line is safe for every other toast, which
+     is single-line and unaffected. */
+  white-space: pre-line;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
   animation: toast-in 0.18s ease-out;
 }
