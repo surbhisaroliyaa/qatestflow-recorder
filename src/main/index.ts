@@ -134,7 +134,9 @@ import {
   type Environment
 } from './environments'
 import {
+  cancelBrowserInstall,
   checkPlaywright,
+  installBrowsers,
   runCrossBrowser,
   runSuiteParallel,
   type BrowserName,
@@ -4575,6 +4577,31 @@ function createWindow(): void {
   // Playwright, shelled out. `check` reports whether it's installed; `run`
   // exports the current test to a temp spec and runs it per selected browser.
   ipcMain.handle('xbrowser:check', () => checkPlaywright())
+
+  // The runner now ships with the app, but the ~400 MB of browser binaries
+  // can't — so the app downloads them itself on demand. Progress is streamed
+  // as events because this takes minutes and a silent freeze would look like
+  // a hang. Serialised: two concurrent installs would fight over the cache.
+  let installingBrowsers = false
+  ipcMain.handle(
+    'xbrowser:installBrowsers',
+    async (event, which: BrowserName[]): Promise<{ ok: boolean; message?: string }> => {
+      if (installingBrowsers) {
+        return { ok: false, message: 'A browser download is already running.' }
+      }
+      installingBrowsers = true
+      try {
+        return await installBrowsers(which ?? ['chromium'], (line) => {
+          if (!event.sender.isDestroyed()) event.sender.send('xbrowser:installProgress', line)
+        })
+      } finally {
+        installingBrowsers = false
+      }
+    }
+  )
+  // Stop an in-flight download. Returns false if nothing was running, so the
+  // UI can re-sync rather than sit on a Cancel button that does nothing.
+  ipcMain.handle('xbrowser:cancelInstall', () => cancelBrowserInstall())
   ipcMain.handle(
     'xbrowser:run',
     async (
@@ -4587,7 +4614,15 @@ function createWindow(): void {
       envOverride?: Record<string, string>,
       // F32: a saved session filename so a "starts logged in" test runs headless
       // without being bounced to login. Resolved against the _sessions store.
-      sessionFile?: string
+      sessionFile?: string,
+      // F40: the secret refs used by this test's steps. The export writes
+      // `process.env.PASSWORD ?? ''` for a password field, so without these a
+      // login types an EMPTY string, the next step waits for a page that never
+      // loads, and every engine reports an identical 30s timeout — which reads
+      // as "the browsers are broken" when the truth is "no password arrived".
+      // The parallel runner and monitors already did this; this path never did,
+      // so F17 has been quietly broken since F40 moved passwords to userData.
+      secretRefs?: string[]
     ) => {
       let envVars: Record<string, string> = {}
       if (envOverride) {
@@ -4598,6 +4633,13 @@ function createWindow(): void {
         const env = await activeEnvironment()
         for (const v of env?.vars ?? []) if (v.name) envVars[v.name] = v.value
         if (env?.baseURL) envVars.BASE_URL = env.baseURL
+      }
+      // Fill PASSWORD from the secret store only when nothing else supplied it,
+      // so an explicit environment variable still wins.
+      if (envVars.PASSWORD === undefined && secretRefs?.length) {
+        const resolved = await getSecrets(secretRefs)
+        const password = secretRefs.map((r) => resolved[r]).find((v) => v)
+        if (password) envVars.PASSWORD = password
       }
       const session = sessionFile
         ? { name: sessionFile, srcPath: join(libraryDir(), '_sessions', sessionFile) }

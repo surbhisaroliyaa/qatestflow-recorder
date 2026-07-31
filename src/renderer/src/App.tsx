@@ -517,6 +517,17 @@ function App(): React.JSX.Element {
   )
   const [xbRunning, setXbRunning] = useState(false)
   const [xbInstalled, setXbInstalled] = useState<boolean | null>(null)
+  // The app ships Playwright's RUNNER but not its ~400 MB of browser binaries,
+  // so a fresh install can run nothing headlessly until they're downloaded.
+  // `xbBrowsers` = which engines are present; the modal offers to fetch them and
+  // `xbInstallLog` shows the last progress line so a long download isn't silent.
+  const [xbBrowsers, setXbBrowsers] = useState<{ chromium: boolean; all: boolean } | null>(null)
+  const [xbInstalling, setXbInstalling] = useState(false)
+  const [xbInstallLog, setXbInstallLog] = useState('')
+  // Set when a run refuses for want of an engine. Needed as well as the check
+  // above because the PARTIAL case exists: Chromium downloaded but WebKit not,
+  // so `chromium: true` while a WebKit run still can't start.
+  const [xbNeedDownload, setXbNeedDownload] = useState(false)
   // F25 guard: pending host-mismatch warning. `resolve` settles the promise the
   // run is awaiting, so the modal's buttons drive the run's next move.
   // One entry per DISTINCT recorded host the active env would retarget. A single
@@ -2682,7 +2693,48 @@ function App(): React.JSX.Element {
     setXbResult(null)
     const chk = await window.api.xbrowser.check()
     setXbInstalled(chk.installed)
+    setXbBrowsers({ chromium: chk.chromium, all: chk.allBrowsers })
     setXbOpen(true)
+  }
+
+  // Stop an in-flight download. The install promise settles on its own with
+  // cancelled:true, so this only has to fire the kill — no state unwinding here.
+  const handleCancelInstall = async (): Promise<void> => {
+    setXbInstallLog('Cancelling…')
+    await window.api.xbrowser.cancelInstallBrowsers()
+  }
+
+  // Download the browser binaries with the Playwright CLI the app ships. This is
+  // the one place the app can repair its own missing dependency — a packaged
+  // user has no repo and no npm, so "go run npx playwright install" is a dead
+  // end for them. Minutes long, hence the streamed progress line.
+  const handleInstallBrowsers = async (
+    which: ('chromium' | 'firefox' | 'webkit')[]
+  ): Promise<void> => {
+    setXbInstalling(true)
+    setXbInstallLog('Starting download…')
+    const stop = window.api.xbrowser.onInstallProgress((line) => setXbInstallLog(line))
+    try {
+      const res = await window.api.xbrowser.installBrowsers(which)
+      const chk = await window.api.xbrowser.check()
+      setXbInstalled(chk.installed)
+      setXbBrowsers({ chromium: chk.chromium, all: chk.allBrowsers })
+      if (res.ok) setXbNeedDownload(false)
+      setXbInstallLog(
+        res.ok
+          ? '✅ Browsers installed — you can run now.'
+          : res.cancelled
+            ? // Not a failure. Saying "⚠ failed" for something the user chose to
+              // stop is the app blaming them for its own message.
+              'Download cancelled. You can start it again any time.'
+            : `⚠ ${res.message}`
+      )
+    } catch (err) {
+      setXbInstallLog(`⚠ ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      stop()
+      setXbInstalling(false)
+    }
   }
 
   // Export the current flow to a self-contained spec and run it on the selected
@@ -2703,12 +2755,32 @@ function App(): React.JSX.Element {
     setXbRunning(true)
     setXbResult(null)
     try {
+      // F40: the exported spec fills a password field from process.env.PASSWORD,
+      // and since F40 the value lives in userData rather than in the step — so
+      // the refs have to travel or the login types an empty string and EVERY
+      // engine times out identically. The parallel runner and monitors already
+      // did this; this path didn't, which is what broke Test B.
+      const secretRefs = flat
+        .map((s) => s.secretRef)
+        .filter((r): r is string => typeof r === 'string' && !!r)
       const res = await window.api.xbrowser.run(
         code,
-        [...xbSel] as ('chromium' | 'firefox' | 'webkit')[]
+        [...xbSel] as ('chromium' | 'firefox' | 'webkit')[],
+        undefined,
+        // A test that starts already logged in needs its session here too, for
+        // the same reason: otherwise it's bounced to a login page it can't pass.
+        storageState || undefined,
+        secretRefs
       )
       setXbResult(res)
       setXbInstalled(res.installed)
+      // The run refused because an engine isn't downloaded — flip the modal to
+      // the download panel rather than leaving a message the user can't act on.
+      if (res.needsBrowsers) {
+        const chk = await window.api.xbrowser.check()
+        setXbBrowsers({ chromium: chk.chromium, all: chk.allBrowsers })
+        setXbNeedDownload(true)
+      }
     } catch (err) {
       setXbResult({
         installed: true,
@@ -11513,6 +11585,53 @@ function App(): React.JSX.Element {
                   >
                     Re-check
                   </button>
+                </div>
+              </div>
+            ) : xbBrowsers && (!xbBrowsers.chromium || xbNeedDownload) ? (
+              // The runner shipped with the app, but the engines it drives are a
+              // separate ~400 MB download that no installer should carry. This
+              // is a first-run state on a teammate's machine, so it has to be
+              // self-explanatory and fixable from right here.
+              <div className="env-list">
+                <div className="edge-warn">
+                  ⚠ The test browsers aren&rsquo;t downloaded yet.
+                  <p className="env-list-intro">
+                    QATestFlow ships the Playwright test runner, but the browser engines it
+                    drives (Chromium, Firefox, WebKit) are about 400 MB, so they&rsquo;re
+                    fetched once on first use and shared with any other Playwright project on
+                    this machine. Recording and in-app replay work without them &mdash; headless
+                    runs, parallel suite runs and cross-browser need them.
+                  </p>
+                  {xbInstalling && <pre className="xb-install">{xbInstallLog}</pre>}
+                  {!xbInstalling && xbInstallLog && <p className="env-list-intro">{xbInstallLog}</p>}
+                </div>
+                <div className="modal-footer">
+                  {xbInstalling ? (
+                    // Mid-download the only useful control is a way OUT. A few
+                    // hundred MB with no escape is a trap on a slow or metered
+                    // connection — and a first-time user is exactly who mis-clicks.
+                    <button className="modal-btn danger" onClick={handleCancelInstall}>
+                      Cancel download
+                    </button>
+                  ) : (
+                    <>
+                      <button className="modal-btn" onClick={() => setXbOpen(false)}>
+                        Close
+                      </button>
+                      <button
+                        className="modal-btn"
+                        onClick={() => handleInstallBrowsers(['chromium'])}
+                      >
+                        Chromium only (~150 MB)
+                      </button>
+                      <button
+                        className="modal-btn primary"
+                        onClick={() => handleInstallBrowsers(['chromium', 'firefox', 'webkit'])}
+                      >
+                        ⬇ Download all three (~400 MB)
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             ) : (

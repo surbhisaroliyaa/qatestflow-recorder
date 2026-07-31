@@ -269,15 +269,44 @@ const api = {
   // Run the current test on real WebKit/Firefox/Chromium via Playwright (shelled
   // out — the embedded engine is Chromium only). `check` reports install state.
   xbrowser: {
-    check: (): Promise<{ installed: boolean; root: string | null }> =>
-      ipcRenderer.invoke('xbrowser:check'),
+    check: (): Promise<{
+      installed: boolean
+      root: string | null
+      chromium: boolean
+      allBrowsers: boolean
+      packaged: boolean
+    }> => ipcRenderer.invoke('xbrowser:check'),
+
+    // The app ships Playwright's runner but not its ~400 MB of browsers, so it
+    // downloads those itself when they're missing. Long-running: subscribe to
+    // onInstallProgress first, or the UI shows nothing for several minutes.
+    installBrowsers: (
+      which: string[]
+    ): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> =>
+      ipcRenderer.invoke('xbrowser:installBrowsers', which),
+    cancelInstallBrowsers: (): Promise<boolean> => ipcRenderer.invoke('xbrowser:cancelInstall'),
+    onInstallProgress: (cb: (line: string) => void): (() => void) => {
+      const handler = (_e: unknown, line: string): void => cb(line)
+      ipcRenderer.on('xbrowser:installProgress', handler)
+      return () => ipcRenderer.removeListener('xbrowser:installProgress', handler)
+    },
     run: (
       specCode: string,
       browsers: string[],
       envOverride?: Record<string, string>,
-      sessionFile?: string
+      sessionFile?: string,
+      // F40: refs for this test's secret steps, so main can put PASSWORD into the
+      // run's env — the exported spec reads process.env.PASSWORD, not the file.
+      secretRefs?: string[]
     ): Promise<unknown> =>
-      ipcRenderer.invoke('xbrowser:run', specCode, browsers, envOverride, sessionFile),
+      ipcRenderer.invoke(
+        'xbrowser:run',
+        specCode,
+        browsers,
+        envOverride,
+        sessionFile,
+        secretRefs
+      ),
 
     // F40: export the library (or a selection) as a portable bundle folder.
     exportBundle: (tests: string[], includeAcs: boolean): Promise<unknown> =>

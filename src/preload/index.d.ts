@@ -185,10 +185,26 @@ interface CrossBrowserResult {
   ran: boolean // did the test process actually run?
   results: BrowserResult[]
   message?: string // install hint / spawn error / missing-browser hint
+  needsBrowsers?: boolean // runner is fine, engines aren't downloaded yet
 }
 interface XBrowserAPI {
-  // Is @playwright/test installed in the project? (root = where it was found)
-  check: () => Promise<{ installed: boolean; root: string | null }>
+  // Is the runner present, and are the engines downloaded? Reported separately:
+  // the runner ships with the app, the ~400 MB of browsers do not.
+  check: () => Promise<{
+    installed: boolean
+    root: string | null
+    chromium: boolean
+    allBrowsers: boolean
+    packaged: boolean
+  }>
+  // Download the browser binaries using the shipped Playwright CLI. Minutes-long;
+  // onInstallProgress streams the download lines. Returns an unsubscribe fn.
+  installBrowsers: (
+    which: BrowserName[]
+  ) => Promise<{ ok: boolean; message?: string; cancelled?: boolean }>
+  // Stop an in-flight download; false if nothing was running.
+  cancelInstallBrowsers: () => Promise<boolean>
+  onInstallProgress: (cb: (line: string) => void) => () => void
   // Run the exported spec across the selected browsers; resolves per-browser.
   // envOverride (F32): a monitor's pinned env vars — bypasses the active env.
   // sessionFile (F32): a saved session so a "starts logged in" test runs headless.
@@ -196,7 +212,8 @@ interface XBrowserAPI {
     specCode: string,
     browsers: BrowserName[],
     envOverride?: Record<string, string>,
-    sessionFile?: string
+    sessionFile?: string,
+    secretRefs?: string[]
   ) => Promise<CrossBrowserResult>
   // === F40: shareable bundles ===
   exportBundle: (
@@ -241,6 +258,7 @@ interface XBrowserAPI {
     ran: boolean
     results: { id: string; ok: boolean; error?: string }[]
     message?: string
+    needsBrowsers?: boolean
   }>
 }
 

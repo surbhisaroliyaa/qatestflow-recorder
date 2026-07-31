@@ -7,17 +7,30 @@
 // selected browser, and run `playwright test` as a child process. We parse its
 // JSON report and hand per-browser pass/fail back to the UI.
 //
-// This needs @playwright/test (+ the browser binaries) installed in the project
-// — a one-time `npm i -D @playwright/test && npx playwright install`. We detect
-// its absence and report it cleanly instead of failing obscurely. In a PACKAGED
-// build there's no project node_modules, so this is a dev-time capability (which
-// is where the recorder is used).
+// This needs @playwright/test (the runner) AND the browser binaries. The two
+// are shipped very differently, and the difference is the whole story here:
+//
+//   THE RUNNER travels with the app. `@playwright/test` is a real dependency
+//   (not a devDependency) and electron-builder is told to asarUnpack it, so a
+//   packaged install has a spawnable cli.js on disk. Before this, a packaged
+//   build had no project node_modules at all and every headless / parallel /
+//   cross-browser feature was dev-only — a teammate who installed the app
+//   could record and replay, but never run a suite.
+//
+//   THE BROWSERS DO NOT. Chromium + Firefox + WebKit are ~400 MB that
+//   Playwright downloads into a shared per-user cache (%LOCALAPPDATA%\
+//   ms-playwright on Windows). No installer should carry that. So the app
+//   detects their absence and offers to fetch them ON DEMAND, using the very
+//   cli.js it now ships — see installBrowsers(). Telling the user to go run
+//   `npx playwright install` is not an option for someone who installed a
+//   .exe and has no repo and no npm.
 // =====================================================================
 
 import { app } from 'electron'
 import { spawn } from 'child_process'
-import { mkdir, writeFile, rm, copyFile } from 'fs/promises'
-import { existsSync } from 'fs'
+import { mkdir, writeFile, rm, copyFile, symlink } from 'fs/promises'
+import { existsSync, readdirSync } from 'fs'
+import { homedir } from 'os'
 import { join } from 'path'
 
 export type BrowserName = 'chromium' | 'firefox' | 'webkit'
@@ -35,15 +48,89 @@ export interface CrossBrowserResult {
   ran: boolean // did the test process actually run?
   results: BrowserResult[]
   message?: string // install hint / spawn error / missing-browser hint
+  /** The runner is fine, the engines just aren’t downloaded — offer the fix. */
+  needsBrowsers?: boolean
 }
 
-// The project directory that owns node_modules/@playwright/test. In dev this is
-// the repo root (process.cwd()); app.getAppPath() is the fallback.
-function projectRoot(): string | null {
-  for (const dir of [process.cwd(), app.getAppPath()]) {
+// The directory that owns node_modules/@playwright/test.
+//
+// Dev: the repo root (process.cwd()).
+// Packaged: resources/app.asar.unpacked. app.getAppPath() itself points INSIDE
+// app.asar, and an archive path is not a real file — spawn() can't launch from
+// it and Node can't resolve modules through it. The .unpacked sibling is the
+// on-disk copy electron-builder writes for exactly this reason.
+function playwrightRoot(): string | null {
+  const candidates = app.isPackaged
+    ? [
+        `${app.getAppPath()}.unpacked`,
+        join(process.resourcesPath, 'app.asar.unpacked'),
+        app.getAppPath()
+      ]
+    : [process.cwd(), app.getAppPath()]
+  for (const dir of candidates) {
     if (dir && existsSync(join(dir, 'node_modules', '@playwright', 'test'))) return dir
   }
   return null
+}
+
+/**
+ * A scratch directory for one run — spec files, a config, copied sessions.
+ *
+ * Dev keeps the historic behaviour: a dot-folder in the repo root. Every
+ * generated spec does `import { test } from '@playwright/test'`, and Node
+ * resolves that by walking UP from the spec's own folder — so sitting inside
+ * the project is what makes it resolve.
+ *
+ * Packaged, that same folder would land in the INSTALL directory: wrong place
+ * for run artefacts, and outright unwritable if the app went to Program Files.
+ * So the work dir moves to userData and we plant a `node_modules` junction
+ * pointing back at the app's real one, which restores the upward walk. A
+ * junction is used rather than a symlink deliberately — Windows grants those
+ * to ordinary users, whereas a true symlink needs admin or developer mode.
+ */
+async function makeWorkDir(root: string, name: string): Promise<string> {
+  const dir = app.isPackaged ? join(app.getPath('userData'), name) : join(root, name)
+  await rm(dir, { recursive: true, force: true })
+  await mkdir(dir, { recursive: true })
+  if (app.isPackaged) {
+    await symlink(join(root, 'node_modules'), join(dir, 'node_modules'), 'junction')
+  }
+  return dir
+}
+
+// =====================================================================
+// BROWSER BINARIES
+// Shared per-user cache, NOT shipped in the installer (~400 MB).
+// =====================================================================
+
+/** Playwright's download cache, honouring its own override env var. */
+function browsersDir(): string {
+  const override = process.env.PLAYWRIGHT_BROWSERS_PATH
+  if (override && override !== '0') return override
+  if (process.platform === 'win32') {
+    return join(process.env.LOCALAPPDATA || homedir(), 'ms-playwright')
+  }
+  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Caches', 'ms-playwright')
+  return join(homedir(), '.cache', 'ms-playwright')
+}
+
+/**
+ * Are the given engines downloaded? A cheap pre-check so the UI can offer the
+ * download BEFORE a run instead of after it fails. Folders are versioned
+ * (`chromium-1187`), hence the prefix match. This is advisory only — the
+ * authority is still Playwright's own runtime error, which the run paths below
+ * already translate.
+ */
+export function browsersReady(which: BrowserName[] = ['chromium']): boolean {
+  const dir = browsersDir()
+  if (!existsSync(dir)) return false
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return false
+  }
+  return which.every((b) => entries.some((e) => e.startsWith(`${b}-`)))
 }
 
 // Playwright's CLI entry (run via the Electron binary in Node mode). Both the
@@ -60,10 +147,129 @@ function playwrightCli(root: string): string | null {
   return null
 }
 
-// Is Playwright available to run at all?
-export function checkPlaywright(): { installed: boolean; root: string | null } {
-  const root = projectRoot()
-  return { installed: !!(root && playwrightCli(root)), root }
+export interface PlaywrightStatus {
+  /** Is the RUNNER present (cli.js we can spawn)? */
+  installed: boolean
+  root: string | null
+  /** Is Chromium downloaded? Everything headless needs at least this. */
+  chromium: boolean
+  /** Are all three engines downloaded? F17 with Firefox/WebKit needs this. */
+  allBrowsers: boolean
+  /** True in an installed build — decides which install advice is honest. */
+  packaged: boolean
+}
+
+// Is Playwright available to run at all? Reports the runner and the browsers
+// separately: they fail for different reasons and have different fixes, and
+// conflating them is what produced the useless "run npm i" message for users
+// who have no repo to run it in.
+export function checkPlaywright(): PlaywrightStatus {
+  const root = playwrightRoot()
+  return {
+    installed: !!(root && playwrightCli(root)),
+    root,
+    chromium: browsersReady(['chromium']),
+    allBrowsers: browsersReady(['chromium', 'firefox', 'webkit']),
+    packaged: app.isPackaged
+  }
+}
+
+/** What to tell the user when the runner itself is missing. */
+function missingRunnerMessage(): string {
+  return app.isPackaged
+    ? 'The test engine is missing from this installation. Reinstalling QATestFlow should restore it.'
+    : 'Playwright isn’t installed in this project. Run once:  npm i -D @playwright/test && npx playwright install'
+}
+
+/** What to tell the user when the engines aren’t downloaded yet. */
+function missingBrowsersMessage(): string {
+  return app.isPackaged
+    ? 'The test browsers aren’t downloaded yet. Open 🧭 Cross-browser → “Download test browsers” (about 400 MB, one time).'
+    : 'Browser binaries aren’t installed. Run once:  npx playwright install'
+}
+
+export interface BrowserInstallResult {
+  ok: boolean
+  message?: string
+  /** The user stopped it — not a failure, and must not be reported as one. */
+  cancelled?: boolean
+}
+
+// The running download, so a second IPC call can stop it. A 400 MB fetch with
+// no way out is a trap on a metered or slow connection, and the person most
+// likely to hit it is a first-time user who mis-clicked.
+let installChild: ReturnType<typeof spawn> | null = null
+let installCancelled = false
+
+/** Stop an in-flight browser download. No-op if nothing is running. */
+export function cancelBrowserInstall(): boolean {
+  if (!installChild) return false
+  installCancelled = true
+  installChild.kill()
+  return true
+}
+
+/**
+ * Download the browser binaries using the cli.js we ship.
+ *
+ * This is the payoff for bundling the runner: the app can fix its own missing
+ * dependency instead of handing the user a terminal command they may have no
+ * way to run. Progress lines are streamed out so the UI can show something
+ * during a multi-hundred-megabyte download rather than freezing.
+ */
+export async function installBrowsers(
+  which: BrowserName[],
+  onProgress: (line: string) => void
+): Promise<BrowserInstallResult> {
+  const { installed, root } = checkPlaywright()
+  if (!installed || !root) return { ok: false, message: missingRunnerMessage() }
+  const cli = playwrightCli(root)!
+  const engines = which.length ? which : ['chromium']
+  installCancelled = false
+  return new Promise<BrowserInstallResult>((resolve) => {
+    let err = ''
+    const child = spawn(process.execPath, [cli, 'install', ...engines], {
+      cwd: root,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+    })
+    installChild = child
+    // Playwright redraws its download bar with carriage returns, so split on
+    // BOTH \r and \n or the UI would sit on one enormous unbroken line.
+    const emit = (chunk: string): void => {
+      for (const line of chunk.split(/[\r\n]+/)) {
+        const t = line.trim()
+        if (t) onProgress(t)
+      }
+    }
+    child.stdout.on('data', (d) => emit(d.toString()))
+    child.stderr.on('data', (d) => {
+      const s = d.toString()
+      err += s
+      // Playwright writes its progress to stderr, so this is NOT error text —
+      // it's the download itself, and it's the only feedback there is.
+      emit(s)
+    })
+    child.on('error', (e) => {
+      installChild = null
+      resolve({ ok: false, message: e.message })
+    })
+    child.on('close', (code) => {
+      installChild = null
+      // A killed process exits non-zero. Reporting that as "the download
+      // failed" would blame the user's own cancel on the app.
+      if (installCancelled) {
+        installCancelled = false
+        return resolve({ ok: false, cancelled: true, message: 'Download cancelled.' })
+      }
+      if (code === 0) return resolve({ ok: true })
+      resolve({
+        ok: false,
+        message:
+          stripAnsi(err).split(/[\r\n]+/).filter(Boolean).slice(-3).join(' ').slice(0, 300) ||
+          `The download failed (exit code ${code}).`
+      })
+    })
+  })
 }
 
 // The temp Playwright config for a run: one project per requested browser, all
@@ -147,6 +353,8 @@ export interface ParallelRunResult {
   ran: boolean
   results: ParallelTestResult[]
   message?: string
+  /** The runner is fine, the engines just aren’t downloaded — offer the fix. */
+  needsBrowsers?: boolean
 }
 
 /** A filename-safe token for one spec, unique per test. */
@@ -171,24 +379,39 @@ export async function runSuiteParallel(
   workers: number,
   envVars: Record<string, string> = {}
 ): Promise<ParallelRunResult> {
-  const { installed, root } = checkPlaywright()
+  const { installed, root, chromium } = checkPlaywright()
   if (!installed || !root) {
+    return { installed: false, ran: false, results: [], message: missingRunnerMessage() }
+  }
+  // Check the engines UP FRONT. Without this, a missing download surfaces as
+  // every single test failing to launch — which reads as "the whole suite is
+  // broken" when the truth is one one-time download away.
+  if (!chromium) {
     return {
-      installed: false,
+      installed: true,
       ran: false,
       results: [],
-      message:
-        'Playwright isn’t installed in this project. Run once:  npm i -D @playwright/test && npx playwright install'
+      needsBrowsers: true,
+      message: missingBrowsersMessage()
     }
   }
   if (!specs.length) return { installed: true, ran: true, results: [] }
   const cli = playwrightCli(root)!
-  const workDir = join(root, '.qaflow-parallel')
+  let workDir: string
+  try {
+    workDir = await makeWorkDir(root, '.qaflow-parallel')
+  } catch (e) {
+    return {
+      installed: true,
+      ran: false,
+      results: [],
+      message: `Couldn’t prepare the run folder: ${e instanceof Error ? e.message : String(e)}`
+    }
+  }
   const specDir = join(workDir, 'specs')
   // spec file base name → our test id, so the report maps back.
   const idBySlug = new Map<string, string>()
   try {
-    await rm(workDir, { recursive: true, force: true })
     await mkdir(specDir, { recursive: true })
     await mkdir(join(workDir, 'sessions'), { recursive: true })
     for (let i = 0; i < specs.length; i++) {
@@ -356,9 +579,8 @@ export default defineConfig({
       installed: true,
       ran: false,
       results: [],
-      message: needsInstall
-        ? 'Browser binaries aren’t installed. Run once:  npx playwright install'
-        : `Parallel run failed: ${m.slice(0, 300)}`
+      needsBrowsers: needsInstall || undefined,
+      message: needsInstall ? missingBrowsersMessage() : `Parallel run failed: ${m.slice(0, 300)}`
     }
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {})
@@ -429,21 +651,35 @@ export async function runCrossBrowser(
 ): Promise<CrossBrowserResult> {
   const { installed, root } = checkPlaywright()
   if (!installed || !root) {
+    return { installed: false, ran: false, results: [], message: missingRunnerMessage() }
+  }
+  // Only the engines actually selected need to be downloaded — asking someone
+  // running a Chromium-only check to fetch WebKit would be a pointless 400 MB.
+  if (!browsersReady(browsers)) {
     return {
-      installed: false,
+      installed: true,
       ran: false,
       results: [],
-      message:
-        'Playwright isn’t installed in this project. Run once:  npm i -D @playwright/test && npx playwright install'
+      needsBrowsers: true,
+      message: missingBrowsersMessage()
     }
   }
   const cli = playwrightCli(root)!
-  // A dedicated temp dir INSIDE the project so @playwright/test resolves, and
-  // the run can’t collide with the user’s own tests.
-  const workDir = join(root, '.qaflow-xbrowser')
+  // A dedicated temp dir whose module resolution reaches @playwright/test (see
+  // makeWorkDir), kept apart from the user’s own tests.
+  let workDir: string
+  try {
+    workDir = await makeWorkDir(root, '.qaflow-xbrowser')
+  } catch (e) {
+    return {
+      installed: true,
+      ran: false,
+      results: [],
+      message: `Couldn’t prepare the run folder: ${e instanceof Error ? e.message : String(e)}`
+    }
+  }
   const specDir = join(workDir, 'specs')
   try {
-    await rm(workDir, { recursive: true, force: true })
     await mkdir(specDir, { recursive: true })
     await writeFile(join(specDir, 'crossbrowser.spec.ts'), specCode, 'utf-8')
     // F32: copy the saved session in and pass its ABSOLUTE path to storageState so
@@ -519,9 +755,8 @@ export async function runCrossBrowser(
       installed: true,
       ran: true,
       results,
-      message: anyMissing
-        ? 'Some browsers reported no result — install them once:  npx playwright install'
-        : undefined
+      needsBrowsers: anyMissing || undefined,
+      message: anyMissing ? missingBrowsersMessage() : undefined
     }
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e)
@@ -531,8 +766,9 @@ export async function runCrossBrowser(
       installed: true,
       ran: false,
       results: [],
+      needsBrowsers: needsInstall || undefined,
       message: needsInstall
-        ? 'Browser binaries aren’t installed. Run once:  npx playwright install'
+        ? missingBrowsersMessage()
         : `Cross-browser run failed: ${m.slice(0, 300)}`
     }
   } finally {

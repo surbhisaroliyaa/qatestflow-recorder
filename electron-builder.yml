@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: react-ts
+appId: com.qatestflow.recorder
+productName: QATestFlow Recorder
 directories:
   buildResources: build
 files:
@@ -11,8 +11,16 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
+  # The headless / parallel / cross-browser runners SHELL OUT to Playwright's
+  # cli.js as a child process. A path inside app.asar is not a real file on
+  # disk, so it can neither be spawned nor used as a module-resolution root.
+  # Unpacking puts it in resources/app.asar.unpacked, where both work.
+  # (playwright + playwright-core arrive as dependencies of @playwright/test.)
+  - node_modules/@playwright/**
+  - node_modules/playwright/**
+  - node_modules/playwright-core/**
 win:
-  executableName: react-ts
+  executableName: QATestFlow Recorder
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
