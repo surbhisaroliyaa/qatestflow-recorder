@@ -2768,9 +2768,18 @@ body {
   line-height: 1.6;
 }
 
-.replay-status.branch-note strong {
+/* Direct child ONLY — this styles the title line. As a descendant selector it
+   also caught the inline <strong>not performed</strong> inside the explanation
+   below, turning mid-sentence emphasis into its own block: the sentence broke
+   after "was", and the next line began with a stray comma. */
+.replay-status.branch-note > strong {
   display: block;
   margin-bottom: 3px;
+  color: #f0d9a8;
+}
+
+/* Emphasis inside the explanation stays inline, just brighter. */
+.branch-note-why strong {
   color: #f0d9a8;
 }
 
@@ -2898,6 +2907,18 @@ body {
 .tag-note em {
   color: #d9a84e;
   font-style: normal;
+}
+
+/* The honesty caveat on an iPhone/iPad preset: in-app the engine is Chromium
+   in disguise, not WebKit. It sits on its OWN line rather than trailing the
+   paragraph — as a final clause it read as a footnote, when it's the sentence
+   most likely to change how you interpret a green run. */
+.device-caveat {
+  display: block;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(217, 168, 78, 0.25);
+  color: #d9a84e;
 }
 
 .device-note code,

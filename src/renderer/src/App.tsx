@@ -10185,8 +10185,14 @@ function App(): React.JSX.Element {
                         type="button"
                         className={`assert-kind${active ? ' chosen' : ''}`}
                         onClick={() => applyDevice(d.id)}
+                        title="Resizes the window only — the page still sees a desktop browser, with no touch and a desktop user-agent."
                       >
-                        {d.label.replace(' (size only)', '')}
+                        {/* "(size only)" used to be stripped here to keep the chip
+                            short. That hid the single most important fact about
+                            these presets: the page is NOT told it's a phone. The
+                            grey note below said so, but a label you read every
+                            time beats a paragraph you read once (Surbhi, Test 10). */}
+                        {d.label}
                       </button>
                     )
                   })}
@@ -10213,14 +10219,14 @@ function App(): React.JSX.Element {
                       {deviceById(deviceId)?.deviceScaleFactor}× pixel density — so layouts that
                       switch on UA or <code>pointer: coarse</code> switch here too.
                       {deviceById(deviceId)?.realEngine === 'webkit' && (
-                        <>
-                          {' '}
-                          <em>
-                            Note: in-app this runs on Chromium wearing an iOS costume — the embedded
-                            browser is Chromium-only. The export and 🧭 cross-browser run it on real
-                            WebKit.
-                          </em>
-                        </>
+                        // Its own line, not a trailing clause. This is the most
+                        // important sentence in the box — the one place the app
+                        // admits the emulation isn't the real engine — and buried
+                        // at the end of a dense paragraph the eye slid past it.
+                        <span className="device-caveat">
+                          ⚠ In-app this is Chromium wearing an iOS costume — the embedded browser is
+                          Chromium-only. The export and 🧭 cross-browser run it on real WebKit.
+                        </span>
                       )}
                     </>
                   ) : (
