@@ -64,7 +64,8 @@ import {
 } from './library'
 import {
   explainFailure,
-  evaluateNlAssertion,
+  evaluateNlAssertions,
+  type NlVerdict,
   categorizeFailure,
   deepRcaFailure,
   generateAiSteps,
@@ -3313,7 +3314,19 @@ function createWindow(): void {
       // but a corrupted file shouldn't be able to hang the app forever.
       const MAX_ITERATIONS = 1000
 
+      // F19 batching: verdicts for a RUN of consecutive AI checks, judged in one
+      // model call at the first of them. An AI check costs ~7-12s and that cost
+      // is per CALL, not per claim — six checks on one page meant six start-ups
+      // and six round trips for a single page state.
+      //
+      // Keyed by step index and thrown away the moment execution leaves the run,
+      // because F37 loops can jump `i` backwards: on a second lap the page state
+      // is NOT the one these verdicts were formed against, and reusing them
+      // would be reporting a stale judgment as a fresh one.
+      let nlBatch: { indices: Set<number>; verdicts: Map<number, NlVerdict> } | null = null
+
       for (let i = 0; i < list.length; i++) {
+        if (nlBatch && !nlBatch.indices.has(i)) nlBatch = null
         // F24.1: resolve the LATE tokens now, for THIS step. {{env:X}} and data
         // columns were substituted by the renderer before the run; {{uuid}} and
         // {{saved:orderId}} can't be — a saved id doesn't exist until the step
@@ -3813,6 +3826,12 @@ function createWindow(): void {
             if (!fileNodeId) throw new Error('Could not find the file input on the page')
             await cdp.sendCommand('DOM.setFileInputFiles', { files: paths, nodeId: fileNodeId })
           } else if (step.type === 'assert' && step.assertKind === 'nl') {
+            // Already judged as part of the batch formed at the first check in
+            // this run — same page state, no second round trip.
+            const cached = nlBatch?.verdicts.get(i)
+            if (cached) {
+              if (!cached.pass) throw new Error(cached.error)
+            } else {
             // F19: an AI (natural-language) assertion — judged by the LLM, not
             // an in-page script. Capture the page's url/title/visible-text PLUS
             // an image signal (innerText has no evidence of images) AND a
@@ -3878,13 +3897,40 @@ function createWindow(): void {
             } catch {
               // couldn't capture — evaluate on text + signals alone
             }
-            const nl = await evaluateNlAssertion(
-              step.value ?? '',
+            // Every consecutive AI check from here shares this exact page state
+            // — nothing runs between them to change it — so they can all be
+            // judged in ONE call. Later steps in the run read their verdict from
+            // the batch instead of paying for another round trip.
+            const runIdx: number[] = [i]
+            for (let k = i + 1; k < list.length; k++) {
+              const nx = list[k] as typeof step
+              if (nx?.type === 'assert' && nx.assertKind === 'nl' && !nx.disabled) runIdx.push(k)
+              else break
+            }
+            // Tell the UI what this pause IS. The leader of a batch carries the
+            // cost for every check in its run, so it sits there for ~10s while
+            // the ones after it return instantly — without saying so, that reads
+            // as a hang on one step and magic on the rest.
+            if (runIdx.length > 1) {
+              mainWindow.webContents.send('recorder:replay-progress', {
+                index: i,
+                status: 'running',
+                nlBatch: { count: runIdx.length }
+              })
+            }
+            const verdicts = await evaluateNlAssertions(
+              runIdx.map((k) => (list[k] as typeof step).value ?? ''),
               { ...ctx, screenshotPath: shotPath },
               libraryDir()
             )
             if (shotPath) await rm(shotPath, { force: true }).catch(() => {})
+            nlBatch = { indices: new Set(runIdx), verdicts: new Map() }
+            runIdx.forEach((k, n) => {
+              nlBatch!.verdicts.set(k, verdicts[n] ?? { pass: false, error: 'AI check produced no verdict.' })
+            })
+            const nl = nlBatch.verdicts.get(i)!
             if (!nl.pass) throw new Error(nl.error)
+            }
           } else if (step.type === 'api') {
             // F24: fire an HTTP request from the main process (not the embedded
             // browser) and assert on the response. Env tokens in the URL / headers

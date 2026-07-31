@@ -897,6 +897,11 @@ function App(): React.JSX.Element {
   const [aiHealedIndices, setAiHealedIndices] = useState<Set<number>>(new Set())
   // F37: notes about branches/loops that didn't run in the last replay.
   const [branchNotes, setBranchNotes] = useState<string[]>([])
+  // F19: how many AI checks the CURRENTLY-RUNNING step is judging in one model
+  // call. An AI check costs ~7-12s per CALL regardless of how many claims ride
+  // in it, so the first check of a run pays for the whole group and the rest
+  // return instantly. Unannounced, that looks like one step hanging.
+  const [nlBatchCount, setNlBatchCount] = useState<number | null>(null)
   // A re-pick landed on an element with no stable hooks — explain why the
   // heal was refused (shown inside the recovery panel).
   const [recoveryWarning, setRecoveryWarning] = useState<string | null>(null)
@@ -1646,9 +1651,16 @@ function App(): React.JSX.Element {
       const idx = runPlanRef.current?.[p.index] ?? p.index
       if (p.status === 'running') {
         setReplayingIndex(idx)
+        // F19 batching: this step is judging several AI checks in ONE model call
+        // (the rest of its run then return instantly). Say so, or a ~10s pause on
+        // one step looks like a hang.
+        setNlBatchCount(p.nlBatch?.count ?? null)
         // A recovery retry re-runs a step that just failed — drop its red mark.
         setFailedIndex((prev) => (prev === idx ? null : prev))
-      } else if (p.status === 'done') setDoneIndices((prev) => new Set(prev).add(idx))
+      } else if (p.status === 'done') {
+        setNlBatchCount(null)
+        setDoneIndices((prev) => new Set(prev).add(idx))
+      }
       else if (p.status === 'error') setFailedIndex(idx)
       else if (p.status === 'skipped') {
         setSkippedIndices((prev) => new Set(prev).add(idx))
@@ -5116,7 +5128,18 @@ function App(): React.JSX.Element {
   // While PAUSED for recovery (Day 12), the recovery panel carries the story.
   const replayBanner = ((): { tone: string; text: string } | null => {
     if (recovery) return null
-    if (isReplaying) return { tone: 'running', text: 'Replaying…' }
+    if (isReplaying) {
+      // Name the wait. This step is judging its whole run of AI checks in one
+      // model call — the steps after it then return instantly — so a ~10s pause
+      // here is work, not a hang.
+      if (nlBatchCount && nlBatchCount > 1) {
+        return {
+          tone: 'running',
+          text: `Replaying… judging ${nlBatchCount} AI checks together in one call (the next ${nlBatchCount - 1} return instantly)`
+        }
+      }
+      return { tone: 'running', text: 'Replaying…' }
+    }
     if (failedIndex !== null) {
       // Day 20: Continue can leave SEVERAL failed steps — name them all.
       if (lastFailures.length > 1) {

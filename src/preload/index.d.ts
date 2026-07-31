@@ -39,6 +39,9 @@ interface ReplayProgress {
   index: number
   status: 'running' | 'done' | 'error' | 'skipped' // 'skipped' = recovery skip (Day 12)
   error?: string
+  // F19: this step is judging N AI checks in ONE model call (the rest of its
+  // run then return instantly). Present only on the step that carries the cost.
+  nlBatch?: { count: number }
 }
 
 interface ReplayResult {
