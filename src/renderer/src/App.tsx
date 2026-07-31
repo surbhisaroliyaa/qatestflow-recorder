@@ -126,6 +126,27 @@ const CATEGORY_LABELS: Record<FailureCategory, string> = {
   unknown: 'unclassified'
 }
 
+// WHY each label was chosen. Two tests can fail with the identical message
+// ("Element not found") and be filed under DIFFERENT categories, because the
+// classifier also weighs whether the page itself logged errors. Without the
+// rule stated, that looks arbitrary — and "app bug" is a claim the reader may
+// have to defend to a developer, so it has to be defensible on sight.
+// MIRROR: these must match the branches in main/translator.ts ruleBasedExplain.
+const CATEGORY_WHY: Record<FailureCategory, string> = {
+  'stale-selector':
+    'the element was not found, and the page itself looked healthy (no console or network errors) — so the selector, not the app, is what changed',
+  'stale-data':
+    'the element was found; its value or state differs from what was recorded — either the app is wrong or the expected value is out of date',
+  'app-bug':
+    'the element was missing or never usable AND the page logged real console/network errors — so it is likely absent because the app failed to render it',
+  timing:
+    'the element was found but never became visible or enabled in time, on a page showing no errors — usually slower than the test, not broken',
+  environment: 'the page could not be loaded at all — network, URL or the site being down',
+  authoring:
+    'the recorded element has no stable hooks (no id, role or text), so replay refused to guess rather than act on the wrong element',
+  unknown: 'the error did not match any known pattern — read the screenshot and logs'
+}
+
 // F13: how severe axe considers each violation — drives the sort order (worst
 // first) and the chip colour. Anything unrated sorts last.
 const A11Y_IMPACT_ORDER: Record<string, number> = {
@@ -3876,7 +3897,11 @@ function App(): React.JSX.Element {
     if (byCat.size) {
       lines.push('## Failures by type', '')
       for (const [c, n] of [...byCat.entries()].sort((a, b) => b[1] - a[1])) {
-        lines.push(`- ${CATEGORY_LABELS[c as FailureCategory] ?? c}: ${n}`)
+        // The reason travels WITH the count. Pasted into a ticket or a PR, this
+        // report is read by someone who can't hover a chip to find out why an
+        // "app bug" was called an app bug.
+        const why = CATEGORY_WHY[c as FailureCategory]
+        lines.push(`- **${CATEGORY_LABELS[c as FailureCategory] ?? c}: ${n}**${why ? ` — ${why}` : ''}`)
       }
       lines.push('')
     }
@@ -7366,7 +7391,11 @@ function App(): React.JSX.Element {
                     <div className="failure-breakdown">
                       <span className="failure-breakdown-label">Failures by type:</span>
                       {cats.map(([c, n]) => (
-                        <span key={c} className={`category-chip cat-${c}`}>
+                        <span
+                          key={c}
+                          className={`category-chip cat-${c}`}
+                          title={CATEGORY_WHY[c as FailureCategory] ?? ''}
+                        >
                           {CATEGORY_LABELS[c as FailureCategory] ?? c} <strong>{n}</strong>
                         </span>
                       ))}
@@ -8721,10 +8750,25 @@ function App(): React.JSX.Element {
         </div>
       )}
 
-      {/* The browser area is left empty — the native embedded browser is
-          painted over it. Only the steps panel on the right shows through. */}
+      {/* The native embedded browser is painted OVER this area, so anything in
+          here is invisible while the page is showing. It becomes visible at
+          exactly one moment: when a modal opens and main shrinks the native view
+          to nothing (browser:setOverlay) so it can't cover the dialog. Before,
+          that left a large flat #1e1e1e void that read as "the app broke" —
+          Surbhi kept a screenshot of it titled "back ground goes black". The
+          page is still loaded the whole time; this just says so. */}
       <div className="workspace">
-        <div className="browser-area" />
+        <div className="browser-area">
+          {/* Anchored to the TOP, not centred: modals are vertically centred, so
+              a centred note sits directly behind the dialog and only its ends
+              poke out — which looks like a rendering fault, not a message. */}
+          <div className="browser-hidden-note">
+            🗔 Page hidden while this dialog is open
+            {(urlInput || baseURL) && (
+              <span className="browser-hidden-url">{urlInput || baseURL}</span>
+            )}
+          </div>
+        </div>
         <aside className="steps-panel">
           {/* === Day 11: current test identity (name + editable base URL) ===
               Show for an UNSAVED recording too (any steps) — otherwise the env

@@ -438,6 +438,26 @@ export async function runApiStep(input: ApiStepInput): Promise<ApiStepResult> {
   }
 
   if (failures.length) {
+    // When EVERY contracted field has vanished at once, the truthful reading is
+    // not "N independent regressions" — it's "this endpoint is returning a
+    // different kind of object entirely" (a changed path, a wrapped envelope, an
+    // error payload). Listing 17 near-identical "field is GONE" bullets buries
+    // that one insight under its own evidence, and the reader has to infer it.
+    // Say it once, then show a sample rather than the whole list.
+    // NOT compared against Object.keys(contract): the contract nests, so its
+    // top-level key count (7) never matches the FLATTENED failure paths
+    // (address.geo.lat, company.bs … = 17). The signal that matters is simply
+    // that every failure is a missing contracted field, and there are several.
+    const gone = failures.filter((f) => f.reason.includes('GONE from the response'))
+    if (gone.length >= 4 && gone.length === failures.length) {
+      const sample = gone
+        .slice(0, 3)
+        .map((f) => f.line.replace(/^contract:\s*/, ''))
+        .join(', ')
+      return fail(
+        `API check failed — ${method} ${url} responded ${status}, but EVERY one of the ${gone.length} contracted fields is missing (${sample}, +${gone.length - 3} more). A whole-shape mismatch like this usually means the response is a different kind of object than the one recorded — check the URL is still the right endpoint, and whether the body is now wrapped or is an error payload.`
+      )
+    }
     const detail = failures.map((f) => `  • ${f.line} — ${f.reason}`).join('\n')
     return fail(
       `API check failed — ${method} ${url} responded ${status}, but ${failures.length} check${

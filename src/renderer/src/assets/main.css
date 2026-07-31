@@ -1092,6 +1092,38 @@ body {
 
 .browser-area {
   flex: 1;
+  /* Only ever seen when a modal hides the native browser view. Reads as a
+     deliberate empty panel rather than a hole punched in the window. */
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  background: #232323;
+}
+
+/* TOP-anchored on purpose — a centred note lands behind the (also centred)
+   dialog and only its edges show, which looks broken. */
+.browser-hidden-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 90%;
+  margin-top: 14px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: #2a2a2a;
+  color: #6d6d6d;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.browser-hidden-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #7f8b99;
 }
 
 /* Width MUST match PANEL_WIDTH in src/main/index.ts (340) so the native
