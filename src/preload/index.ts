@@ -330,7 +330,14 @@ const api = {
 
     // F39: run a batch of tests at once via real Playwright, `workers` at a time.
     runSuite: (
-      specs: { id: string; name: string; code: string; sessionFile?: string }[],
+      specs: {
+        id: string
+        name: string
+        code: string
+        sessionFile?: string
+        fixturePaths?: string[]
+        harFile?: string
+      }[],
       workers: number,
       envOverride?: Record<string, string>
     ): Promise<unknown> =>

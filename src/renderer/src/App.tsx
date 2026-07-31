@@ -34,7 +34,7 @@ import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
 // export and the run all agree on how markers pair up.
 import { analyzeControlFlow, isControlStep, type ConditionKind } from '../../shared/controlFlow'
 import { SUGGESTED_TAGS, parseTags, normalizeTag, allTags, matchesTags } from './tags'
-import { headlessBlockers, blockerSummary, defaultWorkers } from './headless'
+import { headlessBlockers, blockerSummary, defaultWorkers, headlessCategory } from './headless'
 
 const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
 
@@ -3511,6 +3511,11 @@ function App(): React.JSX.Element {
         code: string
         sessionFile?: string
         refs: (string | undefined)[] // F40: secret refs this test needs resolved
+        // F39 fix: the assets the generated spec references by RELATIVE path.
+        // A manual export copies these beside the spec; the parallel runner
+        // never did, so an upload step died on ENOENT …\fixtures\<name>.
+        fixturePaths?: string[]
+        harFile?: string
       }[] = []
       for (const t of tests) {
         const data = await window.api.library.load(t.fileName)
@@ -3553,7 +3558,17 @@ function App(): React.JSX.Element {
             data: cols.length > 0 && rows.length > 0 ? { columns: cols, rows } : undefined
           }),
           sessionFile: data.storageState || undefined,
-          refs: flat.map((s) => s.secretRef)
+          refs: flat.map((s) => s.secretRef),
+          // Absolute source paths — main copies them into the run folder and
+          // repoints the spec at the copies.
+          fixturePaths: Array.from(
+            new Set(
+              flat
+                .filter((s) => s.type === 'upload' && !s.disabled && s.value)
+                .flatMap((s) => (s.value ?? '').split('\n').filter(Boolean))
+            )
+          ),
+          harFile: (data as { har?: string }).har || undefined
         })
       }
       if (safe.length) {
@@ -3574,7 +3589,9 @@ function App(): React.JSX.Element {
             id: s.test.fileName,
             name: s.test.name,
             code: s.code,
-            sessionFile: s.sessionFile
+            sessionFile: s.sessionFile,
+            fixturePaths: s.fixturePaths,
+            harFile: s.harFile
           })),
           parallelWorkers,
           batchEnv
@@ -3604,6 +3621,12 @@ function App(): React.JSX.Element {
                   name: t.name,
                   status: r.ok ? ('passed' as const) : ('failed' as const),
                   error: r.error,
+                  // Parallel results carried NO category, so every headless
+                  // failure fell into "unclassified" — 20 of 20 in Test 12,
+                  // which made the breakdown useless on the runs that best
+                  // predict CI. Playwright's wording differs from ours, so it
+                  // gets its own (deliberately coarser) rules.
+                  category: r.ok ? undefined : headlessCategory(r.error),
                   ranParallel: true
                 }
               ]
@@ -3915,6 +3938,15 @@ function App(): React.JSX.Element {
       lines.push('')
     }
     lines.push('## Tests', '')
+    // Two tests can share a display name in different sections (Daily/… and
+    // E2E/… both hold a "saucedemo.com flow"). Listing the bare name made one
+    // pass and one fail read as the SAME test reported twice with contradictory
+    // results — the report looked broken when it was being accurate. Only the
+    // ambiguous ones get the section, so the common case stays uncluttered.
+    const nameCounts = new Map<string, number>()
+    for (const x of r) nameCounts.set(x.name, (nameCounts.get(x.name) ?? 0) + 1)
+    const sectionOf = (fileName: string): string =>
+      fileName.includes('/') ? fileName.slice(0, fileName.lastIndexOf('/')) : ''
     for (const x of r) {
       const icon = x.status === 'passed' ? '✓' : '✗'
       const tags = [
@@ -3923,8 +3955,10 @@ function App(): React.JSX.Element {
       ]
         .filter(Boolean)
         .join(' · ')
+      const section =
+        (nameCounts.get(x.name) ?? 0) > 1 ? sectionOf(x.fileName) : ''
       lines.push(
-        `- ${icon} **${x.name}**${tags ? ` — ${tags}` : ''}` +
+        `- ${icon} **${x.name}**${section ? ` \`(${section})\`` : ''}${tags ? ` — ${tags}` : ''}` +
           (x.status === 'failed' && x.error ? `\n  - ${x.error}` : '')
       )
     }
@@ -7495,11 +7529,23 @@ function App(): React.JSX.Element {
                       <li key={x.fileName} className="suite-result">
                         <span className={`run-dot ${x.status}`} />
                         <span className="suite-result-name">{x.name}</span>
+                        {/* Only when the name is ambiguous — two sections can
+                            hold a test with the SAME name, and without this one
+                            passing and one failing reads as a contradiction. */}
+                        {r.filter((o) => o.name === x.name).length > 1 &&
+                          x.fileName.includes('/') && (
+                            <span className="suite-result-section">
+                              {x.fileName.slice(0, x.fileName.lastIndexOf('/'))}
+                            </span>
+                          )}
                         {x.healed ? (
                           <span className="healed-tag ai-healed-tag">🤖 {x.healed}</span>
                         ) : null}
                         {x.status === 'failed' && x.category && (
-                          <span className={`category-chip cat-${x.category}`}>
+                          <span
+                            className={`category-chip cat-${x.category}`}
+                            title={CATEGORY_WHY[x.category] ?? ''}
+                          >
                             {CATEGORY_LABELS[x.category] ?? x.category}
                           </span>
                         )}

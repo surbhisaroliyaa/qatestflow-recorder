@@ -250,7 +250,16 @@ interface XBrowserAPI {
   // only path that can — at the cost of being the EXPORTED spec, not the replay
   // engine. The renderer only sends tests that survive that (headlessBlockers).
   runSuite: (
-    specs: { id: string; name: string; code: string; sessionFile?: string }[],
+    specs: {
+      id: string
+      name: string
+      code: string
+      sessionFile?: string
+      // Assets the spec references by relative path; main copies them into the
+      // run folder and repoints the spec at the copies.
+      fixturePaths?: string[]
+      harFile?: string
+    }[],
     workers: number,
     envOverride?: Record<string, string>
   ) => Promise<{

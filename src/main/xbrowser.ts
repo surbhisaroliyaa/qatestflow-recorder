@@ -340,6 +340,38 @@ export interface ParallelSpec {
   code: string
   /** A saved session to copy in, if this test starts logged in. */
   sessionPath?: string
+  /**
+   * Absolute paths of the files this test uploads.
+   *
+   * The exported spec says setInputFiles('fixtures/<name>') — a RELATIVE path
+   * that only resolves when a fixtures/ folder sits beside the spec, which is
+   * what the manual export builds. A parallel run wrote the spec but never
+   * copied the files, so every test with an upload step died on
+   * "ENOENT … \fixtures\<name>" — a real test failing for a reason that had
+   * nothing to do with the test (Surbhi, Test 12).
+   */
+  fixturePaths?: string[]
+  /** Absolute path of this test's HAR, if it replays one (same problem). */
+  harPath?: string
+}
+
+/** Escape a string for use inside a RegExp. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Point a relative asset reference at a real absolute file.
+ *
+ * Rewrites rather than relying on cwd: the spec lives in a temp dir, the run's
+ * cwd is the project root, and a Windows absolute path can't simply be pasted
+ * into the existing single-quoted literal (C:\Users… would read \U as an escape).
+ * JSON.stringify produces a correctly escaped literal, so the whole quoted
+ * token is swapped — matching how a copied session is already passed absolutely.
+ */
+function pointAtAbsolute(code: string, relRef: string, absPath: string): string {
+  const lit = JSON.stringify(absPath)
+  return code.replace(new RegExp(`(['"\`])${reEscape(relRef)}\\1`, 'g'), lit)
 }
 
 export interface ParallelTestResult {
@@ -430,6 +462,35 @@ export async function runSuiteParallel(
         } catch {
           // missing session — run without it; the test fails honestly, exactly
           // as it would in the app if the session file were gone.
+        }
+      }
+      // Uploads: copy each file in and repoint the spec's relative
+      // `fixtures/<name>` at the copy. Per-spec folder so two tests uploading
+      // different files with the SAME basename can't overwrite each other.
+      for (const src of spec.fixturePaths ?? []) {
+        const base = src.split(/[\\/]/).pop() || ''
+        if (!base) continue
+        const dstDir = join(workDir, 'fixtures', slug)
+        const dst = join(dstDir, base)
+        try {
+          await mkdir(dstDir, { recursive: true })
+          await copyFile(src, dst)
+          code = pointAtAbsolute(code, `fixtures/${base}`, dst)
+        } catch {
+          // Leave the relative path alone: the run then fails with a missing
+          // file, which is the truth — the source file really is gone.
+        }
+      }
+      // HAR: same shape of problem, same fix.
+      if (spec.harPath) {
+        const base = spec.harPath.split(/[\\/]/).pop() || ''
+        const dst = join(workDir, 'hars', `${slug}-${base}`)
+        try {
+          await mkdir(join(workDir, 'hars'), { recursive: true })
+          await copyFile(spec.harPath, dst)
+          code = pointAtAbsolute(code, `hars/${base}`, dst)
+        } catch {
+          // as above — a missing archive should fail honestly
         }
       }
       await writeFile(join(specDir, `${slug}.spec.ts`), code, 'utf-8')

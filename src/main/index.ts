@@ -4685,7 +4685,17 @@ function createWindow(): void {
     'xbrowser:runSuite',
     async (
       _event,
-      specs: { id: string; name: string; code: string; sessionFile?: string }[],
+      specs: {
+        id: string
+        name: string
+        code: string
+        sessionFile?: string
+        // F39 fix: the files an upload step needs, and the test's HAR. Without
+        // these the generated spec's relative `fixtures/…` / `hars/…` paths
+        // point at nothing and the test fails for a reason of ours, not its own.
+        fixturePaths?: string[]
+        harFile?: string
+      }[],
       workers: number,
       envOverride?: Record<string, string>
     ) => {
@@ -4703,7 +4713,10 @@ function createWindow(): void {
         code: s.code,
         sessionPath: s.sessionFile
           ? join(libraryDir(), '_sessions', s.sessionFile)
-          : undefined
+          : undefined,
+        fixturePaths: s.fixturePaths?.length ? s.fixturePaths : undefined,
+        // A HAR is stored by bare filename in the library's _hars/, like a session.
+        harPath: s.harFile ? join(libraryDir(), '_hars', s.harFile) : undefined
       }))
       return runSuiteParallel(prepared, workers, envVars)
     }
