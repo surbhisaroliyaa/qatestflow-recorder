@@ -1318,6 +1318,37 @@ function deviceUse(
   }
 }
 
+// Day 20 named each row's test after its first column, built at RUNTIME as a
+// template literal. Two rows with the same value in that column therefore
+// produced two identical test titles — and Playwright treats a duplicate title
+// as a fatal LOAD error that aborts the entire run, not just that file. One
+// negative-login table with `standard_user` twice took down all 12 tests in the
+// batch, every one reported as failed (Surbhi, Test 7).
+//
+// So titles are computed HERE, where every row is visible at once, and a repeat
+// gets its row number appended. An empty cell (a legitimate negative case —
+// "username is required") becomes "(empty)" rather than a title that trails off
+// after the dash.
+//
+// This lives in ONE place because the first fix only reached the inline
+// exporter: the page-object exporter kept emitting the runtime template literal,
+// so exporting the SAME table as a POM still produced the fatal duplicate. Both
+// generators now call this, so they cannot drift apart again.
+export function dataRowTitles(
+  base: string,
+  rows: Record<string, string>[],
+  disc: string
+): string[] {
+  const seen = new Map<string, number>()
+  return rows.map((r, i) => {
+    const cell = (r[disc] ?? '').trim()
+    const label = cell === '' ? '(empty)' : cell
+    const n = (seen.get(label.toLowerCase()) ?? 0) + 1
+    seen.set(label.toLowerCase(), n)
+    return `${base} — ${label}${n > 1 ? ` (row ${i + 1})` : ''}`
+  })
+}
+
 export function generatePlaywrightTest(
   steps: RecorderStep[],
   options?: {
@@ -1635,14 +1666,7 @@ export function generatePlaywrightTest(
     // repeat gets its row number appended. An empty cell (a legitimate negative
     // case — "username is required") becomes "(empty)" rather than a title that
     // trails off after the dash.
-    const seenTitles = new Map<string, number>()
-    const titles = rows.map((r, i) => {
-      const cell = (r[disc] ?? '').trim()
-      const label = cell === '' ? '(empty)' : cell
-      const n = (seenTitles.get(label.toLowerCase()) ?? 0) + 1
-      seenTitles.set(label.toLowerCase(), n)
-      return `${base} — ${label}${n > 1 ? ` (row ${i + 1})` : ''}`
-    })
+    const titles = dataRowTitles(base, rows, disc)
     const titleList = titles.map((t) => `  ${quote(t)}`).join(',\n')
     // Re-indent the body one level deeper (inside the for-loop). Indentation is
     // cosmetic to Playwright; this just keeps the file readable.
@@ -1949,6 +1973,13 @@ export function generatePageObjectTest(
   let bufferUsesData = false
   let lastActionLabel = ''
   let actionsSeq = 0
+  // F37: how deeply nested in loops / if-blocks the CURRENT spec line is. The
+  // control flow lives in the SPEC, wrapping the `await app.method()` calls;
+  // page-object methods stay flat, so each method is still one readable intent.
+  // Emitting it here (rather than not at all) is what makes a POM export of a
+  // looping test mean the same thing the inline export means.
+  let depth = 0
+  const ind = (): string => '  '.repeat(depth + 1)
   const flush = (): void => {
     if (!buffer.length) return
     const base = lastActionLabel ? camelName(lastActionLabel) : `actions${++actionsSeq}`
@@ -1958,23 +1989,70 @@ export function generatePageObjectTest(
     used.add(name)
     methods.push({ name, body: buffer, usesData: bufferUsesData })
     // A data-using method receives the row: `await app.login(data)`.
-    specBody.push(`  await app.${name}(${bufferUsesData ? 'data' : ''})`)
+    specBody.push(`${ind()}await app.${name}(${bufferUsesData ? 'data' : ''})`)
     buffer = []
     bufferUsesData = false
     lastActionLabel = ''
   }
 
   let firstNavSeen = false
+  let loopSeq = 0
   for (const step of enabled) {
+    // === F37: loops + branching, emitted as REAL control flow ===
+    // Every control marker flushes the action buffer first, so a method never
+    // straddles a block boundary (half its steps inside the loop, half outside).
+    if (isControlStep(step)) {
+      if (step.type === 'repeat') {
+        flush()
+        const v = `i${depth}`
+        if (step.repeatKind === 'each' && step.selector) {
+          const items = `items${loopSeq++}`
+          const sel = (idPolicy.portable && portableTestIdSelector(step)) || step.selector
+          specBody.push(`${ind()}// ${stepText(step)}`)
+          specBody.push(`${ind()}const ${items} = app.page.${sel}`)
+          // Count ONCE up front, matching the app and the inline export: a live
+          // count could loop forever if the body adds matching elements.
+          specBody.push(`${ind()}const ${items}Count = await ${items}.count()`)
+          specBody.push(`${ind()}for (let ${v} = 0; ${v} < ${items}Count; ${v}++) {`)
+        } else {
+          const n = parseInt(step.value ?? '1', 10)
+          const times = Number.isFinite(n) && n > 0 ? n : 1
+          specBody.push(`${ind()}// ${stepText(step)}`)
+          specBody.push(`${ind()}for (let ${v} = 0; ${v} < ${times}; ${v}++) {`)
+        }
+        depth++
+        continue
+      }
+      if (step.type === 'if') {
+        flush()
+        specBody.push(`${ind()}// ${stepText(step)}`)
+        specBody.push(`${ind()}if (${conditionExpr(step, 'app.page', idPolicy.portable)}) {`)
+        depth++
+        continue
+      }
+      if (step.type === 'else') {
+        flush()
+        depth = Math.max(0, depth - 1)
+        specBody.push(`${ind()}} else {`)
+        depth++
+        continue
+      }
+      if (step.type === 'endRepeat' || step.type === 'endIf') {
+        flush()
+        depth = Math.max(0, depth - 1)
+        specBody.push(`${ind()}}`)
+        continue
+      }
+    }
     if (step.type === 'navigate') {
       flush()
       if (!firstNavSeen) {
         firstNavSeen = true
-        specBody.push('  await app.goto()')
+        specBody.push(`${ind()}await app.goto()`)
       } else {
         let url = step.url ?? ''
         if (baseURL && url.startsWith(baseURL)) url = url.slice(baseURL.length) || '/'
-        specBody.push(`  await app.page.goto(${quote(url)})`)
+        specBody.push(`${ind()}await app.page.goto(${quote(url)})`)
       }
       continue
     }
@@ -1991,16 +2069,22 @@ export function generatePageObjectTest(
         columns,
         idPolicy.portable
       )
-      if (line) specBody.push(step.optional ? wrapOptional(line, '  ') : `  ${line}`)
+      if (line) specBody.push(step.optional ? wrapOptional(line, ind()) : `${ind()}${line}`)
       continue
     }
-    // F13/F14: a page-level accessibility or performance check — like an
-    // assert, it lives in the spec (where `expect`/AxeBuilder are imported),
-    // not a page-object method.
-    if (step.type === 'a11y' || step.type === 'perf') {
+    // F13/F14/F15: a page-level accessibility, performance or VISUAL check —
+    // like an assert, it lives in the spec (where `expect`/AxeBuilder are
+    // imported), not a page-object method.
+    //
+    // `snapshot` used to be missing from this list. A snapshot step carries no
+    // selector, so it fell through to the `if (!step.selector) continue` below
+    // and was dropped WITHOUT A TRACE — no toHaveScreenshot, not even a comment.
+    // A visual-regression test exported as a page object therefore did no visual
+    // checking at all and reported green. Found by diffing inline vs POM output.
+    if (step.type === 'a11y' || step.type === 'perf' || step.type === 'snapshot') {
       flush()
       const line = actionFor(step, baseURL, 'app.page', undefined, columns, idPolicy.portable)
-      if (line) specBody.push(`  ${line}`)
+      if (line) specBody.push(`${ind()}${line}`)
       continue
     }
     // F24: an api step uses the `request` fixture (in the spec's test signature),
@@ -2009,7 +2093,7 @@ export function generatePageObjectTest(
       flush()
       const line = actionFor(step, baseURL, 'app.page', undefined, columns, idPolicy.portable)
       if (line) {
-        specBody.push(`  ${line}`)
+        specBody.push(`${ind()}${line}`)
         // F24.4: remember WHICH emitted line this teardown step became, so it can be
         // hoisted into a `finally`. (The POM lines carry no `// stepText` comment, so
         // the text-matching fallback would never find them — which is exactly why the
@@ -2048,6 +2132,15 @@ export function generatePageObjectTest(
     }
   }
   flush()
+  // F37: a block the author never closed. Same reading as the inline export —
+  // close to the end of the test, so every remaining step stays inside the
+  // block, and SAY SO in the file so nobody mistakes it for the author's own
+  // structure. Without this the spec would be missing a `}` and fail to load,
+  // which in Playwright takes down the entire run, not just this file.
+  while (depth > 0) {
+    depth--
+    specBody.push(`${ind()}} // ⚠ auto-closed — this block had no matching end marker`)
+  }
 
   // F1 (HAR): serve saved responses before anything runs (deterministic replay).
   if (options?.har) {
@@ -2096,7 +2189,15 @@ export function generatePageObjectTest(
   const hasPerf = enabled.some((s) => s.type === 'perf')
   const needsRequest = enabled.some((s) => s.type === 'api')
   const specFixtures = needsRequest ? '{ page, request }' : '{ page }'
-  const hasAssert = enabled.some((s) => s.type === 'assert') || hasA11y || hasPerf || needsRequest
+  // `snapshot` counts too — a test whose only check is a 📸 visual snapshot
+  // still emits `await expect(page).toHaveScreenshot(...)` and so still needs
+  // `expect` imported. (It was absent from this list back when the POM export
+  // dropped snapshot steps entirely, so the gap never showed.)
+  const hasAssert =
+    enabled.some((s) => s.type === 'assert' || s.type === 'snapshot') ||
+    hasA11y ||
+    hasPerf ||
+    needsRequest
   // F36: keep POM/inline parity — the same device reaches both exports.
   const pomDev = deviceUse(options?.device, options?.viewport)
   const importNames = ['test', hasAssert ? 'expect' : null, pomDev.usesPreset ? 'devices' : null]
@@ -2137,9 +2238,12 @@ export function generatePageObjectTest(
     const rows = options!.data!.rows
     const dataset = rows.map((r) => `  ${rowLiteral(r, columns)}`).join(',\n')
     const disc = columns[0]
-    const discRef = isIdent(disc) ? `data.${disc}` : `data[${quote(disc)}]`
-    const titleBase = (options?.name || 'recorded flow').replace(/[`\\$]/g, '\\$&')
-    const title = '`' + titleBase + ' — ${' + discRef + '}`'
+    // Pre-computed, NOT a runtime template literal — see dataRowTitles(). The
+    // inline exporter was fixed for this in Test 7; this path was missed, so a
+    // POM export of a table with a repeated (or empty) first column still
+    // emitted duplicate titles and took down the whole Playwright run.
+    const titles = dataRowTitles(options?.name || 'recorded flow', rows, disc)
+    const titleList = titles.map((t) => `  ${quote(t)}`).join(',\n')
     // The per-row body (build the page object, then the recorded calls), indented
     // one level deeper to sit inside the for-loop's test().
     // F24.4: the 🧹 guarantee has to survive a POM export too — it used to be
@@ -2155,8 +2259,11 @@ export function generatePageObjectTest(
     const spec =
       `${importLines}${use}\n` +
       `const dataset = [\n${dataset}\n]\n\n` +
-      `for (const data of dataset) {\n` +
-      `  test(${title}${tagArg}, async (${specFixtures}) => {\n` +
+      `// One test per row. Titles are pre-computed so no two can collide — Playwright\n` +
+      `// aborts the whole run on a duplicate test title, not just the offending file.\n` +
+      `const titles = [\n${titleList}\n]\n\n` +
+      `for (const [i, data] of dataset.entries()) {\n` +
+      `  test(titles[i]${tagArg}, async (${specFixtures}) => {\n` +
       `${runtimeTokenPreamble(enabled, '    ')}${inner}\n` +
       `  })\n` +
       `}\n`
