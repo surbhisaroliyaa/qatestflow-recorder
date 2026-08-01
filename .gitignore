@@ -62,6 +62,9 @@ playwright/.cache/
 /Screenshot *.png
 /Recording *.mp4
 *.mp4
+# Proof captures saved under some other name ("back ground goes black.png").
+# Same class as the above: evidence while reviewing, never source.
+/*.png
 
 # --- Local-only learning docs (kept on disk, not pushed to GitHub) ---
 /docs/
@@ -78,3 +81,11 @@ ehthumbs.db
 
 # Local test fixtures (Day 15.5 shadow DOM etc.) — not shipped
 fixtures/
+
+# --- Test-audit harness (.qa-audit/) ---
+# The scripts that drive the REAL exporters over the REAL saved-test library to
+# check inline-vs-page-object parity, plus the specs they generate and the
+# Playwright report. Kept on disk (it is how the export bugs were found and how
+# they get re-checked), but never committed: the generated specs are throwaway
+# and the reports are machine-specific. Same treatment as docs/.
+.qa-audit/
