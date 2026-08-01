@@ -100,11 +100,27 @@ export function headlessCategory(error: string | undefined): FailureCategory {
   const e = error ?? ''
   if (!e) return 'unknown'
 
-  // Our own pre-pass refusing a malformed test — an authoring problem.
-  if (/Test structure problem|is never closed/i.test(e)) return 'authoring'
+  // Our own pre-pass refusing a malformed test — an authoring problem. A spec
+  // that never ran at all belongs here too: it did not compile, which is a
+  // problem with what was generated, not with the site under test.
+  if (/Test structure problem|is never closed|did not run/i.test(e)) return 'authoring'
+
+  // A data-driven run reports an aggregate ("5/5 rows failed — e.g. Row 1: …")
+  // whose real signal is the example after the dash. Classify THAT, or every
+  // data-driven failure lands in `unknown` no matter what actually went wrong.
+  const rowExample = /rows? failed\s*—\s*e\.g\.\s*(.+)$/is.exec(e)
+  if (rowExample) {
+    const inner = headlessCategory(rowExample[1])
+    if (inner !== 'unknown') return inner
+  }
 
   // The run never reached the site, or a fixture/HAR/file was missing.
-  if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOENT|ERR_FILE_NOT_FOUND|net::/i.test(e)) {
+  // "could not be reached" is our own API-step wording for the same thing —
+  // without it, every unreachable-API failure read as `unknown`.
+  if (
+    /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOENT|ERR_FILE_NOT_FOUND|net::/i.test(e) ||
+    /could not be reached/i.test(e)
+  ) {
     return 'environment'
   }
 
@@ -128,6 +144,17 @@ export function headlessCategory(error: string | undefined): FailureCategory {
   // than anything else — but say `timing` only when Playwright names a wait.
   if (/Test timeout of \d+ms exceeded/i.test(e)) return 'stale-selector'
   if (/Timeout .*exceeded|waiting for/i.test(e)) return 'timing'
+
+  // A response/latency budget that was missed. The contract held; only the
+  // clock lost. `toBe\b` above deliberately does not catch toBeLessThanOrEqual.
+  if (/response time expect\(|toBeLessThanOrEqual|over the \d+\s*ms/i.test(e)) return 'timing'
+
+  // Our OWN wording can still reach here inside a data-driven aggregate, whose
+  // example half is phrased by the in-app engine ("…e.g. Row 1: Expected URL to
+  // contain …"). Recognising it costs nothing and is the difference between a
+  // classified row failure and an `unknown` one.
+  if (/Element not found|No reliable selector/i.test(e)) return 'stale-selector'
+  if (/^Expected |Expected (URL|element|page|text)/i.test(e)) return 'stale-data'
 
   return 'unknown'
 }

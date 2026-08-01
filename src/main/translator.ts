@@ -189,11 +189,24 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
     )
   }
 
+  // A data-driven run reports an aggregate ("5/5 rows failed — e.g. Row 1: …").
+  // The real signal is the example after the dash; classify THAT, or every
+  // data-driven failure reads as `unknown` however clear its actual cause.
+  const rowExample = /rows? failed\s*—\s*e\.g\.\s*(.+)$/is.exec(err)
+  if (rowExample) {
+    const inner = classifyOne({ ...ev, error: rowExample[1], failures: undefined })
+    if (inner.category !== 'unknown') return inner
+  }
+
   // Couldn't reach the site at all — nothing about the app or test ran.
+  // ERR_FILE_NOT_FOUND belongs here too: a local fixture the test points at is
+  // gone, so nothing ran. It was missing from this list and fell through.
   if (
-    /ERR_(NAME_NOT_RESOLVED|CONNECTION_REFUSED|CONNECTION_TIMED_OUT|TIMED_OUT|INTERNET_DISCONNECTED|CERT_|ADDRESS_UNREACHABLE)/.test(
+    /ERR_(NAME_NOT_RESOLVED|CONNECTION_REFUSED|CONNECTION_TIMED_OUT|TIMED_OUT|INTERNET_DISCONNECTED|CERT_|ADDRESS_UNREACHABLE|FILE_NOT_FOUND)/.test(
       err
-    )
+    ) ||
+    // Our own API-step wording for the same condition.
+    /API request failed .*could not be reached/i.test(err)
   ) {
     return finish(
       'environment',
@@ -270,6 +283,94 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
       'stale-data',
       `The dropdown for "${ev.stepText}" no longer contains the recorded option (${err}). Either the application's option list changed (app side) or the recorded choice is outdated test data (test side).`,
       'Open the page, look at the dropdown: if the option should exist, file the bug; if it was renamed, edit the step value.'
+    )
+  }
+
+  // === Failures from features that landed AFTER this rule engine was written ===
+  // The rules above only ever knew the recorder's own element/assertion errors.
+  // F24 (API), F15 (visual) and the raw Playwright strings that come back from a
+  // headless/parallel run all fell straight through to `unknown` — 27 of 72
+  // recorded failures (37%) in a real library, which makes the suite report's
+  // failures-by-category band useless exactly when the suite is big enough to
+  // need it. Each branch below reads the same evidence the rules above do.
+
+  // F24: an API step that got a RESPONSE but the checks on it didn't hold. A 5xx
+  // is the service failing; anything else is the response disagreeing with what
+  // was recorded — same distinction as an assertion, so same categories.
+  if (err.includes('API check failed')) {
+    const status = /responded (\d{3})/.exec(err)?.[1]
+    const serverSide = status ? /^5/.test(status) : false
+    if (serverSide) {
+      return finish(
+        'app-bug',
+        'app-bug',
+        `The API step got HTTP ${status} back (${err}). A 5xx is the service failing on its own terms — the test asked a legitimate question and the server errored answering it.`,
+        'Check the service logs for that endpoint; this is a backend bug, not a test defect.'
+      )
+    }
+    if (/took \d+ ms, over the/.test(err) || /response time expect\(/.test(err)) {
+      return finish(
+        'timing',
+        'timing',
+        `The API responded correctly but too slowly: ${err}. The contract held; only the budget was missed.`,
+        'Decide whether the budget is realistic for this endpoint under normal load, then either raise it or investigate the slowdown.'
+      )
+    }
+    return finish(
+      status && /^[23]/.test(status) ? 'app-bug' : 'unknown',
+      'stale-data',
+      `The API answered (HTTP ${status ?? '—'}) but its body did not match what was recorded: ${err}. The endpoint is up and reachable — the DATA is what differs.`,
+      'Compare the response against the recorded expectation: if the API legitimately changed shape, update the check; if not, this is a backend bug.'
+    )
+  }
+
+  // F15: a visual snapshot that could not even be compared, because the page
+  // geometry moved. That is a layout change, not a pixel diff.
+  if (err.includes('Visual snapshot')) {
+    return finish(
+      /size changed/.test(err) ? 'app-bug' : 'unknown',
+      'stale-data',
+      `The visual check could not confirm the page still looks right: ${err}. A size change means the layout itself moved, so a pixel comparison would be meaningless — the baseline no longer describes this page.`,
+      'Open the page and compare it with the baseline: if the new layout is correct, re-take the baseline; if not, this is a layout regression.'
+    )
+  }
+
+  // A raw JavaScript error reaching us as the step's failure means the page's own
+  // script broke, or a token never got substituted before the code ran.
+  if (/^(ReferenceError|TypeError|SyntaxError):/.test(err)) {
+    const undef = /^ReferenceError: (\w+) is not defined/.exec(err)
+    if (undef) {
+      return finish(
+        'test-bug',
+        'authoring',
+        `The generated code referenced \`${undef[1]}\`, which does not exist at run time (${err}). That is a placeholder or data column that never got substituted — the application never got a chance to be wrong.`,
+        `Check that "${undef[1]}" is a real data column or environment value on this test, and that the step still carries its {{token}}.`
+      )
+    }
+    return finish(
+      'app-bug',
+      'app-bug',
+      `The page's own JavaScript threw during this step: ${err}. The test did what it was told; the application errored.`,
+      'Reproduce in a browser with devtools open — the stack in the console points at the failing script.'
+    )
+  }
+
+  // Playwright's own timeout wording, which reaches us from headless / parallel
+  // runs (the in-app engine phrases its own waits differently).
+  if (/Timeout .*exceeded|Test timeout of \d+ms exceeded|exceeded while waiting/i.test(err)) {
+    if (serverErrors.length || hasJsErrors) {
+      return finish(
+        'app-bug',
+        'app-bug',
+        `The step ran out of time waiting — and the page was broken underneath it (${serverErrors.length} server error(s), ${ev.consoleErrors.length} JS error(s)). It most likely waited for something the application failed to render.`,
+        'Fix the underlying error first; the timeout is a symptom, not the cause.'
+      )
+    }
+    return finish(
+      'timing',
+      'timing',
+      `The step ran out of time (${err}) with no server or JS errors on the page. Either the app was genuinely slower than the allowed wait this run, or the thing being waited for never arrives.`,
+      'Re-run to see if it is intermittent. If it repeats, check the wait actually describes something that appears — a wait for an element that never comes always ends this way.'
     )
   }
 
