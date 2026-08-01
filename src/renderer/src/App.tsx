@@ -4549,7 +4549,19 @@ function App(): React.JSX.Element {
   // a background run can't fight their foreground work.
   useEffect(() => {
     const tick = async (): Promise<void> => {
-      if (monitorBusyRef.current || isRecording || isReplaying || isPicking) return
+      // `isReplaying` is only true DURING each individual runOnce(), and a suite
+      // clears it between tests — so a 30-second tick landing in that gap used
+      // to start a headless monitor run in the middle of a Run All. Guard on the
+      // whole suite/parallel batch, not just the single replay inside it.
+      if (
+        monitorBusyRef.current ||
+        isRecording ||
+        isReplaying ||
+        isPicking ||
+        suiteRun?.running ||
+        parallelRunning
+      )
+        return
       const now = Date.now()
       const due = monitors.find(
         (m) =>
@@ -4561,7 +4573,7 @@ function App(): React.JSX.Element {
     const id = window.setInterval(tick, 30000)
     return () => window.clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monitors, isRecording, isReplaying, isPicking])
+  }, [monitors, isRecording, isReplaying, isPicking, suiteRun?.running, parallelRunning])
 
   // Save a 1-based range of the current steps as a named block (default: all).
   // The range is FLATTENED first (any linked block inside it becomes its steps)
