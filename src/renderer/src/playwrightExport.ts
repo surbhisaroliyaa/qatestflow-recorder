@@ -187,6 +187,77 @@ function isIdent(name: string): boolean {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
 }
 
+/**
+ * Environment variable names the OPERATING SYSTEM already defines.
+ *
+ * `{{env:USERNAME}}` exports to `process.env.USERNAME`, and on Windows that is
+ * ALWAYS set — to the logged-in account name. So the `?? ''` fallback, which
+ * exists to catch an unset variable, can never fire: the spec silently fills the
+ * OS username into a login form and the test fails as "wrong credentials", or
+ * worse passes because nothing asserts afterwards. Verified: an exported
+ * SauceDemo login typed `samee` and the run went green while the login failed.
+ *
+ * CI is not safer — GitHub Actions and most runners set USERNAME/USER too, so it
+ * becomes the classic "works locally, breaks in CI" with nothing pointing at the
+ * cause.
+ *
+ * Names are compared case-insensitively: Windows env vars are case-insensitive,
+ * and `{{env:username}}` reads the same variable as `{{env:USERNAME}}`.
+ */
+const OS_ENV_NAMES = new Set([
+  'username',
+  'user',
+  'userprofile',
+  'userdomain',
+  'home',
+  'homepath',
+  'homedrive',
+  'path',
+  'pathext',
+  'temp',
+  'tmp',
+  'os',
+  'computername',
+  'hostname',
+  'shell',
+  'lang',
+  'pwd',
+  'logname',
+  'appdata',
+  'localappdata',
+  'programfiles',
+  'systemroot',
+  'windir',
+  'processor_architecture',
+  'number_of_processors',
+  'session_name'
+])
+
+/** Does this `{{env:NAME}}` collide with a variable the OS already sets? */
+export function collidesWithOsEnv(name: string): boolean {
+  return OS_ENV_NAMES.has(name.trim().toLowerCase())
+}
+
+/**
+ * Every `{{env:NAME}}` in these steps that collides with an OS variable.
+ * Drives the export-time warning; the emitted spec also guards at runtime.
+ */
+export function osEnvCollisions(steps: RecorderStep[]): string[] {
+  const found = new Set<string>()
+  for (const s of steps) {
+    for (const field of [s.value, s.url, s.apiHeaders, s.apiBody, s.apiChecks, s.apiExpectBody]) {
+      if (typeof field !== 'string') continue
+      for (const t of extractTokens(field)) {
+        if (t.startsWith('env:')) {
+          const v = t.slice('env:'.length).trim()
+          if (collidesWithOsEnv(v)) found.add(v)
+        }
+      }
+    }
+  }
+  return [...found]
+}
+
 // === Data-driven values (Day 20) ===
 // A recognized {{token}} becomes a JS reference; everything else is a literal.
 //   {{env:NAME}}  → process.env.NAME ?? ''   (a real secret, never inlined)
@@ -195,6 +266,14 @@ function isIdent(name: string): boolean {
 function tokenRef(name: string, columns: string[]): string | null {
   if (name.startsWith('env:')) {
     const v = name.slice('env:'.length).trim()
+    // A name the OS also defines reads the OS value, not the user's — see
+    // OS_ENV_NAMES. Read the QA_-prefixed variable instead, which nothing else
+    // sets; the preamble throws when it's missing, so this can't fall back to
+    // the ambiguous one and silently type an OS string into a form.
+    if (collidesWithOsEnv(v)) {
+      const safe = `QA_${v}`
+      return isIdent(safe) ? `process.env.${safe} ?? ''` : `process.env[${quote(safe)}] ?? ''`
+    }
     return isIdent(v) ? `process.env.${v} ?? ''` : `process.env[${quote(v)}] ?? ''`
   }
   // F24.1: the runtime tokens the app resolves mid-run must have an equivalent in
@@ -256,6 +335,31 @@ export function runtimeTokenPreamble(steps: RecorderStep[], indent = '  '): stri
   if (use.saved) {
     lines.push(`${indent}// Values lifted out of API responses (the server invents them).`)
     lines.push(`${indent}const saved: Record<string, string> = {}`)
+  }
+  // A {{env:…}} name the OS also defines is a trap the `?? ''` fallback cannot
+  // catch: the variable IS set, just to the wrong thing (on Windows USERNAME is
+  // the logged-in account name). The spec then fills that into the form and the
+  // run either fails as "wrong credentials" or — with no assertion after it —
+  // passes outright. Verified on a real export: it typed `samee` and went green.
+  //
+  // Nothing at runtime can tell "the OS set this" from "the user set this to the
+  // same string", so this guard does NOT claim to. It requires an explicit,
+  // app-scoped variable (QA_<NAME>) and refuses to fall back to the ambiguous
+  // one — turning a silent wrong value into a one-line instruction. The export
+  // also warns at authoring time, which is where the name can actually be fixed.
+  const collisions = osEnvCollisions(steps)
+  if (collisions.length) {
+    lines.push(
+      `${indent}// ⚠ ${collisions.join(', ')} ${collisions.length === 1 ? 'is also an OS' : 'are also OS'} environment variable${collisions.length === 1 ? '' : 's'} (on Windows USERNAME is your`,
+      `${indent}// login name), so reading it directly can silently pick up the OS value. This test`,
+      `${indent}// requires the QA_-prefixed name instead. Rename the {{env:…}} token in the app to`,
+      `${indent}// something app-specific to drop this guard entirely.`,
+      `${indent}for (const name of ${JSON.stringify(collisions)}) {`,
+      `${indent}  if (!process.env['QA_' + name]) {`,
+      `${indent}    throw new Error(\`Set QA_\${name} — \${name} on its own collides with an OS variable.\`)`,
+      `${indent}  }`,
+      `${indent}}`
+    )
   }
   return lines.length ? lines.join('\n') + '\n\n' : ''
 }
@@ -836,7 +940,24 @@ function dialogHandler(step: RecorderStep, pageVar: string): string {
  */
 export function repairSelector(sel: string | undefined): string | undefined {
   if (!sel) return sel
-  return sel.replace(
+  const s = sel.trim()
+  if (!s) return sel
+  // A RAW selector where a locator expression belongs.
+  //
+  // `selector` is always an expression appended to `page.` — `getByTestId('x')`,
+  // `locator('#y')`. F18 (AI step) and F21 (Bug check) stored the candidate's raw
+  // CSS instead, so the spec compiled to `page.[data-test="username"]`: a
+  // SyntaxError that aborts the ENTIRE spec before any test runs. The app's own
+  // replay parses selectors leniently, so those steps replayed GREEN in-app while
+  // never having produced runnable Playwright — export, headless, parallel,
+  // monitors and cross-browser all died on them.
+  //
+  // Fixed at the source, but kept here too: drafts and tests already carry these,
+  // and self-heal / re-pick / a hand-edited selector field can reintroduce one.
+  // Anything that isn't a method call is a raw selector — `locator()` accepts
+  // CSS, XPath and `text=` engines alike, so wrapping is always correct.
+  if (!/^[A-Za-z_$][\w$]*\s*\(/.test(s)) return `locator(${quote(s)})`
+  return s.replace(
     /^(getBy(?:TestId|Text|Label|Placeholder|AltText|Title))\(\s*([A-Za-z0-9_\-.:#[\] ]+?)\s*\)/,
     (_m, fn: string, arg: string) => `${fn}(${quote(arg)})`
   )

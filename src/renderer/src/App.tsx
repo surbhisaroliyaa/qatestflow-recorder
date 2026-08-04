@@ -5,7 +5,8 @@ import {
   generateCiWorkflow,
   generatePlaywrightConfig,
   generateEdgeSuite,
-  stepText
+  stepText,
+  osEnvCollisions
 } from './playwrightExport'
 import { generateBugReport, bugReportFileName, jiraSummary } from './bugReport'
 import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
@@ -33,6 +34,7 @@ import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
 // F37: loops + branching. Shared with the replay engine so the step list, the
 // export and the run all agree on how markers pair up.
 import { analyzeControlFlow, isControlStep, type ConditionKind } from '../../shared/controlFlow'
+import { saveSpecWarning } from '../../shared/apiSaveSpec'
 import { SUGGESTED_TAGS, parseTags, normalizeTag, allTags, matchesTags } from './tags'
 import { headlessBlockers, blockerSummary, defaultWorkers, headlessCategory } from './headless'
 
@@ -264,6 +266,11 @@ function ParallelRunBanner({
 
 function App(): React.JSX.Element {
   const [urlInput, setUrlInput] = useState('')
+  // The page the embedded browser is ACTUALLY on, as a ref. `urlInput` is the
+  // address-bar text — the user can type in it without navigating — and a state
+  // value read inside the edge-case loop's async closure would be stale anyway.
+  // F20 reads this after each variant to learn where that variant ended up.
+  const liveUrlRef = useRef('')
   const [hasNavigated, setHasNavigated] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [steps, setSteps] = useState<RecorderStep[]>([])
@@ -271,7 +278,16 @@ function App(): React.JSX.Element {
   const [tabs, setTabs] = useState<TabInfo[]>([])
   // The generated Playwright code shown in the export modal (null = closed).
   const [exportCode, setExportCode] = useState<string | null>(null)
+  // {{env:…}} names the OS also defines (USERNAME, PATH, TEMP…). Warned about in
+  // the export modal, where the token can still be renamed.
+  const [exportEnvWarning, setExportEnvWarning] = useState<string[]>([])
   const [savedPath, setSavedPath] = useState<string | null>(null)
+  // Files an export wrote BESIDES the spec (page class, CI workflow, config).
+  // The save dialog names only the spec, so without this they look unwritten.
+  const [savedExtras, setSavedExtras] = useState<string[]>([])
+  // A different page class already lived at that path — the class name comes from
+  // the TEST name, so two same-named tests silently replace each other's.
+  const [savedPageOverwritten, setSavedPageOverwritten] = useState(false)
   // Day 17 (page-object export): toggle between inline and full POM output.
   const [poExport, setPoExport] = useState(false)
   // F33 (CI export): also write a GitHub Actions workflow beside the spec.
@@ -607,6 +623,7 @@ function App(): React.JSX.Element {
   const [draftResult, setDraftResult] = useState<{
     title: string
     steps: RecorderStep[]
+    guessed: number[] // navigate steps whose URL was guessed — shown ⚠ for review
   } | null>(null)
   // F35 (Mock Studio): edit a captured API response into a scenario mock (force a
   // 500, empty a list, flip a flag) and export the Playwright route/fulfill. The
@@ -669,6 +686,11 @@ function App(): React.JSX.Element {
     currentLabel: string
     running: boolean
     hasAssertion: boolean // did the test have a success check? (drives the verdict)
+    // The user's explicit success rule ('' = judge automatically), and the page
+    // the flow starts on — the automatic verdict needs it to know whether
+    // "success moves the page" is even true for this app.
+    successUrl: string
+    startUrl: string
     results: {
       case: EdgeCase
       ok: boolean
@@ -676,8 +698,12 @@ function App(): React.JSX.Element {
       error?: string
       screenshotPath?: string
       traceId?: string // F20: each variant keeps its OWN run recording
+      finalUrl?: string // where this variant ended — drives the inferred verdict
     }[]
   } | null>(null)
+  // F20: an explicit success rule, typed in the 🧨 modal. Empty = judge
+  // automatically (the test's ✓ check, else the baseline's final URL).
+  const [edgeSuccessUrl, setEdgeSuccessUrl] = useState('')
   // Day 11.5 — sections (suites). The section list, the current test's
   // section, and the save panel's chosen/typed section.
   const [suites, setSuites] = useState<string[]>([])
@@ -1205,6 +1231,7 @@ function App(): React.JSX.Element {
     const unsubscribe = window.api.browser.onUrlChange((url) => {
       if (!url.startsWith('data:')) {
         setUrlInput(url)
+        liveUrlRef.current = url
         setHasNavigated(true)
         // A navigation reloads the page — and with it, the observer's pick
         // flag. Whatever we were pointing at no longer exists; end pick mode.
@@ -1883,6 +1910,11 @@ function App(): React.JSX.Element {
     // Live-link: expand linked blocks to their current steps so the generated
     // code contains the real actions (a block is just steps in the export).
     const flat = await expandForRun(steps)
+    // Surface {{env:…}} names the OS also defines, HERE — at authoring time, the
+    // only moment the name can actually be changed. `{{env:USERNAME}}` reads the
+    // Windows account name, so the spec fills that into the form and reports a
+    // credentials failure (or passes, if nothing asserts after it).
+    setExportEnvWarning(osEnvCollisions(flat))
     const opts = {
       name: testName || undefined,
       baseURL: baseURL || deriveBaseURL(flat) || undefined,
@@ -1920,6 +1952,10 @@ function App(): React.JSX.Element {
 
   const handleExport = (): void => {
     setSavedPath(null)
+    // Clear the companions too — a stale "+ pages/OldPage.ts" under a fresh
+    // export would name a file this export never wrote.
+    setSavedExtras([])
+    setSavedPageOverwritten(false)
     showExport(poExport)
   }
 
@@ -1936,8 +1972,22 @@ function App(): React.JSX.Element {
     // F33: an opt-in GitHub Actions workflow that runs the tests on every PR.
     // Wire any {{env:NAME}} the export uses (emitted as process.env.NAME) to repo
     // secrets so they're never hard-coded.
+    //
+    // BOTH files, not just the spec. In Page Object mode every page interaction —
+    // and therefore every credential — moves into the page CLASS, so scanning
+    // only `exportCode` found `BASE_URL` and nothing else: a workflow that could
+    // never log in, emitted as if it were complete. Inline export was unaffected,
+    // which is why it went unnoticed.
+    //
+    // Both access forms are matched: `process.env.NAME` and `process.env['NAME']`
+    // (the OS-collision guard uses bracket access).
+    const envSources = [exportCode, exportPage ?? ''].join('\n')
     const secretNames = Array.from(
-      new Set([...exportCode.matchAll(/process\.env\.(\w+)/g)].map((m) => m[1]))
+      new Set(
+        [...envSources.matchAll(/process\.env(?:\.(\w+)|\[['"](\w+)['"]\])/g)].map(
+          (m) => m[1] ?? m[2]
+        )
+      )
     )
     const ciWorkflow = exportCi ? generateCiWorkflow(secretNames) : undefined
     // F17: an opt-in cross-browser playwright.config.ts beside the spec.
@@ -1951,7 +2001,7 @@ function App(): React.JSX.Element {
           .flatMap((s) => (s.value ?? '').split('\n').filter(Boolean))
       )
     )
-    const path = await window.api.recorder.exportTest(
+    const res = await window.api.recorder.exportTest(
       exportCode,
       fixturePaths,
       storageState,
@@ -1961,7 +2011,11 @@ function App(): React.JSX.Element {
       ciWorkflow, // F33: optional .github/workflows/playwright.yml
       configFile // F17: optional cross-browser playwright.config.ts
     )
-    if (path) setSavedPath(path)
+    if (res) {
+      setSavedPath(res.path)
+      setSavedExtras(res.alsoWrote)
+      setSavedPageOverwritten(res.pageOverwritten)
+    }
   }
 
   const handleCopyExport = (): void => {
@@ -2538,13 +2592,31 @@ function App(): React.JSX.Element {
     // A success check is what lets us tell "app rejected the bad input" (the
     // check fails) from "app accepted it" (the check still passes). Without one,
     // we can only report what happened, not judge it.
-    const hasAssertion = edgeFlat.some((s) => s.type === 'assert' || s.type === 'snapshot')
+    // Only a real `assert` is a success check. A snapshot/a11y/perf step is NOT a
+    // pass/fail signal for "was the bad input accepted" — the exported negative suite
+    // says exactly this and negates `assert` steps only (playwrightExport.ts). Counting
+    // snapshots here let the verdict claim a certainty the evidence couldn't support.
+    const hasAssertion = edgeFlat.some((s) => s.type === 'assert')
     runPlanRef.current = edgeMap // per-step marks map back to the display rows
     setEdgeSuiteSaved(null) // clear any stale "saved to…" note from a prior run
     setEdgeViewingHistory(false) // this is a fresh, live run (steps present)
     setEdgeReportOpen(false) // report opens only when the batch finishes
     setEdgeModalOpen(false)
-    setEdgeRun({ total: cases.length, current: 0, currentLabel: '', running: true, hasAssertion, results: [] })
+    // Where the flow begins. The automatic verdict compares the baseline's END
+    // against this: if valid input doesn't move the page, the URL signal can't
+    // tell accepted from rejected and we must say so rather than guess.
+    const startUrl = edgeFlat.find((s) => s.type === 'navigate')?.url ?? liveUrlRef.current
+    const successUrl = edgeSuccessUrl.trim()
+    setEdgeRun({
+      total: cases.length,
+      current: 0,
+      currentLabel: '',
+      running: true,
+      hasAssertion,
+      successUrl,
+      startUrl,
+      results: []
+    })
     // Collect outcomes locally too (state is async) so we can persist the batch.
     const collected: {
       case: EdgeCase
@@ -2553,6 +2625,7 @@ function App(): React.JSX.Element {
       error?: string
       screenshotPath?: string
       traceId?: string
+      finalUrl?: string
     }[] = []
     for (let i = 0; i < cases.length; i++) {
       const c = cases[i]
@@ -2575,7 +2648,10 @@ function App(): React.JSX.Element {
         failedAt: res.failedAt,
         error: res.error,
         screenshotPath: res.screenshotPath,
-        traceId: res.traceId
+        traceId: res.traceId,
+        // Where this variant left the browser. Read from the ref, not state —
+        // this closure was created before the run and would see a stale value.
+        finalUrl: liveUrlRef.current
       }
       collected.push(entry)
       setEdgeRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
@@ -2597,6 +2673,11 @@ function App(): React.JSX.Element {
     // memory for the session via the "current run" row.
     if (testFileName) {
       const baselineOk = !!collected.find((r) => r.case.baseline)?.ok
+      // Judge here, once, and persist the verdicts. The re-opened run and the
+      // history summary then read the SAME answer the report showed — they can't
+      // drift apart, and main doesn't have to re-derive a rule it lacks the
+      // context for.
+      const saveCtx = edgeCtxOf({ hasAssertion, successUrl, startUrl, results: collected })
       await window.api.library.saveEdgeRun({
         testFile: testFileName,
         testName: testName || 'recorded flow',
@@ -2612,6 +2693,8 @@ function App(): React.JSX.Element {
           ok: r.ok,
           screenshotPath: r.screenshotPath,
           traceId: r.traceId,
+          finalUrl: r.finalUrl,
+          verdict: r.case.baseline ? undefined : edgeVerdict(r, saveCtx).verdict,
           steps: r.case.steps // persist so a re-opened run can export its suite
         }))
       })
@@ -2638,6 +2721,10 @@ function App(): React.JSX.Element {
       currentLabel: '',
       running: false,
       hasAssertion: rec.hasAssertion,
+      // A saved run is re-judged from its OWN stored evidence, so re-opening it
+      // months later can't produce a different answer than the day it ran.
+      successUrl: '',
+      startUrl: '',
       results: rec.results.map((v, i) => ({
         case: {
           id: `${i}`,
@@ -2652,7 +2739,12 @@ function App(): React.JSX.Element {
         },
         ok: v.ok,
         screenshotPath: v.screenshotPath,
-        traceId: v.traceId
+        traceId: v.traceId,
+        finalUrl: v.finalUrl,
+        // Records saved before verdicts existed have none — those fall through
+        // to the live rules, which for them means "no success check → unknown".
+        // That is the honest answer for evidence we can no longer reconstruct.
+        verdict: v.verdict
       }))
     })
     setEdgeSuiteSaved(null)
@@ -2671,16 +2763,120 @@ function App(): React.JSX.Element {
     await refreshEdgeHistory(testFileName)
   }
 
-  // F20 verdict for one variant, given whether the happy-path baseline passed.
+  // F20 verdict for one variant.
   // 'accepted' = the app took the hostile input and still reached success (a bug
   // to investigate — worst for injection). 'rejected' = the app blocked it
-  // (good). 'unknown' = the baseline itself failed, so nothing can be judged.
+  // (good). 'unknown' = we cannot tell, and MUST NOT guess.
+  //
+  // ORIGINALLY this was just `ok ? accepted : rejected`, which is only meaningful
+  // when the test HAS a success check. Without one, `ok` means "the steps
+  // completed" — and typing garbage into a field and clicking Login always
+  // complete, whatever the app says next. So `ok` carried NO information, and
+  // SauceDemo rejecting all 14 hostile inputs was reported as 14 ACCEPTED, with
+  // the SQL injection flagged as a serious vulnerability. Manufacturing a
+  // security finding is the worst thing a QA tool can do.
+  //
+  // Three sources of truth, most authoritative first:
+  //   1. a success rule the user typed  — explicit beats inferred, always
+  //   2. the test's own ✓ check         — what they actually asserted
+  //   3. the BASELINE's final URL       — valid input lands on the post-login
+  //      page; a variant that ends elsewhere was rejected. No hand-written
+  //      assertion needed, which is the whole point: nobody adds one before
+  //      running edge cases for the first time.
+  // Only when none of the three can speak do we say 'unknown'.
+  const normEdgeUrl = (u?: string): string => {
+    if (!u) return ''
+    try {
+      const x = new URL(u)
+      // origin + path only. Query/hash routinely carry per-run noise (tokens,
+      // scroll anchors) that would make identical pages compare as different.
+      return (x.origin + x.pathname).replace(/\/+$/, '').toLowerCase()
+    } catch {
+      return u.trim().replace(/\/+$/, '').toLowerCase()
+    }
+  }
+  type EdgeBasis = 'stored' | 'rule' | 'check' | 'url' | 'none'
   const edgeVerdict = (
-    ok: boolean,
+    r: { ok: boolean; finalUrl?: string; verdict?: 'accepted' | 'rejected' | 'unknown' },
+    ctx: {
+      baselineOk: boolean
+      hasAssertion: boolean
+      successUrl: string
+      startUrl: string
+      baselineUrl: string
+    }
+  ): { verdict: 'accepted' | 'rejected' | 'unknown'; basis: EdgeBasis } => {
+    // A re-opened SAVED run carries the verdict it was given the day it ran.
+    // Reuse it: stored evidence must not change meaning later just because the
+    // judging rules improved, and the context it was judged with (the success
+    // rule, the start URL) isn't all persisted.
+    if (r.verdict) return { verdict: r.verdict, basis: 'stored' }
+    // Baseline broken → the valid input didn't even work, so nothing below means
+    // anything.
+    if (!ctx.baselineOk) return { verdict: 'unknown', basis: 'none' }
+
+    // 1. An explicit rule the user typed.
+    const rule = ctx.successUrl.trim().toLowerCase()
+    if (rule) {
+      if (!r.finalUrl) return { verdict: 'unknown', basis: 'none' }
+      return {
+        verdict: r.finalUrl.toLowerCase().includes(rule) ? 'accepted' : 'rejected',
+        basis: 'rule'
+      }
+    }
+
+    // 2. The test's own check.
+    if (ctx.hasAssertion) return { verdict: r.ok ? 'accepted' : 'rejected', basis: 'check' }
+
+    // 3. Inferred from the baseline. Usable ONLY if success visibly moves the
+    //    page — on an app that stays put (a SPA swapping content in place) the
+    //    baseline ends where it started, the signal can't discriminate, and
+    //    saying so beats guessing.
+    const base = normEdgeUrl(ctx.baselineUrl)
+    const start = normEdgeUrl(ctx.startUrl)
+    const mine = normEdgeUrl(r.finalUrl)
+    if (base && start && base !== start && mine) {
+      return { verdict: mine === base ? 'accepted' : 'rejected', basis: 'url' }
+    }
+    return { verdict: 'unknown', basis: 'none' }
+  }
+
+  // The context every verdict in a run shares. Derived once from the run itself,
+  // so the report, the markdown and the saved record can never disagree.
+  const edgeCtxOf = (run: {
+    hasAssertion: boolean
+    successUrl?: string
+    startUrl?: string
+    results: { case: { baseline?: boolean }; ok: boolean; finalUrl?: string }[]
+  }): {
     baselineOk: boolean
-  ): 'accepted' | 'rejected' | 'unknown' => {
-    if (!baselineOk) return 'unknown'
-    return ok ? 'accepted' : 'rejected'
+    hasAssertion: boolean
+    successUrl: string
+    startUrl: string
+    baselineUrl: string
+  } => {
+    const baseline = run.results.find((r) => r.case.baseline)
+    return {
+      baselineOk: !!baseline?.ok,
+      hasAssertion: run.hasAssertion,
+      successUrl: run.successUrl ?? '',
+      startUrl: run.startUrl ?? '',
+      baselineUrl: baseline?.finalUrl ?? ''
+    }
+  }
+
+  // How the verdicts in this run were reached — shown so a verdict is never a
+  // black box, and so an INFERRED one is visibly weaker than an asserted one.
+  const edgeBasisNote = (ctx: { hasAssertion: boolean; successUrl: string; startUrl: string; baselineUrl: string; baselineOk: boolean }): string => {
+    if (!ctx.baselineOk) return ''
+    if (ctx.successUrl.trim()) return `Judged by your rule: success = URL contains “${ctx.successUrl.trim()}”.`
+    if (ctx.hasAssertion) return 'Judged by the test’s own ✓ check.'
+    const base = normEdgeUrl(ctx.baselineUrl)
+    const start = normEdgeUrl(ctx.startUrl)
+    if (base && start && base !== start) {
+      return `Inferred: the valid-input baseline ended on ${ctx.baselineUrl} — a variant that ended elsewhere was rejected.`
+    }
+    return ''
   }
 
   // A ready-to-paste markdown summary of an edge-case run (Copy button).
@@ -2689,19 +2885,42 @@ function App(): React.JSX.Element {
     const baseline = edgeRun.results.find((r) => r.case.baseline)
     const baselineOk = !!baseline?.ok
     const variants = edgeRun.results.filter((r) => !r.case.baseline)
-    const accepted = variants.filter((r) => edgeVerdict(r.ok, baselineOk) === 'accepted')
+    const ctx = edgeCtxOf(edgeRun)
+    const verdicts = variants.map((r) => edgeVerdict(r, ctx).verdict)
+    const accepted = verdicts.filter((v) => v === 'accepted').length
+    const rejected = verdicts.filter((v) => v === 'rejected').length
+    const undetermined = verdicts.filter((v) => v === 'unknown').length
     const lines: string[] = []
     lines.push(`# Edge-case report${testName ? ` — ${testName}` : ''}`)
     lines.push('')
     lines.push(`- Variants run: ${variants.length}`)
-    lines.push(`- ⚠ Accepted (app took the bad input — review): ${accepted.length}`)
-    lines.push(`- ✓ Rejected (handled): ${variants.length - accepted.length}`)
-    if (!baselineOk) lines.push(`- ⚠ Baseline (happy path) FAILED — fix the test first; verdicts below are unreliable.`)
-    if (!edgeRun.hasAssertion) lines.push(`- ⚠ No success check in this test — "accepted vs rejected" is a guess. Add an assertion (e.g. URL contains …).`)
+    // Only claim accepted/rejected counts when they mean something. Printing
+    // "0 rejected" beside "14 undetermined" reads as a finding; it isn't one.
+    if (undetermined === variants.length) {
+      lines.push(`- ? Undetermined: ${undetermined} — no verdict is possible for this run (see below).`)
+    } else {
+      lines.push(`- ⚠ Accepted (app took the bad input — review): ${accepted}`)
+      lines.push(`- ✓ Rejected (handled): ${rejected}`)
+      if (undetermined) lines.push(`- ? Undetermined: ${undetermined}`)
+    }
+    // How the verdicts were reached travels WITH them — an inferred verdict is
+    // weaker than an asserted one and the reader has to be able to see which.
+    const note = edgeBasisNote(ctx)
+    if (note) lines.push(`- ${note}`)
+    if (!baselineOk) lines.push(`- ⚠ Baseline (happy path) FAILED — fix the test first, then re-run; nothing here can be judged until the valid inputs pass.`)
+    if (undetermined === variants.length && baselineOk)
+      lines.push(`- ⚠ No success check in this test AND the valid-input baseline didn't move the page, so there is nothing to compare against. Add an assertion, or set a success rule in the 🧨 dialog, and re-run.`)
     lines.push('')
     for (const r of variants) {
-      const v = edgeVerdict(r.ok, baselineOk)
-      const mark = v === 'accepted' ? '⚠ ACCEPTED' : v === 'rejected' ? '✓ rejected' : '· (baseline broken)'
+      const v = edgeVerdict(r, ctx).verdict
+      const mark =
+        v === 'accepted'
+          ? '⚠ ACCEPTED'
+          : v === 'rejected'
+            ? '✓ rejected'
+            : baselineOk
+              ? '? undetermined'
+              : '· (baseline broken)'
       lines.push(`- ${mark} — **${r.case.fieldLabel}** = ${r.case.edgeLabel}: \`${r.case.value.slice(0, 60) || '(empty)'}\``)
       lines.push(`  - ${r.case.hint}`)
     }
@@ -2727,8 +2946,10 @@ function App(): React.JSX.Element {
       viewport,
       device: deviceId ? deviceById(deviceId) : undefined // F36
     })
-    const path = await window.api.recorder.exportTest(code)
-    if (path) setEdgeSuiteSaved(path)
+    // The edge suite is a single self-contained spec — no page class, workflow or
+    // config — so only the spec path is of interest here.
+    const res = await window.api.recorder.exportTest(code)
+    if (res) setEdgeSuiteSaved(res.path)
   }
 
   // === F17: cross-browser replay ====================================
@@ -2824,6 +3045,11 @@ function App(): React.JSX.Element {
       if (res.needsBrowsers) {
         const chk = await window.api.xbrowser.check()
         setXbBrowsers({ chromium: chk.chromium, all: chk.allBrowsers })
+        // Drop any leftover line from an EARLIER download. It renders inside the
+        // "⚠ browsers aren't downloaded yet" panel, so a stale "✅ Browsers
+        // installed — you can run now" from a previous session showed up directly
+        // beneath the warning contradicting it.
+        setXbInstallLog('')
         setXbNeedDownload(true)
       }
     } catch (err) {
@@ -4972,7 +5198,11 @@ function App(): React.JSX.Element {
       if (res === null) {
         setDraftNote('⚠ The AI is unavailable (needs the Claude CLI). Try again.')
       } else if (res.steps.length) {
-        setDraftResult({ title: res.title, steps: res.steps as RecorderStep[] })
+        setDraftResult({
+          title: res.title,
+          steps: res.steps as RecorderStep[],
+          guessed: res.guessed ?? []
+        })
         setDraftNote(
           res.note ? `⚠ ${res.note}` : `✓ Drafted ${res.steps.length} steps — review, then Insert.`
         )
@@ -5769,7 +5999,8 @@ function App(): React.JSX.Element {
               to catch, reinvented in API form. */}
           <label className="api-field">
             <span>
-              Response checks — one per line: <code>path op value</code>
+              ✅ Response checks — <strong>assertions</strong>. One per line:{' '}
+              <code>path op value</code>
             </span>
             <textarea
               className="api-headers"
@@ -5837,10 +6068,14 @@ function App(): React.JSX.Element {
           )}
           {/* F24.1: the piece that makes create → verify → delete possible. The
               server invents the id, so it cannot be typed when authoring. */}
-          <label className="api-field">
+          {/* Visually separated from "Response checks" above. The two were
+              adjacent, identically styled textareas with different grammars
+              (`path op value` vs `name = path`), and a check typed into this one
+              was silently dropped. */}
+          <label className="api-field api-save-field">
             <span>
-              Save from response — one <code>name = path</code> per line, used later as{' '}
-              <code>{'{{saved:name}}'}</code>
+              💾 Save from response — <strong>not a check</strong>. One{' '}
+              <code>name = path</code> per line, used later as <code>{'{{saved:name}}'}</code>
             </span>
             <textarea
               className="api-headers"
@@ -5850,6 +6085,11 @@ function App(): React.JSX.Element {
               onChange={(e) => patchApiDraft({ apiSave: e.target.value })}
             />
           </label>
+          {/* Say so IMMEDIATELY. This warning exists because a dropped line cost
+              a real assertion that looked saved and green for hours. */}
+          {saveSpecWarning(apiDraft.apiSave) && (
+            <p className="api-hint api-save-warn">⚠ {saveSpecWarning(apiDraft.apiSave)}</p>
+          )}
           {/* F24.3: hand this response's auth to the browser — the suite-scale win. */}
           <div className="api-auth-block">
             <label className="api-check-line">
@@ -6112,17 +6352,34 @@ function App(): React.JSX.Element {
                 Draft: <strong>{draftResult.title}</strong> · {draftResult.steps.length} steps
               </div>
               <ul className="ac-list">
-                {draftResult.steps.map((s, i) => (
-                  <li key={i} className="ac-row">
-                    <span className="ac-mark">{draftStepIcon(s)}</span>
-                    <span className="ac-text">
-                      <strong>{draftStepKind(s)}</strong>
-                      <span className="mon-sub">
-                        {s.type === 'navigate' ? s.url : s.value}
+                {draftResult.steps.map((s, i) => {
+                  // The story named no address for this "Go to", so the URL below
+                  // is our guess. Flag it here — at replay it would just look
+                  // like the site is broken.
+                  const guessedUrl = draftResult.guessed.includes(i)
+                  return (
+                    <li key={i} className="ac-row">
+                      <span className="ac-mark">{guessedUrl ? '⚠' : draftStepIcon(s)}</span>
+                      <span className="ac-text">
+                        <strong>{draftStepKind(s)}</strong>
+                        <span
+                          className="mon-sub"
+                          style={guessedUrl ? { color: '#f0b232' } : undefined}
+                          title={
+                            guessedUrl
+                              ? 'The story didn’t say where to go — this address is a guess. Set it before you replay.'
+                              : undefined
+                          }
+                        >
+                          {s.type === 'navigate'
+                            ? s.url || '(no address — set this before replaying)'
+                            : s.value}
+                          {guessedUrl && s.url ? ' — guessed' : ''}
+                        </span>
                       </span>
-                    </span>
-                  </li>
-                ))}
+                    </li>
+                  )
+                })}
               </ul>
             </>
           )}
@@ -8780,25 +9037,13 @@ function App(): React.JSX.Element {
         </div>
       </div>
 
-      {/* F1: HAR status — a captured/linked archive, and the last run's usage. */}
-      {(captureNetwork || harField || harCount > 0 || lastHarUsage) && (
-        <div className="har-status">
-          {harField ? (
-            <span className="har-chip linked">🌐 network archive saved with this test</span>
-          ) : harCount > 0 ? (
-            <span className="har-chip captured">
-              🌐 {harCount} responses captured (save to keep)
-            </span>
-          ) : captureNetwork ? (
-            <span className="har-chip arm">🌐 network capture on — record to capture</span>
-          ) : null}
-          {lastHarUsage && (
-            <span className="har-chip usage">
-              last run: {lastHarUsage.served} served from HAR · {lastHarUsage.passthrough} live
-            </span>
-          )}
-        </div>
-      )}
+      {/* F1: the HAR status chips used to sit HERE, between the toolbar and the
+          browser area — where the native WebContentsView paints over them. main
+          positions that view at CHROME_HEIGHT (+ the tab strip) and knows nothing
+          about any other band, so this bar was invisible the entire time a page
+          was loaded, which is every moment it had something to say. Moved into
+          the steps panel, which the native view never covers (it stops at
+          width - PANEL_WIDTH). See the har-status block below. */}
 
       {/* Day 17: the tab strip — shown only with 2+ tabs (a popup opened one).
           Its height must match TAB_STRIP_HEIGHT in main so the native browser
@@ -9843,6 +10088,33 @@ function App(): React.JSX.Element {
                 inside those steps was <strong>not performed</strong>, so this run doesn’t vouch
                 for it.
               </div>
+            </div>
+          )}
+
+          {/* F1: HAR status — a captured/linked archive, and how the last run
+              actually used it. Lives in the PANEL, not under the toolbar: the
+              native browser view is painted from CHROME_HEIGHT down and covers
+              any band between the toolbar and the page, so this was invisible
+              whenever a page was loaded. The panel is beside the view, never
+              under it. It also belongs here on merit — "N served from HAR, M
+              live" is a run result, and every other run result is in this
+              column. */}
+          {(captureNetwork || harField || harCount > 0 || lastHarUsage) && (
+            <div className="har-status">
+              {harField ? (
+                <span className="har-chip linked">🌐 network archive saved with this test</span>
+              ) : harCount > 0 ? (
+                <span className="har-chip captured">
+                  🌐 {harCount} responses captured (save to keep)
+                </span>
+              ) : captureNetwork ? (
+                <span className="har-chip arm">🌐 network capture on — record to capture</span>
+              ) : null}
+              {lastHarUsage && (
+                <span className="har-chip usage">
+                  last run: {lastHarUsage.served} served from HAR · {lastHarUsage.passthrough} live
+                </span>
+              )}
             </div>
           )}
 
@@ -11471,7 +11743,11 @@ function App(): React.JSX.Element {
         (() => {
           const fields = fillableFields(edgeFlat)
           const count = countEdgeCases(edgeFlat, [...edgeFields], edgeGroups)
-          const hasAssertion = edgeFlat.some((s) => s.type === 'assert' || s.type === 'snapshot')
+          // Only a real `assert` is a success check. A snapshot/a11y/perf step is NOT a
+    // pass/fail signal for "was the bad input accepted" — the exported negative suite
+    // says exactly this and negates `assert` steps only (playwrightExport.ts). Counting
+    // snapshots here let the verdict claim a certainty the evidence couldn't support.
+    const hasAssertion = edgeFlat.some((s) => s.type === 'assert')
           return (
             <div className="modal-backdrop" onClick={() => setEdgeModalOpen(false)}>
               <div className="env-modal" onClick={(e) => e.stopPropagation()}>
@@ -11522,6 +11798,41 @@ function App(): React.JSX.Element {
                           {f.label}
                         </label>
                       ))}
+                    </div>
+
+                    {/* F20 (B): show HOW the verdict will be reached before the run,
+                        and let it be overridden. A verdict the user can't see the
+                        basis of is the reason "accepted vs rejected" was trusted
+                        when it was a guess. */}
+                    <div className="edge-section">
+                      <span className="env-field-label">How success is judged</span>
+                      <p className="env-list-intro edge-judge-note">
+                        {hasAssertion ? (
+                          <>
+                            This test has a ✓ check, so that decides it: a variant whose check
+                            still passes was <strong>accepted</strong>; one that fails was{' '}
+                            <strong>rejected</strong>.
+                          </>
+                        ) : (
+                          <>
+                            No ✓ check in this test, so the valid-input <strong>baseline</strong>{' '}
+                            runs first to learn what success looks like. A variant that ends on a
+                            different page was <strong>rejected</strong>. If the baseline
+                            doesn&rsquo;t move the page at all, no verdict is possible and every
+                            variant is reported undetermined rather than guessed.
+                          </>
+                        )}
+                      </p>
+                      <label className="env-field-label edge-judge-label" htmlFor="edge-success-url">
+                        Or set it explicitly — success = URL contains
+                      </label>
+                      <input
+                        id="edge-success-url"
+                        className="env-input"
+                        value={edgeSuccessUrl}
+                        onChange={(e) => setEdgeSuccessUrl(e.target.value)}
+                        placeholder="e.g. inventory.html  (leave blank to judge automatically)"
+                      />
                     </div>
 
                     <div className="edge-section">
@@ -11585,14 +11896,16 @@ function App(): React.JSX.Element {
           const baseline = edgeRun.results.find((r) => r.case.baseline)
           const baselineOk = !!baseline?.ok
           const variants = edgeRun.results.filter((r) => !r.case.baseline)
-          const ranked = [...variants].sort((a, b) => {
-            const va = edgeVerdict(a.ok, baselineOk) === 'accepted' ? 0 : 1
-            const vb = edgeVerdict(b.ok, baselineOk) === 'accepted' ? 0 : 1
-            return va - vb
-          })
-          const acceptedCount = variants.filter(
-            (r) => edgeVerdict(r.ok, baselineOk) === 'accepted'
-          ).length
+          const ctx = edgeCtxOf(edgeRun)
+          const verdictOf = (r: (typeof variants)[number]): 'accepted' | 'rejected' | 'unknown' =>
+            edgeVerdict(r, ctx).verdict
+          const ranked = [...variants].sort(
+            (a, b) => (verdictOf(a) === 'accepted' ? 0 : 1) - (verdictOf(b) === 'accepted' ? 0 : 1)
+          )
+          const acceptedCount = variants.filter((r) => verdictOf(r) === 'accepted').length
+          const rejectedCount = variants.filter((r) => verdictOf(r) === 'rejected').length
+          const undeterminedCount = variants.length - acceptedCount - rejectedCount
+          const basisNote = edgeBasisNote(ctx)
           return (
             <div className="modal-backdrop" onClick={() => setEdgeReportOpen(false)}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -11623,30 +11936,59 @@ function App(): React.JSX.Element {
                     unreliable until the valid inputs pass.
                   </div>
                 )}
-                {!edgeRun.hasAssertion && (
+                {/* Only warn when we genuinely can't judge. With no ✓ check we now
+                    fall back to the baseline's final URL, so "no assertion" is no
+                    longer the same thing as "no verdict". */}
+                {undeterminedCount === variants.length && baselineOk && (
                   <div className="edge-warn edge-warn-block">
-                    ⚠ No success check in this test, so &ldquo;accepted vs rejected&rdquo; is a
-                    guess. Add an assertion (e.g. URL contains the post-login page) for a real
-                    verdict.
+                    ⚠ No success check in this test, and the valid-input baseline didn&rsquo;t move
+                    the page — so there is nothing to compare each variant against and accepted vs
+                    rejected <strong>cannot be determined</strong>. Nothing below is a finding. Add a
+                    ✓ check, or set a success rule in the 🧨 dialog, and re-run.
                   </div>
                 )}
+                {basisNote && <div className="edge-basis-note">{basisNote}</div>}
 
                 {!edgeRun.running && (
                   <div className="edge-summary">
-                    <span className="edge-summary-accepted">⚠ {acceptedCount} accepted (review)</span>
-                    <span className="edge-summary-rejected">
-                      ✓ {variants.length - acceptedCount} rejected (handled)
-                    </span>
+                    {/* Only show accepted/rejected when they mean something. A red
+                        "14 accepted" beside "0 rejected" reads as a security finding;
+                        with no success check it is nothing of the kind. */}
+                    {undeterminedCount === variants.length ? (
+                      <span className="edge-summary-unknown">
+                        ? {undeterminedCount} undetermined — no verdict possible for this run
+                      </span>
+                    ) : (
+                      <>
+                        <span className="edge-summary-accepted">
+                          ⚠ {acceptedCount} accepted (review)
+                        </span>
+                        <span className="edge-summary-rejected">
+                          ✓ {rejectedCount} rejected (handled)
+                        </span>
+                        {undeterminedCount > 0 && (
+                          <span className="edge-summary-unknown">
+                            ? {undeterminedCount} undetermined
+                          </span>
+                        )}
+                      </>
+                    )}
                   </div>
                 )}
 
                 <ul className="edge-list">
                   {ranked.map((r) => {
-                    const v = edgeVerdict(r.ok, baselineOk)
+                    const v = verdictOf(r)
                     return (
                       <li key={r.case.id} className={`edge-item ${v}`}>
                         <span className={`edge-badge ${v}`}>
-                          {v === 'accepted' ? '⚠ accepted' : v === 'rejected' ? '✓ rejected' : '·'}
+                          {v === 'accepted'
+                            ? '⚠ accepted'
+                            : v === 'rejected'
+                              ? '✓ rejected'
+                              : baselineOk
+                                ? '? undetermined'
+                                : '· baseline broken'}
                         </span>
                         <span className="edge-item-field">{r.case.fieldLabel}</span>
                         {r.case.group && (
@@ -12508,6 +12850,22 @@ function App(): React.JSX.Element {
                 ✕
               </button>
             </div>
+            {/* An {{env:…}} token whose name the OS also defines. Warned HERE
+                because this is the last moment the name can be changed — once the
+                spec is in CI the symptom is a credentials failure that points
+                nowhere near the cause. */}
+            {exportEnvWarning.length > 0 && (
+              <div className="edge-warn edge-warn-block">
+                ⚠ <strong>{exportEnvWarning.join(', ')}</strong>{' '}
+                {exportEnvWarning.length === 1 ? 'is also an' : 'are also'} operating-system
+                environment variable{exportEnvWarning.length === 1 ? '' : 's'} — on Windows{' '}
+                <code>USERNAME</code> is your login name. Read directly, the test would silently use
+                that instead of your value. This export reads{' '}
+                <code>QA_{exportEnvWarning[0]}</code> instead and fails fast if it isn&rsquo;t set.
+                To remove the guard, rename the token to something app-specific (e.g.{' '}
+                <code>{'{{env:APP_' + exportEnvWarning[0] + '}}'}</code>).
+              </div>
+            )}
             {/* Day 17: choose inline vs full Page Object Model output */}
             <div className="export-modes">
               <button
@@ -12551,9 +12909,24 @@ function App(): React.JSX.Element {
             <div className="modal-footer">
               {savedPath && (
                 <span className="saved-path">
+                  {/* Every file, named. This used to list the CI workflow and the
+                      config but NOT the page class — the one file that lands in a
+                      folder the user never picked, so it looked like the POM
+                      export had saved only half of itself. */}
                   Saved to {savedPath}
-                  {exportCi && ' + .github/workflows/playwright.yml (hidden folder)'}
-                  {exportXbrowser && ' + playwright.config.ts'}
+                  {savedExtras.map((p) => (
+                    <span key={p} className="saved-path-extra">
+                      + {p}
+                    </span>
+                  ))}
+                  {savedPageOverwritten && (
+                    <span className="saved-path-warn">
+                      ⚠ A different page class already existed at that path and was replaced. The
+                      class name comes from the TEST name, so another test called “{testName ||
+                        'recorded flow'}” shares this file — its spec now imports a class that no
+                      longer matches it. Rename one of the tests and re-export.
+                    </span>
+                  )}
                 </span>
               )}
               {/* F33: opt-in — write a GitHub Actions workflow beside the spec so

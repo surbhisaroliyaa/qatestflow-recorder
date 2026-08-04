@@ -102,7 +102,12 @@ interface RecorderAPI {
     harFile?: string, // F1: copy this .har into hars/ beside the exported spec
     ciWorkflow?: string, // F33: write .github/workflows/playwright.yml beside the spec
     configFile?: string // F17: write playwright.config.ts (cross-browser) beside the spec
-  ) => Promise<string | null>
+    // `alsoWrote` = every file written BESIDES the spec the dialog named (page
+    // class, CI workflow, cross-browser config) — they land in folders the user
+    // never chose, so the confirmation has to name them.
+    // `pageOverwritten` = a DIFFERENT page class already existed at that path
+    // (the class name comes from the test name, so two tests can collide).
+  ) => Promise<{ path: string; alsoWrote: string[]; pageOverwritten: boolean } | null>
   pickUploadFile: () => Promise<string | null>
   revealDownload: (path: string) => Promise<void>
   onDownloadStart: (callback: (info: { name: string }) => void) => () => void
@@ -383,7 +388,14 @@ interface AiAPI {
     story: string,
     diff: string | undefined,
     baseUrl: string | undefined
-  ) => Promise<{ title: string; steps: RecorderStep[]; note: string } | null>
+    // `guessed` = indices of navigate steps whose URL we had to guess (the story
+    // named no address); the review list marks them ⚠ before Insert.
+  ) => Promise<{
+    title: string
+    steps: RecorderStep[]
+    note: string
+    guessed: number[]
+  } | null>
 }
 
 // F22: pick a local git repo and pull its diff to draft a test from.
@@ -804,6 +816,12 @@ declare global {
     ok: boolean
     screenshotPath?: string
     traceId?: string
+    // Where the variant's flow ended — the automatic verdict compares it against
+    // the baseline's. Absent on runs saved before this existed.
+    finalUrl?: string
+    // The judged outcome, decided in the renderer where the full context lives.
+    // Stored so a re-opened run can't disagree with the report shown at the time.
+    verdict?: 'accepted' | 'rejected' | 'unknown'
     steps?: RecorderStep[] // persisted so a re-opened run can still export
   }
   interface EdgeRunRecord {

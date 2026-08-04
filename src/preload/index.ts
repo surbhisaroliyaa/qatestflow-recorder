@@ -105,7 +105,7 @@ const api = {
       harFile?: string,
       ciWorkflow?: string,
       configFile?: string
-    ): Promise<string | null> =>
+    ): Promise<{ path: string; alsoWrote: string[]; pageOverwritten: boolean } | null> =>
       ipcRenderer.invoke(
         'recorder:export',
         code,
@@ -432,7 +432,7 @@ const api = {
       story: string,
       diff: string | undefined,
       baseUrl: string | undefined
-    ): Promise<{ title: string; steps: unknown[]; note: string } | null> =>
+    ): Promise<{ title: string; steps: unknown[]; note: string; guessed: number[] } | null> =>
       ipcRenderer.invoke('ai:draftFromStory', story, diff, baseUrl)
   },
   // F22: pick a local git repo and pull its diff to draft a test from.

@@ -778,6 +778,9 @@ export async function runCrossBrowser(
       'utf-8'
     )
 
+    // Kept outside the promise: when the JSON parses but contains no tests at
+    // all, Playwright's stderr is often the only place the reason exists.
+    let stderrText = ''
     const json = await new Promise<string>((resolve, reject) => {
       let out = ''
       let err = ''
@@ -795,7 +798,10 @@ export async function runCrossBrowser(
         reject(new Error('Cross-browser run timed out after 180s'))
       }, 180000)
       child.stdout.on('data', (d) => (out += d.toString()))
-      child.stderr.on('data', (d) => (err += d.toString()))
+      child.stderr.on('data', (d) => {
+        err += d.toString()
+        stderrText = err
+      })
       child.on('error', (e) => {
         clearTimeout(timer)
         reject(e)
@@ -811,12 +817,51 @@ export async function runCrossBrowser(
 
     const report = JSON.parse(json)
     const tests = collectTests(report)
-    // A browser whose binary isn’t installed makes Playwright error before any
-    // test runs — surface that as a clear hint.
+
+    // Playwright reports LOAD failures — a spec that won't compile, a bad
+    // config, a missing engine — in a top-level `errors` array, NOT as test
+    // results. Discarding it is how any such failure used to be reported as
+    // "browser binary may be missing" on every engine at once: a fabricated
+    // diagnosis that sent the user off to re-download 400 MB that was already
+    // on disk, while the real reason was thrown away. Same bug the parallel
+    // runner had; fixed there, never applied here. NEVER guess at a cause we
+    // were handed.
+    const loadErrors = (
+      Array.isArray((report as { errors?: unknown[] }).errors)
+        ? (report as { errors: { message?: string }[] }).errors
+        : []
+    )
+      .map((e) => stripAnsi(String(e?.message ?? '')).replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+
+    // Does a message actually say the binaries are missing? This is the ONLY
+    // thing that may claim it.
+    const saysMissingBinary = (s: string): boolean =>
+      /Executable doesn.t exist|playwright install/i.test(s)
+
+    if (!tests.length) {
+      // Nothing ran at all. Report what Playwright said, in its own words.
+      const why = loadErrors.join(' · ') || stripAnsi(stderrText).replace(/\s+/g, ' ').trim()
+      const needsInstall = saysMissingBinary(why)
+      return {
+        installed: true,
+        ran: false,
+        results: [],
+        needsBrowsers: needsInstall || undefined,
+        message: needsInstall
+          ? missingBrowsersMessage()
+          : why
+            ? `Cross-browser run failed before any test ran: ${clip(why)}`
+            : 'Cross-browser run produced no tests, and Playwright gave no reason. The generated spec may be empty.'
+      }
+    }
+
     const results: BrowserResult[] = browsers.map((b) => {
       const forBrowser = tests.filter((t) => t.project === b)
       if (forBrowser.length === 0) {
-        return { browser: b, ok: false, error: 'no result (browser binary may be missing)' }
+        // Other engines DID report, so this is specific to this one — but we
+        // still don't know why, so we say exactly that rather than inventing it.
+        return { browser: b, ok: false, error: 'no result — this engine never reported back' }
       }
       const failed = forBrowser.find((t) => !t.ok)
       return {
@@ -826,13 +871,18 @@ export async function runCrossBrowser(
         error: failed?.error
       }
     })
-    const anyMissing = results.some((r) => r.error?.includes('browser binary'))
+    const missingBinary =
+      results.some((r) => saysMissingBinary(r.error ?? '')) || loadErrors.some(saysMissingBinary)
     return {
       installed: true,
       ran: true,
       results,
-      needsBrowsers: anyMissing || undefined,
-      message: anyMissing ? missingBrowsersMessage() : undefined
+      needsBrowsers: missingBinary || undefined,
+      message: missingBinary
+        ? missingBrowsersMessage()
+        : loadErrors.length
+          ? `Playwright also reported: ${clip(loadErrors.join(' · '))}`
+          : undefined
     }
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e)

@@ -28,6 +28,7 @@
 // =====================================================================
 
 import type { ReplayStep } from './replay'
+import { saveSpecWarning } from '../shared/apiSaveSpec'
 
 // MIRROR: the same token syntax the renderer's dataDriven.ts uses.
 const TOKEN_RE = /\{\{\s*([A-Za-z0-9_:.\- ]+?)\s*\}\}/g
@@ -146,6 +147,9 @@ export function parseSaveSpec(text?: string): { name: string; path: string }[] {
   return out
 }
 
+// Validation of these lines lives in src/shared/apiSaveSpec.ts so main and the
+// renderer share one implementation — see saveSpecWarning().
+
 // Walk a dot path into a parsed JSON body. Returns undefined if the path misses
 // — the caller decides what to do (we fail the step, loudly).
 export function pickPath(body: unknown, path: string): unknown {
@@ -176,6 +180,12 @@ export function applySaves(
   saveSpec: string | undefined,
   tokens: RunTokens
 ): string | null {
+  // A line that isn't `name = path` used to be skipped in SILENCE. That is how a
+  // response check typed into this box (`id not-empty`) vanished: saved, never
+  // run, never mentioned, and absent from the export — with every layer looking
+  // correct. Fail the step instead; an ignored assertion is worse than a red run.
+  const badLines = saveSpecWarning(saveSpec)
+  if (badLines) return badLines
   const specs = parseSaveSpec(saveSpec)
   if (!specs.length) return null
 

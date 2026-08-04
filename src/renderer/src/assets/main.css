@@ -885,11 +885,17 @@ body {
   border-color: #58a6ff;
   color: #cce4ff;
 }
+/* F1 network chips. These live in the STEPS PANEL, not under the toolbar — the
+   native browser view is painted from CHROME_HEIGHT down and covers any band
+   between the toolbar and the page, so a bar there is invisible exactly when it
+   has something to report. Padding/divider match .replay-status so it reads as
+   one of the run-result banners it sits among. */
 .har-status {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 6px 14px 0;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #3a3a3a;
 }
 .har-chip {
   font-size: 11px;
@@ -5523,6 +5529,61 @@ body {
   font-size: 13px;
   font-weight: 700;
   color: #7fd39a;
+}
+
+/* "We can't tell." Deliberately NEUTRAL — not red. This state exists because the
+   test has no success check, which is a gap in the test, not a finding about the
+   app. Colouring it like a failure is how 14 rejected inputs got reported as 14
+   accepted vulnerabilities. */
+.edge-summary-unknown {
+  font-size: 13px;
+  font-weight: 700;
+  color: #aaa;
+}
+
+/* How the verdicts were reached. Always shown with them: an INFERRED verdict
+   (from the baseline's final URL) is weaker evidence than an asserted one, and
+   the reader has to be able to tell which they're looking at. */
+.edge-basis-note {
+  padding: 6px 16px 0;
+  font-size: 11.5px;
+  color: #9aa4b2;
+  font-style: italic;
+}
+
+/* F24.1: "Save from response" sits directly under "Response checks" — two
+   textareas, identical styling, DIFFERENT grammars (`path op value` vs
+   `name = path`). A check typed into the save box was parsed as neither and
+   silently dropped. The rule above separates them so they don't read as one
+   continuous group of boxes. */
+.api-save-field {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed #3a3a42;
+}
+.api-save-warn {
+  color: #f0b232;
+}
+
+/* Each extra file an export wrote, on its own line — a run-on sentence of paths
+   is exactly how the page class went unnoticed. */
+.saved-path-extra {
+  display: block;
+  opacity: 0.85;
+}
+.saved-path-warn {
+  display: block;
+  margin-top: 4px;
+  color: #f0b232;
+}
+
+/* The pre-run explanation of the same thing, in the 🧨 dialog. */
+.edge-judge-note {
+  margin-bottom: 6px;
+}
+.edge-judge-label {
+  display: block;
+  margin-top: 4px;
 }
 
 .edge-list {

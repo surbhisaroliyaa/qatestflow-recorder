@@ -27,6 +27,16 @@ export interface EdgeRunVariant {
   ok: boolean
   screenshotPath?: string
   traceId?: string
+  // Where this variant's flow ENDED. The verdict's automatic fallback compares
+  // it against the baseline's: valid input lands on the post-login page, so a
+  // variant that ends somewhere else was rejected. Absent on runs saved before
+  // this existed.
+  finalUrl?: string
+  // The judged outcome, decided in the renderer where the full context lives
+  // (the test's own check, the user's success rule, the baseline URL). Stored so
+  // a re-opened run and the history summary can never disagree with the report
+  // that was shown when it ran. Absent on older records — see acceptedCount.
+  verdict?: 'accepted' | 'rejected' | 'unknown'
   // The variant's flattened steps (one field swapped for the hostile value) —
   // persisted so a re-opened saved run can still export its negative suite.
   steps?: unknown[]
@@ -113,9 +123,16 @@ export async function saveEdgeRun(
 ): Promise<EdgeRunSummary> {
   await mkdir(edgeRunsDir(), { recursive: true })
   const variants = input.results.filter((r) => !r.baseline)
-  const acceptedCount = input.baselineOk
-    ? variants.filter((r) => r.ok).length // ok against a good baseline = accepted (bug)
-    : 0
+  // Tally the verdicts the renderer already judged. The old rule here was
+  // `r.ok === accepted`, which is only true when the test HAS a success check —
+  // without one, `ok` just means "the steps completed", so a run where the app
+  // correctly rejected all 14 hostile inputs was summarised as 14 accepted.
+  // Fall back to the old rule only for records saved before verdicts existed.
+  const acceptedCount = variants.some((r) => r.verdict)
+    ? variants.filter((r) => r.verdict === 'accepted').length
+    : input.baselineOk
+      ? variants.filter((r) => r.ok).length
+      : 0
   const rec: EdgeRunRecord = {
     ...input,
     id: `edge-${Date.now()}`,

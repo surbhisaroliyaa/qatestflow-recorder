@@ -110,6 +110,11 @@ import {
   entryBodyBase64,
   type HarLog
 } from './har'
+// F1: how long a HAR-intercepted request may stay paused before we give up and
+// let it hit the live network. Deciding what to serve is pure in-memory work
+// (match + base64), so anything still outstanding after this went wrong — and a
+// slightly slow request beats a page that hangs forever with no error.
+const HAR_PAUSE_WATCHDOG_MS = 5000
 import {
   saveTrace,
   loadTrace,
@@ -2129,17 +2134,22 @@ function createWindow(): void {
       // F1 (HAR replay): load the archive to serve from (if any) and tally what
       // gets served vs passed through to the live network.
       //
-      // SAFETY GATE: serving responses via the CDP Fetch domain on the embedded
-      // WebContentsView proved unstable (it hung/crashed the browser process on
-      // Replay) and could not be reliably reproduced or verified outside the
-      // real app. Until it's stabilised on real hardware, in-app serving is OFF
-      // — capture + save (a valid .har) still work; deterministic replay is
-      // deferred (see the exported Playwright routeFromHAR path instead). Normal
-      // no-HAR replay is unaffected (everything below is gated on replayHar).
-      const HAR_SERVE_IN_APP: boolean = false
-      const replayHar: HarLog | null = !HAR_SERVE_IN_APP
-        ? null
-        : harFile === '__last'
+      // HISTORY — read before touching the interceptor below. Serving responses
+      // through the CDP Fetch domain once HUNG the embedded WebContentsView, and
+      // in-app serving sat behind a hardcoded kill switch from the day it was
+      // written. The cause is a single invariant: a paused request that is never
+      // fulfilled OR continued stalls forever, and the page waits on it with no
+      // error. Two mitigations were written at the time but never actually
+      // exercised, because the switch was off: only XHR/fetch are paused (never
+      // the top-level navigation or static assets), and a failed fulfill falls
+      // back to continue. Enabling it now adds the missing third: NOTHING can
+      // leave a request paused — see the interceptor's watchdog.
+      //
+      // Serving only engages when a HAR is actually selected for the run, so the
+      // escape hatch is simply not picking one; no-HAR replay never touches this
+      // code path (everything below is gated on `replayHar`).
+      const replayHar: HarLog | null =
+        harFile === '__last'
           ? lastCapturedHar
           : harFile
             ? ((await loadHar(harFile)) as HarLog | null)
@@ -2465,8 +2475,10 @@ function createWindow(): void {
           wc: Electron.WebContents
           cdp: Electron.Debugger
           ready: boolean
-          // F1: the per-debugger Fetch interceptor, kept so finish() can detach it.
+          // F1: the per-debugger Fetch interceptor, kept so finish() can detach it,
+          // plus its in-flight watchdog timers so finish() can clear them.
           fetchListener?: CdpListener
+          fetchPending?: Map<string, NodeJS.Timeout>
         }
       >()
       let cdp: Electron.Debugger = currentWC.debugger
@@ -2487,6 +2499,7 @@ function createWindow(): void {
             // sendInputEvent for hover; no CDP means no network evidence here.
           }
           let fetchListener: CdpListener | undefined
+          let fetchPending: Map<string, NodeJS.Timeout> | undefined
           if (ready) {
             d.on('message', onCdpMessage)
             d.sendCommand('Network.enable').catch(() => {
@@ -2536,6 +2549,31 @@ function createWindow(): void {
             // anyway. Every paused request MUST be fulfilled or continued or the
             // page hangs — so any error falls back to continueRequest.
             if (replayHar && replayHar.log?.entries?.length) {
+              // THE INVARIANT: every paused request must end in fulfillRequest or
+              // continueRequest. Leave one paused and the page hangs on it with no
+              // error — the symptom that shelved this feature. So a watchdog is
+              // armed the instant a request pauses, BEFORE any logic that could
+              // throw; whatever happens next, the request gets continued.
+              const pending = new Map<string, NodeJS.Timeout>()
+              fetchPending = pending
+              const settle = (requestId: string): void => {
+                const t = pending.get(requestId)
+                if (t) clearTimeout(t)
+                pending.delete(requestId)
+              }
+              // Let it hit the live network (augment mode). Safe to call twice —
+              // settle() makes the watchdog a no-op once the request is resolved.
+              const passThrough = (requestId: string): void => {
+                settle(requestId)
+                d.sendCommand('Fetch.continueRequest', { requestId })
+                  .then(() => {
+                    harPassthrough++
+                  })
+                  .catch(() => {
+                    // request already gone, or the debugger detached — either way
+                    // there is nothing left to strand.
+                  })
+              }
               const onFetch = (
                 _e: unknown,
                 method: string,
@@ -2543,31 +2581,39 @@ function createWindow(): void {
               ): void => {
                 if (method !== 'Fetch.requestPaused') return
                 const requestId = String(params.requestId)
-                const req = params.request as { url?: string; method?: string } | undefined
-                const passThrough = (): void => {
-                  d.sendCommand('Fetch.continueRequest', { requestId })
-                    .then(() => {
-                      harPassthrough++
-                    })
-                    .catch(() => {})
-                }
-                const entry = req?.url
-                  ? matchEntry(replayHar.log.entries, req.method ?? 'GET', req.url)
-                  : null
-                if (!entry) return passThrough()
-                d.sendCommand('Fetch.fulfillRequest', {
+                pending.set(
                   requestId,
-                  responseCode: entry.response.status,
-                  responseHeaders: serveHeaders(entry).map((h) => ({
-                    name: h.name,
-                    value: h.value
-                  })),
-                  body: entryBodyBase64(entry)
-                })
-                  .then(() => {
-                    harServed++
+                  setTimeout(() => passThrough(requestId), HAR_PAUSE_WATCHDOG_MS)
+                )
+                try {
+                  const req = params.request as { url?: string; method?: string } | undefined
+                  const entry = req?.url
+                    ? matchEntry(replayHar.log.entries, req.method ?? 'GET', req.url)
+                    : null
+                  if (!entry) return passThrough(requestId)
+                  // The HAR matched but captured no body for it (bodies aren't
+                  // always retrievable). Serving an empty 200 would break a page
+                  // that expects JSON, so go to the network instead — a miss is
+                  // far better than a lie.
+                  if (entry.response.content?.text == null) return passThrough(requestId)
+                  d.sendCommand('Fetch.fulfillRequest', {
+                    requestId,
+                    responseCode: entry.response.status,
+                    responseHeaders: serveHeaders(entry).map((h) => ({
+                      name: h.name,
+                      value: h.value
+                    })),
+                    body: entryBodyBase64(entry)
                   })
-                  .catch(passThrough)
+                    .then(() => {
+                      settle(requestId)
+                      harServed++
+                    })
+                    .catch(() => passThrough(requestId))
+                } catch {
+                  // A malformed entry must not cost us the request.
+                  passThrough(requestId)
+                }
               }
               d.on('message', onFetch)
               fetchListener = onFetch
@@ -2581,7 +2627,7 @@ function createWindow(): void {
               }).catch(() => {})
             }
           }
-          rec = { wc: wcToAttach, cdp: d, ready, fetchListener }
+          rec = { wc: wcToAttach, cdp: d, ready, fetchListener, fetchPending }
           attached.set(wcToAttach.id, rec)
         }
         return rec
@@ -2699,6 +2745,13 @@ function createWindow(): void {
             try {
               rec.cdp.removeListener('message', onCdpMessage)
               if (rec.fetchListener) rec.cdp.removeListener('message', rec.fetchListener)
+              // F1: drop any armed watchdogs — detaching releases the paused
+              // requests itself, and a timer firing afterwards would only send a
+              // continueRequest down a debugger that is already gone.
+              if (rec.fetchPending) {
+                for (const t of rec.fetchPending.values()) clearTimeout(t)
+                rec.fetchPending.clear()
+              }
               rec.cdp.detach()
             } catch {
               // already detached — fine
@@ -5294,12 +5347,24 @@ function createWindow(): void {
       .map((a) => {
         const el = captured[a.element]
         if (!el || !el.candidates.length) return null
-        const primary = (el.candidates.find((c) => c.css) ?? el.candidates[0]) as {
-          css?: string | null
-        }
+        // Every candidate carries BOTH a raw `css` string and a `locator`
+        // EXPRESSION. `selector` must be the EXPRESSION: every exporter emits
+        // `page.${selector}`, so storing raw CSS here produced
+        // `page.[data-test="username"]` — a SyntaxError that aborted the whole
+        // spec before a single test ran. The app's own replay parses selectors
+        // leniently, so these steps went GREEN in-app and failed in every real
+        // runner (export, headless, parallel, monitors, cross-browser).
+        //
+        // Picking on `locator` rather than `css` also stops us skipping the
+        // role/text candidates, whose `css` is null but whose locator
+        // (`getByRole("textbox", { name: "Username" })`) is perfectly good.
+        // Candidates arrive in score order, so the first match is the best one.
+        const primary = el.candidates.find((c) => typeof c.locator === 'string' && c.locator) as
+          | { locator?: string }
+          | undefined
         const base = {
           label: el.label,
-          selector: primary.css ?? undefined,
+          selector: primary?.locator ?? undefined,
           candidates: el.candidates
         }
         if (a.action === 'type') return { type: 'type', ...base, value: a.value ?? '' }
@@ -5351,34 +5416,60 @@ function createWindow(): void {
   // instruction the tester grounds by recording over them) and checks become real
   // `nl` assertions that run at replay. navigate paths are resolved against the
   // page the user is currently on, so a bare "/inventory" becomes a full URL.
-  const resolveDraftUrl = (text: string, baseUrl?: string): string => {
+  // Only a target we actually FOUND — a full URL, or a path — is trustworthy.
+  // Everything else is a guess, and a guess is reported as one: the step still
+  // gets a usable URL, but `guessed` marks it in the review list so a
+  // plausible-but-wrong address is caught BEFORE Insert instead of failing much
+  // later, at replay, with an error that looks nothing like its cause.
+  const isHttpUrl = (u: string): boolean => {
+    try {
+      return /^https?:$/.test(new URL(u).protocol)
+    } catch {
+      return false
+    }
+  }
+  const resolveDraftUrl = (text: string, baseUrl?: string): { url: string; guessed: boolean } => {
     const t = (text || '').trim()
     // The model is asked for a bare path/URL, but often wraps it in prose
     // ("Open the login page at /login"). Extract the real target rather than
     // storing the sentence — an un-navigable URL would fail at replay.
     // 1. A full URL anywhere in the text wins (stop at whitespace or a ")").
     const urlInProse = t.match(/https?:\/\/[^\s)]+/i)
-    if (urlInProse) return urlInProse[0].replace(/[.,]+$/, '') // drop trailing punctuation
+    if (urlInProse) {
+      const found = urlInProse[0].replace(/[.,]+$/, '') // drop trailing punctuation
+      if (isHttpUrl(found)) return { url: found, guessed: false }
+    }
+    // 2. A path: either the WHOLE string, or one embedded in prose. The whole
+    //    string only counts when it contains no whitespace — "/login page shows
+    //    the form" starts with "/" but is a SENTENCE, and taking it verbatim is
+    //    how prose used to end up in the URL. Requiring a word boundary before
+    //    the "/" also stops us grabbing the slash inside things like "and/or".
+    const path =
+      t.startsWith('/') && !/\s/.test(t) ? t : (t.match(/(?:^|\s)(\/[^\s)]+)/)?.[1] ?? '')
     if (baseUrl) {
       try {
         const base = new URL(baseUrl)
-        // 2. The whole thing is already a clean path.
-        if (t.startsWith('/')) return base.origin + '/' + t.replace(/^\/+|\/+$/g, '')
-        // 3. A /path token embedded in prose — require it to start a word so we
-        //    don't grab the slash inside things like "and/or".
-        const pathInProse = t.match(/(?:^|\s)(\/[^\s)]+)/)
-        if (pathInProse && pathInProse[1].length > 1) {
-          return base.origin + '/' + pathInProse[1].replace(/^\/+|[.,/]+$/g, '')
+        if (path.length > 1) {
+          const abs = base.origin + '/' + path.replace(/^\/+|[.,/]+$/g, '')
+          if (isHttpUrl(abs)) return { url: abs, guessed: false }
         }
-        // 4. A single bare word like "login" -> a path under the current origin.
-        if (t && !t.includes(' ')) return base.origin + '/' + t.replace(/^\/+|\/+$/g, '')
-        // 5. Prose with no path at all -> just open the current site's root.
-        return base.origin + '/'
+        // 3. A single bare word like "login" -> a path under the current origin;
+        //    prose with no path at all -> the current site's root. Both are
+        //    GUESSES: the story never actually named a target.
+        const fallback =
+          t && !t.includes(' ')
+            ? base.origin + '/' + t.replace(/^\/+|\/+$/g, '')
+            : base.origin + '/'
+        if (isHttpUrl(fallback)) return { url: fallback, guessed: true }
       } catch {
-        /* fall through */
+        /* unusable base — fall through */
       }
     }
-    return t // no base to resolve against — leave it for the step editor
+    // 4. No page open to resolve against. A bare path is still the best answer
+    //    we have (the step editor can finish it). Prose is NOT — storing a
+    //    sentence as a URL is the very thing this function exists to prevent, so
+    //    leave it empty and let the flag tell the user to fill it in.
+    return { url: path.length > 1 ? path : '', guessed: true }
   }
   const trunc = (s: string, n = 60): string => (s.length > n ? s.slice(0, n - 1) + '…' : s)
   ipcMain.handle(
@@ -5388,12 +5479,17 @@ function createWindow(): void {
       story: string,
       diff: string | undefined,
       baseUrl: string | undefined
-    ): Promise<{ title: string; steps: unknown[]; note: string } | null> => {
+    ): Promise<{ title: string; steps: unknown[]; note: string; guessed: number[] } | null> => {
       const res = await draftTestFromStory(story, diff, libraryDir())
       if (res == null) return null // Claude unavailable — renderer surfaces it
-      const steps = res.steps.map((d) => {
+      // Indices of navigate steps whose URL we had to guess. Kept OUT of the step
+      // itself so nothing review-only can be saved into the test file.
+      const guessed: number[] = []
+      const steps = res.steps.map((d, i) => {
         if (d.kind === 'navigate') {
-          return { type: 'navigate', url: resolveDraftUrl(d.text, baseUrl), label: `Go to ${trunc(d.text)}` }
+          const target = resolveDraftUrl(d.text, baseUrl)
+          if (target.guessed) guessed.push(i)
+          return { type: 'navigate', url: target.url, label: `Go to ${trunc(d.text)}` }
         }
         if (d.kind === 'check') {
           return { type: 'assert', assertKind: 'nl', value: d.text, label: `Check: ${trunc(d.text)}` }
@@ -5401,7 +5497,13 @@ function createWindow(): void {
         // action → a manual pause with the instruction, for the tester to ground.
         return { type: 'wait', waitKind: 'manual', value: d.text, label: `Do: ${trunc(d.text)}` }
       })
-      return { title: res.title, steps, note: res.note }
+      const notes = [res.note]
+      if (guessed.length) {
+        notes.push(
+          `${guessed.length} “Go to” step${guessed.length === 1 ? '' : 's'} had no clear address in the story — marked ⚠ below. Set the URL before you replay.`
+        )
+      }
+      return { title: res.title, steps, note: notes.filter(Boolean).join(' '), guessed }
     }
   )
 
@@ -5581,13 +5683,18 @@ function createWindow(): void {
       harFile?: string,
       ciWorkflow?: string,
       configFile?: string
-    ): Promise<string | null> => {
+    ): Promise<{ path: string; alsoWrote: string[]; pageOverwritten: boolean } | null> => {
       const result = await dialog.showSaveDialog(mainWindow, {
         title: 'Save Playwright test',
         defaultPath: 'recorded.spec.ts',
         filters: [{ name: 'TypeScript test', extensions: ['ts'] }]
       })
       if (result.canceled || !result.filePath) return null
+      // Everything written BESIDES the spec the dialog named. A POM export, a CI
+      // workflow and a cross-browser config all land in folders the user never
+      // chose, and reporting only the spec made them look unwritten.
+      const alsoWrote: string[] = []
+      let pageOverwritten = false
       await writeFile(result.filePath, code, 'utf-8')
       // Day 16(+): the exported test references its upload files by a relative
       // `fixtures/<name>` path. Copy each fixture into a fixtures/ folder beside
@@ -5625,29 +5732,46 @@ function createWindow(): void {
       }
       // Day 17 (full POM): the spec imports the page class from `./pages/<Name>` —
       // write that class file into a pages/ folder beside the spec.
+      //
+      // The save dialog only ever names the SPEC, so this file lands silently and
+      // the user is told about one file when two were written. Both paths are
+      // returned now so the confirmation can name them.
       if (pageObjectCode && pageObjectFileName) {
         const pagesDir = join(dirname(result.filePath), 'pages')
+        const pagePath = join(pagesDir, pageObjectFileName)
+        // The class name comes from the TEST name, so two different tests with
+        // the same name write the same file. Exporting the second silently
+        // replaces the first's page class and leaves that spec paired with a
+        // class it no longer matches. Only flag a REAL change — re-exporting the
+        // same test is routine and must not nag.
+        try {
+          const existing = await readFile(pagePath, 'utf-8')
+          if (existing !== pageObjectCode) pageOverwritten = true
+        } catch {
+          // no previous file — nothing to overwrite
+        }
         await mkdir(pagesDir, { recursive: true }).catch(() => {})
-        await writeFile(join(pagesDir, pageObjectFileName), pageObjectCode, 'utf-8').catch(() => {})
+        await writeFile(pagePath, pageObjectCode, 'utf-8').catch(() => {})
+        alsoWrote.push(pagePath)
       }
       // F33: a GitHub Actions workflow that runs the tests on every PR. Written to
       // .github/workflows/ RELATIVE TO THE SPEC — the file's header tells the user
       // to move it to the repo root if the spec lives in a subfolder.
       if (ciWorkflow) {
         const wfDir = join(dirname(result.filePath), '.github', 'workflows')
+        const wfPath = join(wfDir, 'playwright.yml')
         await mkdir(wfDir, { recursive: true }).catch(() => {})
-        await writeFile(join(wfDir, 'playwright.yml'), ciWorkflow, 'utf-8').catch(() => {})
+        await writeFile(wfPath, ciWorkflow, 'utf-8').catch(() => {})
+        alsoWrote.push(wfPath)
       }
       // F17: a cross-browser playwright.config.ts written beside the spec, so
       // `npx playwright test` runs it on Chromium + Firefox + WebKit.
       if (configFile) {
-        await writeFile(
-          join(dirname(result.filePath), 'playwright.config.ts'),
-          configFile,
-          'utf-8'
-        ).catch(() => {})
+        const cfgPath = join(dirname(result.filePath), 'playwright.config.ts')
+        await writeFile(cfgPath, configFile, 'utf-8').catch(() => {})
+        alsoWrote.push(cfgPath)
       }
-      return result.filePath
+      return { path: result.filePath, alsoWrote, pageOverwritten }
     }
   )
 }
