@@ -1062,10 +1062,43 @@ function conditionExpr(step: RecorderStep, pageVar: string, portableTestId: bool
   return kind === 'element-absent' ? `!(${visible})` : `(${visible})`
 }
 
+/**
+ * How long an exported optional step waits before giving up. Mirrors the app's
+ * own `step.optional ? 2500 : 8000` (replay.ts) — WITHOUT it the exported step
+ * inherits Playwright's 30s default, so an absent element (the only case
+ * optional exists for) stalls for 30s, exhausts the test's own 30s budget, and
+ * every later step runs against a closed page. Proven, not theorised.
+ */
+const OPTIONAL_TIMEOUT_MS = 2500
+
+/**
+ * Add `{ timeout: … }` to the action call on `line`.
+ *
+ * Every step type that CAN be optional (click / type / select / press / hover /
+ * assert — see canBeOptional) ends in a call whose last parameter is an options
+ * object, so appending one is always valid. `toHaveScreenshot`, whose second
+ * parameter is NOT options, is excluded from optional and can't reach here.
+ */
+function withOptionalTimeout(line: string): string {
+  // A trailing `// comment` (the password step carries one). Matched only when
+  // it holds no ")", so a ")" inside a string value can't be mistaken for the
+  // call's closing paren. Anything else is treated as pure code.
+  const withComment = /^(.*\))(\s*\/\/[^)]*)$/.exec(line)
+  const code = withComment ? withComment[1] : line
+  const comment = withComment ? withComment[2] : ''
+  const close = code.lastIndexOf(')')
+  if (close < 0) return line // not a call — leave it exactly as it is
+  const head = code.slice(0, close)
+  const opts = `{ timeout: ${OPTIONAL_TIMEOUT_MS} }`
+  // `foo()` takes the object as its only argument; `foo(x)` needs a comma.
+  const sep = head.trimEnd().endsWith('(') ? '' : ', '
+  return `${head}${sep}${opts})${comment}`
+}
+
 function wrapOptional(line: string, pad: string): string {
   return (
     `${pad}try {\n` +
-    `${pad}  ${line}\n` +
+    `${pad}  ${withOptionalTimeout(line)}\n` +
     `${pad}} catch { /* optional step: element not present, skipped */ }`
   )
 }
