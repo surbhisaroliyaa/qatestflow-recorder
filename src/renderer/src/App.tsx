@@ -4466,6 +4466,23 @@ function App(): React.JSX.Element {
     setBlocksPanelOpen(true)
     refreshBlocks()
   }
+  // A block MARKER can carry per-step flags of its own — F27's 🗃️ "creates
+  // data" is set on the block row, not on the steps inside it. Expanding
+  // replaces that marker with the block's inner steps, so the flag used to
+  // vanish: a block marked "creates data" reported as creating nothing, and the
+  // suite-level "no teardown — orphaned records will pile up" warning silently
+  // never fired. The badge showed on the row the whole time, so it looked set.
+  //
+  // Carried onto the FIRST inner step: once, where a reader expects it, instead
+  // of N copies that would list the same label repeatedly in the docs. An inner
+  // step with its own marker keeps it — the block's flag never overwrites one
+  // the block's author set deliberately.
+  const carryBlockFlags = (marker: RecorderStep, inner: RecorderStep[]): RecorderStep[] => {
+    if (!marker.createsData || !inner.length) return inner
+    const [first, ...rest] = inner
+    return [first.createsData ? first : { ...first, createsData: marker.createsData }, ...rest]
+  }
+
   // Replace each linked `block` step with the block's CURRENT steps loaded FRESH
   // from disk (so a run/export always reflects the latest edit — the "live" in
   // live-link). Flattens any nested block refs too. Identity for a test with no
@@ -4476,7 +4493,7 @@ function App(): React.JSX.Element {
       if (s.type === 'block') {
         if (s.disabled || !s.blockRef) continue
         const b = await window.api.blocks.load(s.blockRef)
-        if (b) out.push(...(await expandForRun(b.steps as RecorderStep[])))
+        if (b) out.push(...carryBlockFlags(s, await expandForRun(b.steps as RecorderStep[])))
       } else {
         out.push(s)
       }
@@ -4497,7 +4514,9 @@ function App(): React.JSX.Element {
       if (s.type === 'block') {
         if (s.disabled || !s.blockRef) continue
         const b = await window.api.blocks.load(s.blockRef)
-        const inner = b ? await expandForRun(b.steps as RecorderStep[]) : []
+        // Same flag carriage as expandForRun — a block's 🗃️ marker must survive
+        // flattening here too, or the docs built from this plan lose it.
+        const inner = b ? carryBlockFlags(s, await expandForRun(b.steps as RecorderStep[])) : []
         for (const st of inner) {
           flat.push(st)
           map.push(i)
