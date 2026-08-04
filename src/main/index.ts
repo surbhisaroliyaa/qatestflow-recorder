@@ -36,6 +36,7 @@ import {
 // F37: loops + branching. Shared with the renderer's Playwright export so the
 // app and the exported spec can never disagree about how a loop runs.
 import { analyzeControlFlow, isControlStep, resolveLoopTokens } from '../shared/controlFlow'
+import { collidesWithOsEnv } from '../shared/osEnvNames'
 // F40: passwords live in userData, not in the shared test files.
 import { resolveSecrets, getSecrets, migratePlaintextSecrets } from './secrets'
 // F40: export/import the library as a portable, git-committable bundle.
@@ -4522,14 +4523,42 @@ function createWindow(): void {
   // is this environment's password when one is selected, and the shell's
   // otherwise. Missing everywhere → '' (the step runs empty and fails honestly),
   // keeping a secret out of the saved test + the export.
-  ipcMain.handle('env:get', async (_event, names: string[]): Promise<Record<string, string>> => {
-    const envVars = await activeEnvVars()
-    const out: Record<string, string> = {}
-    for (const name of Array.isArray(names) ? names : []) {
-      out[name] = envVars[name] ?? process.env[name] ?? ''
+  // Resolve {{env:NAME}} for a run: the active environment's vars first, then the
+  // real process environment.
+  //
+  // The process fallback is deliberate — it's how a CI machine supplies a value
+  // with no environment configured. But it silently made `{{env:USERNAME}}` mean
+  // "the Windows account name", because the OS always sets that. A suite run with
+  // no environment active typed `samee` into a login, and the failure surfaced
+  // three steps later as "Expected URL to contain /inventory.html", categorised
+  // "stale data" — a plausible, wrong explanation pointing at the test rather
+  // than the environment. Same hole the EXPORT had; fixed there first and missed
+  // here, which is exactly why the name list now lives in src/shared/.
+  //
+  // For a colliding name the OS value is refused: an empty result is honest, and
+  // `unresolved` tells the caller which names have no value so the run can say so
+  // instead of typing nothing and failing somewhere else.
+  ipcMain.handle(
+    'env:get',
+    async (
+      _event,
+      names: string[]
+    ): Promise<{ values: Record<string, string>; unresolved: string[] }> => {
+      const envVars = await activeEnvVars()
+      const values: Record<string, string> = {}
+      const unresolved: string[] = []
+      for (const name of Array.isArray(names) ? names : []) {
+        // An environment the user configured always wins, collision or not —
+        // they named it deliberately.
+        const fromEnv = envVars[name]
+        const fromProcess = collidesWithOsEnv(name) ? undefined : process.env[name]
+        const value = fromEnv ?? fromProcess ?? ''
+        values[name] = value
+        if (!value) unresolved.push(name)
+      }
+      return { values, unresolved }
     }
-    return out
-  })
+  )
 
   // === Environment / config manager (F25) ============================
   // CRUD + active selection for named { baseURL + credentials } environments,

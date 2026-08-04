@@ -245,7 +245,13 @@ const api = {
     // Day 20 (data-driven): resolve {{env:NAME}} tokens for a run — the active
     // F25 environment's vars first, then the real process environment (renderer
     // can't read arbitrary env vars itself).
-    resolveEnv: (names: string[]): Promise<Record<string, string>> =>
+    // `unresolved` = names with no value anywhere, so a run can SAY so instead of
+    // substituting '' and failing somewhere unrelated. A name the OS defines
+    // (USERNAME…) never falls through to the process value — see
+    // src/shared/osEnvNames.ts.
+    resolveEnv: (
+      names: string[]
+    ): Promise<{ values: Record<string, string>; unresolved: string[] }> =>
       ipcRenderer.invoke('env:get', names)
   },
 

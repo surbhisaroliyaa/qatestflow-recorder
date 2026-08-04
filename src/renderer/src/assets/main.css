@@ -5565,6 +5565,15 @@ body {
   color: #f0b232;
 }
 
+/* F25: the unresolved-{{env:…}} list inside the suite report's warning block. */
+.env-missing-list {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+.env-missing-list li {
+  margin: 3px 0;
+}
+
 /* Each extra file an export wrote, on its own line — a run-on sentence of paths
    is exactly how the page class went unnoticed. */
 .saved-path-extra {

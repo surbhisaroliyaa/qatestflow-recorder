@@ -35,6 +35,7 @@ import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
 // export and the run all agree on how markers pair up.
 import { analyzeControlFlow, isControlStep, type ConditionKind } from '../../shared/controlFlow'
 import { saveSpecWarning } from '../../shared/apiSaveSpec'
+import { collidesWithOsEnv } from '../../shared/osEnvNames'
 import { SUGGESTED_TAGS, parseTags, normalizeTag, allTags, matchesTags } from './tags'
 import { headlessBlockers, blockerSummary, defaultWorkers, headlessCategory } from './headless'
 
@@ -756,6 +757,14 @@ function App(): React.JSX.Element {
     screenshotPath?: string
     category?: FailureCategory // B: failure type (for the by-category breakdown)
     healed?: number // B: selectors auto-healed in this test's run
+    // F25: {{env:NAME}} tokens that resolved to NOTHING for this test. A suite
+    // run is `silent`, so the workspace panel that normally reports this is never
+    // touched — and the reader is looking at the suite report anyway. Without it
+    // here, a test that typed an empty username fails several steps later as
+    // "stale data", an explanation that points at the test rather than the
+    // environment. Carried per-test because a suite can mix tests that need
+    // different variables.
+    unresolvedEnv?: string[]
     // F39: this result came from the headless parallel batch, not the in-app
     // replay engine. Shown in the report because the two aren't equivalent —
     // no self-heal, no recovery pause — so the reader should know which ran it.
@@ -923,6 +932,9 @@ function App(): React.JSX.Element {
   const [aiHealedIndices, setAiHealedIndices] = useState<Set<number>>(new Set())
   // F37: notes about branches/loops that didn't run in the last replay.
   const [branchNotes, setBranchNotes] = useState<string[]>([])
+  // F25: {{env:NAME}} tokens the last run couldn't resolve — surfaced in the
+  // panel so an empty substitution can't masquerade as a test-data problem.
+  const [unresolvedEnv, setUnresolvedEnv] = useState<string[]>([])
   // F19: how many AI checks the CURRENTLY-RUNNING step is judging in one model
   // call. An AI check costs ~7-12s per CALL regardless of how many claims ride
   // in it, so the first check of a run pays for the whole group and the rest
@@ -953,6 +965,10 @@ function App(): React.JSX.Element {
   // block's inner steps all map to the block's single row). null / identity for
   // a test with no linked blocks.
   const runPlanRef = useRef<number[] | null>(null)
+  // F25: {{env:NAME}} tokens the last applyEnv could not resolve. A ref, not
+  // state — applyEnv runs inside the run's async flow and a state write wouldn't
+  // be visible to the code that reports the outcome.
+  const unresolvedEnvRef = useRef<string[]>([])
   const toDisplayIdx = (i: number): number => runPlanRef.current?.[i] ?? i
 
   // A1 (scalable library): the flaky tag for a test (from its run history) + a
@@ -1129,8 +1145,15 @@ function App(): React.JSX.Element {
     let list = flat
     const names = envVarNames(flat, [])
     if (names.length) {
-      const envMap = await window.api.recorder.resolveEnv(names)
-      list = substituteSteps(list, {}, envMap)
+      const res = await window.api.recorder.resolveEnv(names)
+      // A token with no value used to be substituted as '' in silence — the run
+      // typed nothing and failed several steps later with a message pointing
+      // nowhere near the cause. Record it so the run can say which name is
+      // missing; the substitution still happens, so nothing else changes.
+      unresolvedEnvRef.current = res.unresolved
+      list = substituteSteps(list, {}, res.values)
+    } else {
+      unresolvedEnvRef.current = []
     }
     if (activeEnv?.baseURL && !skipRetarget) {
       list = retargetSteps(list, fromBase || deriveBaseURL(flat), activeEnv.baseURL)
@@ -2134,6 +2157,9 @@ function App(): React.JSX.Element {
       // F37: surface untaken branches / empty loops on PASS as well as fail —
       // a green run that skipped its checks is exactly the case worth flagging.
       setBranchNotes(result.branchNotes ?? [])
+      // F25: names that resolved to nothing this run. Shown on PASS too — a token
+      // that silently became '' can leave a test green while testing nothing.
+      setUnresolvedEnv(unresolvedEnvRef.current)
       // F1: surface how the HAR was used this run (absent when no HAR was in play).
       setLastHarUsage(
         result.harServed !== undefined
@@ -2304,7 +2330,14 @@ function App(): React.JSX.Element {
     const noEnv = choice === 'noenv'
     if (isDataDriven) {
       const row = dataRows[0] ?? {}
-      const envMap = await window.api.recorder.resolveEnv(envVarNames(flat, [row]))
+      // A data-driven test's {{env:…}} tokens usually live in the DATA ROWS, not
+      // the steps (a password column of {{env:SAUCE_PW}}), so applyEnv — which
+      // scans steps against an empty row set — never sees them. Record what
+      // didn't resolve here too, or the run reports nothing while every row
+      // types an empty password.
+      const { values: envMap, unresolved: envMissing } =
+        await window.api.recorder.resolveEnv(envVarNames(flat, [row]))
+      unresolvedEnvRef.current = envMissing
       let list = substituteSteps(flat, resolveRow(row, envMap), envMap)
       if (activeEnv?.baseURL && !noEnv) list = retargetSteps(list, fromBase, activeEnv.baseURL)
       await runOnce(list, testFileName, false)
@@ -2449,7 +2482,10 @@ function App(): React.JSX.Element {
     // flattened flow (the index map lets per-row marks hit the right rows).
     const { flat, map } = await buildRunPlan(steps)
     runPlanRef.current = map
-    const envMap = await window.api.recorder.resolveEnv(envVarNames(flat, dataRows))
+    // Env tokens in the data rows are invisible to applyEnv — collect them here.
+    const { values: envMap, unresolved: envMissing } =
+      await window.api.recorder.resolveEnv(envVarNames(flat, dataRows))
+    unresolvedEnvRef.current = envMissing
     setDataRun({ total: dataRows.length, current: 0, currentLabel: '', results: [], running: true })
     const results: DataRunEntry[] = []
     for (let i = 0; i < dataRows.length; i++) {
@@ -2539,7 +2575,9 @@ function App(): React.JSX.Element {
     // whichever user logs in), so bind the first row — mirroring the data runner.
     let listBase: RecorderStep[]
     if (isDataDriven && dataRows.length > 0) {
-      const envMap = await window.api.recorder.resolveEnv(envVarNames(flat, dataRows))
+      const { values: envMap, unresolved: envMissing } =
+        await window.api.recorder.resolveEnv(envVarNames(flat, dataRows))
+      unresolvedEnvRef.current = envMissing
       listBase = substituteSteps(flat, resolveRow(dataRows[0], envMap), envMap)
       if (activeEnv?.baseURL && !localeNoEnv) {
         listBase = retargetSteps(listBase, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
@@ -3954,7 +3992,13 @@ function App(): React.JSX.Element {
         const suiteRows = data.dataRows ?? []
         let result: Awaited<ReturnType<typeof runOnce>>
         if (suiteCols.length > 0 && suiteRows.length > 0) {
-          const envMap = await window.api.recorder.resolveEnv(envVarNames(flatSuite, suiteRows))
+          // The suite's data-driven path. Its env tokens live in the ROWS (a
+          // password column of {{env:SAUCE_PW}}), which applyEnv never scans —
+          // so without this a data-driven test reported nothing while all 5 rows
+          // typed an empty password. Found by exactly that, on Positive Login.
+          const { values: envMap, unresolved: envMissing } =
+            await window.api.recorder.resolveEnv(envVarNames(flatSuite, suiteRows))
+          unresolvedEnvRef.current = envMissing
           const rowOutcomes: { label: string; r: Awaited<ReturnType<typeof runOnce>> }[] = []
           let rowAborted = false
           for (let r = 0; r < suiteRows.length; r++) {
@@ -4023,7 +4067,11 @@ function App(): React.JSX.Element {
           error: result.error,
           screenshotPath: result.screenshotPath,
           category: result.category,
-          healed: result.aiHealed
+          healed: result.aiHealed,
+          // Read from the ref: applyEnv set it while building THIS test's steps.
+          unresolvedEnv: unresolvedEnvRef.current.length
+            ? [...unresolvedEnvRef.current]
+            : undefined
         }
         // B: this test's selectors auto-healed — capture the REPAIRED display
         // steps (block-aware, updated by the auto-heal events) so the report can
@@ -4036,7 +4084,14 @@ function App(): React.JSX.Element {
             saveInput: {
               name: data.name,
               baseURL: data.baseURL,
-              suite,
+              // The TEST'S OWN section — not `suite`, which is this RUN's display
+              // label ("8 selected tests", "17 failed tests"). Saving under the
+              // run label wrote a healed DUPLICATE into a folder named after the
+              // run and left the real test untouched, so the heal looked saved,
+              // reappeared on the next run, and the library quietly grew a junk
+              // section every time. Both "8 selected tests" and "17 failed tests"
+              // in the library are old run labels created exactly this way.
+              suite: t.suite,
               steps: stepsRef.current.slice(),
               storageState: data.storageState,
               viewport: data.viewport,
@@ -4055,7 +4110,10 @@ function App(): React.JSX.Element {
           const hf: HealableFail = {
             fileName: t.fileName,
             name: data.name,
-            suite,
+            // The test's own section, for the same reason as the healed-save
+            // above: handleAcceptHealable saves with this, and the run label
+            // would file the accepted fix as a duplicate in a junk folder.
+            suite: t.suite,
             hasBlocks: (data.steps as RecorderStep[]).some((s) => s.type === 'block'),
             healable: result.healable
           }
@@ -4165,6 +4223,32 @@ function App(): React.JSX.Element {
         lines.push(`- **${CATEGORY_LABELS[c as FailureCategory] ?? c}: ${n}**${why ? ` — ${why}` : ''}`)
       }
       lines.push('')
+    }
+    // F25: unresolved {{env:…}} — in the pasted report too, since that's what
+    // reaches a ticket. Without it the reader sees only the downstream failure.
+    {
+      const byVar = new Map<string, string[]>()
+      for (const r of suiteRun.results) {
+        for (const v of r.unresolvedEnv ?? []) {
+          byVar.set(v, [...(byVar.get(v) ?? []), r.name])
+        }
+      }
+      if (byVar.size) {
+        lines.push('## ⚠ Environment variables with no value', '')
+        lines.push(
+          `Each was replaced with an empty string, so a failure below may be about the environment rather than the test.`,
+          ''
+        )
+        for (const [v, tests] of byVar) {
+          lines.push(
+            `- \`{{env:${v}}}\` — ${tests.length} test${tests.length === 1 ? '' : 's'}: ${tests.join(', ')}` +
+              (collidesWithOsEnv(v)
+                ? ' _(never read from the OS, which defines this name too)_'
+                : '')
+          )
+        }
+        lines.push('')
+      }
     }
     if (suiteRun.healables?.length) {
       lines.push('## Healable failures (review before accepting)', '')
@@ -7747,13 +7831,59 @@ function App(): React.JSX.Element {
                     </div>
                   )}
 
+                  {/* F25: {{env:NAME}} tokens that resolved to nothing in this run.
+                      ABOVE the per-test rows on purpose — it explains failures the
+                      classifier can only describe. A test whose username token was
+                      empty fails as "Expected URL to contain /inventory.html" and
+                      gets tagged "stale data": plausible, and pointing at entirely
+                      the wrong thing. Listed once with the affected tests rather
+                      than repeated on every row. */}
+                  {(() => {
+                    const byVar = new Map<string, string[]>()
+                    for (const r of suiteRun.results) {
+                      for (const v of r.unresolvedEnv ?? []) {
+                        byVar.set(v, [...(byVar.get(v) ?? []), r.name])
+                      }
+                    }
+                    if (!byVar.size) return null
+                    return (
+                      <div className="edge-warn edge-warn-block">
+                        ⚠ {byVar.size} environment {byVar.size === 1 ? 'variable' : 'variables'} had
+                        no value in this run — every step using{' '}
+                        {byVar.size === 1 ? 'it' : 'them'} typed an{' '}
+                        <strong>empty string</strong>, so a failure below may be about the
+                        environment rather than the test.
+                        <ul className="env-missing-list">
+                          {[...byVar.entries()].map(([v, tests]) => (
+                            <li key={v}>
+                              <code>{`{{env:${v}}}`}</code> — {tests.length}{' '}
+                              {tests.length === 1 ? 'test' : 'tests'}: {tests.join(', ')}
+                              {collidesWithOsEnv(v) && (
+                                <>
+                                  {' '}
+                                  <em>
+                                    (never read from the operating system, which defines this name
+                                    too — that would supply your account name instead of a test
+                                    value)
+                                  </em>
+                                </>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                        Set {byVar.size === 1 ? 'it' : 'them'} in the environment you ran against,
+                        or pick one that defines {byVar.size === 1 ? 'it' : 'them'}.
+                      </div>
+                    )
+                  })()}
+
                   {/* B: heal review — persist every auto-healed selector in one click. */}
                   {healedSaves.length > 0 && (
                     <div className={`blast-radius${suiteRun.healedSaved ? ' blast-radius-safe' : ''}`}>
                       {suiteRun.healedSaved ? (
                         <span className="blast-radius-head">
-                          ✓ Saved the repaired selectors for {healedSaves.length} test
-                          {healedSaves.length > 1 ? 's' : ''}.
+                          ✓ Saved {healedCount} repaired selector{healedCount > 1 ? 's' : ''} across{' '}
+                          {healedSaves.length} test{healedSaves.length > 1 ? 's' : ''}.
                         </span>
                       ) : (
                         <>
@@ -7893,9 +8023,15 @@ function App(): React.JSX.Element {
                   </ul>
 
                   <div className="modal-footer">
+                    {/* Both numbers, because they differ and the banner above shows
+                        the other one: N selectors were repaired, spread across M
+                        test FILES, and saving writes the files. A bare "(3)" under
+                        a "10 selectors auto-healed" heading reads like 7 fixes are
+                        being dropped. */}
                     {healedSaves.length > 0 && !suiteRun.healedSaved && (
                       <button className="modal-btn primary" onClick={handleSaveAllHealed}>
-                        💾 Save all healed ({healedSaves.length})
+                        💾 Save {healedSaves.length} test{healedSaves.length > 1 ? 's' : ''} (
+                        {healedCount} fix{healedCount > 1 ? 'es' : ''})
                       </button>
                     )}
                     <button className="modal-btn" onClick={handleCopySuiteReport}>
@@ -10089,6 +10225,35 @@ function App(): React.JSX.Element {
             <div className="replay-status healed">
               🔧 {healedIndices.size} selector{healedIndices.size > 1 ? 's' : ''} healed by re-pick
               — 💾 save to keep the fix
+            </div>
+          )}
+
+          {/* F25: a {{env:NAME}} that resolved to nothing. Shown on PASS as well
+              as fail: the token is substituted with '' either way, so a green run
+              can be one that typed nothing and checked nothing. Named explicitly,
+              because the resulting failure lands several steps later and reads
+              like test-data rot — a real run failed "Expected URL to contain
+              /inventory.html" when the actual cause was an unset USERNAME. */}
+          {unresolvedEnv.length > 0 && !isReplaying && (
+            <div className="replay-status branch-note">
+              <strong>
+                ⚠ {unresolvedEnv.length} environment{' '}
+                {unresolvedEnv.length === 1 ? 'variable' : 'variables'} had no value
+              </strong>
+              <div>{unresolvedEnv.map((n) => `{{env:${n}}}`).join(', ')}</div>
+              <div className="branch-note-why">
+                Each was replaced with an <strong>empty string</strong>, so any step using it typed
+                nothing. Set it in the active environment (⚙ Manage environments), or pick an
+                environment that defines it, then run again.
+                {unresolvedEnv.some((n) => collidesWithOsEnv(n)) && (
+                  <>
+                    {' '}
+                    Note: a name the operating system also defines (e.g.{' '}
+                    <code>USERNAME</code>) is <strong>never</strong> read from the OS — that would
+                    silently supply your account name instead of a test value.
+                  </>
+                )}
+              </div>
             </div>
           )}
 

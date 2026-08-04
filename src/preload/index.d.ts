@@ -160,7 +160,11 @@ interface RecorderAPI {
   snapshot: () => Promise<void>
   // Day 20 (data-driven): resolve {{env:NAME}} tokens against the running
   // process environment, so a real secret never sits in the data table.
-  resolveEnv: (names: string[]) => Promise<Record<string, string>>
+  // `unresolved` = names with no value anywhere. An OS-defined name (USERNAME…)
+  // never falls through to the process value — see src/shared/osEnvNames.ts.
+  resolveEnv: (
+    names: string[]
+  ) => Promise<{ values: Record<string, string>; unresolved: string[] }>
 }
 
 // === Environment / config manager (F25) ===

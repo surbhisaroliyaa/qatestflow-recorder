@@ -187,56 +187,12 @@ function isIdent(name: string): boolean {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
 }
 
-/**
- * Environment variable names the OPERATING SYSTEM already defines.
- *
- * `{{env:USERNAME}}` exports to `process.env.USERNAME`, and on Windows that is
- * ALWAYS set — to the logged-in account name. So the `?? ''` fallback, which
- * exists to catch an unset variable, can never fire: the spec silently fills the
- * OS username into a login form and the test fails as "wrong credentials", or
- * worse passes because nothing asserts afterwards. Verified: an exported
- * SauceDemo login typed `samee` and the run went green while the login failed.
- *
- * CI is not safer — GitHub Actions and most runners set USERNAME/USER too, so it
- * becomes the classic "works locally, breaks in CI" with nothing pointing at the
- * cause.
- *
- * Names are compared case-insensitively: Windows env vars are case-insensitive,
- * and `{{env:username}}` reads the same variable as `{{env:USERNAME}}`.
- */
-const OS_ENV_NAMES = new Set([
-  'username',
-  'user',
-  'userprofile',
-  'userdomain',
-  'home',
-  'homepath',
-  'homedrive',
-  'path',
-  'pathext',
-  'temp',
-  'tmp',
-  'os',
-  'computername',
-  'hostname',
-  'shell',
-  'lang',
-  'pwd',
-  'logname',
-  'appdata',
-  'localappdata',
-  'programfiles',
-  'systemroot',
-  'windir',
-  'processor_architecture',
-  'number_of_processors',
-  'session_name'
-])
-
-/** Does this `{{env:NAME}}` collide with a variable the OS already sets? */
-export function collidesWithOsEnv(name: string): boolean {
-  return OS_ENV_NAMES.has(name.trim().toLowerCase())
-}
+// The OS-collision list moved to src/shared/osEnvNames.ts so main's own
+// {{env:…}} resolution uses the SAME list — the app had the identical hole and
+// it went unnoticed because the fix landed only here. Imported (used below) AND
+// re-exported, so existing importers of this module are unaffected.
+import { collidesWithOsEnv } from '../../shared/osEnvNames'
+export { collidesWithOsEnv }
 
 /**
  * Every `{{env:NAME}}` in these steps that collides with an OS variable.
