@@ -531,6 +531,31 @@ function App(): React.JSX.Element {
     // so coverage credit is scoped to the site actually crawled (not cross-site).
     coveredContains: { value: string; origins: string[] }[]
   } | null>(null)
+  // Offer the browser somewhere sensible to break a long URL in the steps panel.
+  //
+  // `.step-text` is already `word-break: break-word`, which breaks mid-word only
+  // when a word genuinely cannot fit — and in a narrow panel a URL cannot, so
+  // "https://www.saucedemo.com/login" came out as "https://www." / "saucedemo.c"
+  // / "om/login". No CSS property says "prefer to break at a slash", so the
+  // break opportunities are inserted here: a zero-width <wbr> after each
+  // separator. The text itself is unchanged — copying the step still yields the
+  // original URL, since <wbr> contributes no characters.
+  //
+  // Done at the RENDER site, not in stepText(): that string also feeds living
+  // docs (markdown) and the exported spec's comments, where markup would be
+  // wrong.
+  const withUrlBreaks = (text: string): React.ReactNode => {
+    if (!/[/.?&=_-]/.test(text)) return text
+    const parts = text.split(/(?<=[/.?&=_-])/)
+    if (parts.length < 2) return text
+    return parts.map((p, i) => (
+      <span key={i}>
+        {p}
+        {i < parts.length - 1 && <wbr />}
+      </span>
+    ))
+  }
+
   // Normalise a URL path for coverage matching (drop query/hash + trailing slash).
   const normCovPath = (p: string): string => {
     const q = (p || '/').split('?')[0].split('#')[0].replace(/\/+$/, '')
@@ -4878,17 +4903,28 @@ function App(): React.JSX.Element {
   // a background run can't fight their foreground work.
   useEffect(() => {
     const tick = async (): Promise<void> => {
-      // `isReplaying` is only true DURING each individual runOnce(), and a suite
-      // clears it between tests — so a 30-second tick landing in that gap used
-      // to start a headless monitor run in the middle of a Run All. Guard on the
-      // whole suite/parallel batch, not just the single replay inside it.
+      // `isReplaying` is only true DURING each individual runOnce(), and a batch
+      // clears it between iterations — so a 30-second tick landing in that gap
+      // used to start a headless monitor run in the middle of a Run All. Guard on
+      // the whole batch, not just the single replay inside it.
+      //
+      // EVERY batch kind, not only the suite. The original fix covered `suiteRun`
+      // and left the other three long-running batches exposed to the identical
+      // race: a data-driven run (one runOnce per ROW), a locales run (one per
+      // LOCALE) and an edge-case explosion (one per VARIANT) all clear
+      // `isReplaying` between iterations exactly the same way. Same bug, three
+      // more doors. (`parallelRunning` is derived from `suiteRun`, kept for
+      // readability.)
       if (
         monitorBusyRef.current ||
         isRecording ||
         isReplaying ||
         isPicking ||
         suiteRun?.running ||
-        parallelRunning
+        parallelRunning ||
+        dataRun?.running ||
+        localeRun?.running ||
+        edgeRun?.running
       )
         return
       const now = Date.now()
@@ -4902,7 +4938,19 @@ function App(): React.JSX.Element {
     const id = window.setInterval(tick, 30000)
     return () => window.clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monitors, isRecording, isReplaying, isPicking, suiteRun?.running, parallelRunning])
+    // Every guarded flag belongs here too, or the effect keeps a stale closure
+    // and the tick reads the value from when it was last created.
+  }, [
+    monitors,
+    isRecording,
+    isReplaying,
+    isPicking,
+    suiteRun?.running,
+    parallelRunning,
+    dataRun?.running,
+    localeRun?.running,
+    edgeRun?.running
+  ])
 
   // Save a 1-based range of the current steps as a named block (default: all).
   // The range is FLATTENED first (any linked block inside it becomes its steps)
@@ -11233,7 +11281,7 @@ function App(): React.JSX.Element {
                       ) : isControl ? (
                         <span className="step-text step-text-control">{stepText(step)}</span>
                       ) : (
-                        <span className="step-text">{stepText(step)}</span>
+                        <span className="step-text">{withUrlBreaks(stepText(step))}</span>
                       )}
                       {/* F26: optional step — skipped (not failed) if absent. */}
                       {step.optional && (

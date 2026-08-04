@@ -252,7 +252,9 @@ export function generateSuiteDoc(
   }
   if (orphanTotal > 0) {
     lines.push(
-      `> 🗃️ ${orphanTotal} test${orphanTotal === 1 ? '' : 's'} create data but have **no teardown** to remove it — orphaned records will pile up in the environment.`
+      // The VERBS have to agree with the count too — "1 test create data but have
+      // no teardown" was pluralising the noun and leaving the verbs plural.
+      `> 🗃️ ${orphanTotal} test${orphanTotal === 1 ? '' : 's'} ${orphanTotal === 1 ? 'creates' : 'create'} data but ${orphanTotal === 1 ? 'has' : 'have'} **no teardown** to remove it — orphaned records will pile up in the environment.`
     )
     lines.push('')
   }

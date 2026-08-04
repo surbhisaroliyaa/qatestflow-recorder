@@ -4320,11 +4320,33 @@ function createWindow(): void {
               // Day 12.9: annotate the evidence first — red error banner, plus
               // an outline around the culprit element when it still resolves.
               // Draw → capture → erase: the marks live only inside the PNG.
-              try {
-                await currentWC.executeJavaScript(buildFailureMarkScript(step, message), true)
-                await wait(120) // let the scroll + overlay paint before capture
-              } catch {
-                // decoration failed — capture the plain screenshot anyway
+              //
+              // Retried once. An a11y step injects axe-core (a large script)
+              // immediately before failing, and the banner injection that follows
+              // sometimes loses that race — so the SAME failure got a banner on one
+              // run and a plain screenshot on the next. Intermittent, reproduced
+              // and then not reproduced. A second attempt after a short pause is
+              // enough; the swallow below is still the backstop.
+              //
+              // The catch stays silent-by-intent (a decoration problem must never
+              // cost the screenshot), but no longer INVISIBLE: the reason is
+              // recorded as console evidence, so a future miss is diagnosable
+              // instead of mysterious.
+              let marked = false
+              for (let attempt = 0; attempt < 2 && !marked; attempt++) {
+                try {
+                  if (attempt > 0) await wait(150) // let the renderer settle
+                  await currentWC.executeJavaScript(buildFailureMarkScript(step, message), true)
+                  marked = true
+                  await wait(120) // let the scroll + overlay paint before capture
+                } catch (e) {
+                  if (attempt === 1) {
+                    addEvidence(
+                      consoleErrors,
+                      `failure-screenshot annotation failed twice: ${e instanceof Error ? e.message : String(e)}`
+                    )
+                  }
+                }
               }
               annotatedImage = await currentWC.capturePage()
               const dir = join(libraryDir(), '_failures')
