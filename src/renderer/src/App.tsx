@@ -4772,6 +4772,47 @@ function App(): React.JSX.Element {
           if (secretStep?.value) envVars.PASSWORD = secretStep.value
         }
       }
+      // Every OTHER run path resolves {{env:…}} up front and says which names had
+      // no value — in-app replay, single-row, data runs, suite runs. The monitor
+      // path didn't, so an undefined variable was handed to the generator as a raw
+      // token: the test typed "{{env:SAUCE_PW}}" as a password, stayed on the login
+      // page, and reported `Expected pattern /inventory.html` — an assertion failure
+      // that says nothing about the actual cause. Diagnosing that took a code read.
+      //
+      // Recorded as 'error' (setup is broken), not 'failed' (the app under test is
+      // broken) — the two mean different things, and errors are deliberately not
+      // retried, since running it twice more cannot conjure a missing value.
+      const needed = envVarNames(flat, rows)
+      if (needed.length) {
+        const { values, unresolved } = await window.api.recorder.resolveEnv(needed)
+        // The pinned environment wins; resolveEnv only knows the ACTIVE one plus the
+        // process, so anything the pin already supplied is not missing.
+        //
+        // Tested on EMPTINESS, not `undefined`. env:get resolves a missing name to
+        // '' and reports it in `unresolved` (index.ts:4577) — so an `undefined`
+        // check copies that empty string in, decides the variable is present, and
+        // the guard never fires. Which is precisely the failure this guard exists
+        // to catch: an empty value passing itself off as a real one.
+        for (const n of needed) {
+          if (!envVars[n] && values[n]) envVars[n] = values[n]
+        }
+        const missing = unresolved.filter((n) => !envVars[n])
+        if (missing.length) {
+          const names = missing.map((n) => `{{env:${n}}}`).join(', ')
+          const why =
+            mon.envId && !pinned
+              ? ' This monitor is pinned to an environment that no longer exists, so none of its variables were applied — pick a different one on the monitor’s card.'
+              : ' Add the value to the environment this monitor runs against, or pick a different one on its card.'
+          const run = {
+            at: new Date().toISOString(),
+            status: 'error' as const,
+            detail: `${missing.length} environment variable${missing.length === 1 ? '' : 's'} had no value: ${names}.${why}`
+          }
+          setMonitors(await window.api.monitors.recordRun(mon.id, run))
+          if (mon.alertOnFail) await fireMonitorAlert(mon, run)
+          return
+        }
+      }
       session = test.storageState || undefined
     } catch (e) {
       const run = {
