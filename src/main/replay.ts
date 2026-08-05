@@ -608,7 +608,24 @@ export function buildActionScript(step: ReplayStep): string {
   const tolerant = step.type === 'hover' || step.type === 'assert'
   // F26: an optional step's element may simply not be there — don't burn the
   // full 8s wait on it; 2.5s is plenty to confirm presence, then it skips.
-  const findTimeout = step.optional ? 2500 : 8000
+  // Matched to Playwright's default (30s), deliberately.
+  //
+  // The in-app engine used to give up at 8s while the exported spec waited 30s,
+  // so the SAME test could legitimately fail in the app and pass headless purely
+  // because a page was slow — which is exactly what `Upload fixture check` did:
+  // failed in-app at 22:53, passed headless at 22:57, same site, same test. A
+  // test that disagrees with itself depending on which engine ran it is worse
+  // than a slow one.
+  //
+  // The cost is real and was weighed: a genuinely-missing element now takes 30s
+  // to report instead of 8, so a suite full of broken selectors is slower to
+  // finish. Correctness of the verdict beats speed of the wrong one.
+  //
+  // OPTIONAL steps keep their short 2.5s wait. They expect the element to be
+  // ABSENT (a cookie banner that may not appear), so waiting longer just makes
+  // every run slower for no information — and an exported optional step waiting
+  // 30s for something it expects not to find was itself a bug (71c61ad).
+  const findTimeout = step.optional ? 2500 : 30000
   return `(async () => {${findPrelude(step.candidates ?? [], tolerant, findTimeout)}${action}\n})()`
 }
 

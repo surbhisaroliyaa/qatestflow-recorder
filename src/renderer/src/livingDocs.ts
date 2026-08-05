@@ -195,6 +195,7 @@ export function generateSuiteDoc(
     bySuite.get(key)!.push(e)
   }
   let noCheckTotal = 0
+  let fixtureNoCheckTotal = 0
   let deadTestTotal = 0
   let orphanTotal = 0 // F27: tests that create data but have no teardown to remove it
   for (const [suite, tests] of bySuite) {
@@ -204,13 +205,29 @@ export function generateSuiteDoc(
       const { actions, checks } = partition(t.flat)
       const real = realChecks(checks)
       const dead = checks.length - real.length
-      if (real.length === 0) noCheckTotal++
+      // A test tagged @fixture exists to prove a MECHANISM works — that a loop
+      // loops, that a device UA is applied, that a parallel batch runs. It has no
+      // checks by design, and counting it alongside a real test that forgot to
+      // assert anything is what made the warning untrustworthy: "34 tests verify
+      // nothing" was roughly half deliberate, so the number got ignored — and a
+      // warning you have learned to ignore hides the genuine cases inside it.
+      const isFixture = (t.meta.tags ?? []).some((x) => /^@?fixture$/i.test(x.trim()))
+      if (real.length === 0) {
+        if (isFixture) fixtureNoCheckTotal++
+        else noCheckTotal++
+      }
       if (dead > 0) deadTestTotal++
       // F27: what this test creates, and whether anything cleans it up.
       const created = t.flat
         .filter((s) => !s.disabled && s.createsData)
         .map((s) => s.createsData as string)
-      const hasTeardown = t.flat.some((s) => !s.disabled && s.teardown)
+      // `&& s.type === 'api'` matters: BOTH the runner (index.ts, the
+      // run-early-ended teardown sweep) and the exporter (playwrightExport.ts)
+      // honour teardown on API steps ONLY. This check did not, so marking a UI
+      // step as teardown made the doc report "cleaned up ✓" for cleanup that
+      // never runs — a false all-clear, which is worse than the warning it
+      // replaced. The doc must describe what the engine actually does.
+      const hasTeardown = t.flat.some((s) => !s.disabled && s.teardown && s.type === 'api')
       const orphan = created.length > 0 && !hasTeardown
       if (orphan) orphanTotal++
       // F36/F38: the DEVICE this runs as and the tags it carries belong on the
@@ -227,7 +244,11 @@ export function generateSuiteDoc(
       lines.push(
         `- **${t.name}**${deviceNote}${tagNote} — ${plural(actions.length, 'action')}, ${plural(real.length, 'check')}` +
           (dead > 0 ? ` _(${dead} dead)_` : '') +
-          (real.length === 0 ? ' ⚠ _(verifies nothing)_' : '') +
+          (real.length === 0
+            ? isFixture
+              ? ' 🔧 _(mechanics fixture — no checks by design)_'
+              : ' ⚠ _(verifies nothing)_'
+            : '') +
           (created.length
             ? ` 🗃️ _(creates ${created.join(', ')}${orphan ? ' — ⚠ no teardown!' : ' — cleaned up ✓'})_`
             : '')
@@ -240,7 +261,10 @@ export function generateSuiteDoc(
   }
   if (noCheckTotal > 0) {
     lines.push(
-      `> ⚠ ${noCheckTotal} test${noCheckTotal === 1 ? ' has' : 's have'} no checks that can fail — passing but verifying nothing.`
+      `> ⚠ ${noCheckTotal} test${noCheckTotal === 1 ? ' has' : 's have'} no checks that can fail — passing but verifying nothing.` +
+        (fixtureNoCheckTotal > 0
+          ? ` (${fixtureNoCheckTotal} more ${fixtureNoCheckTotal === 1 ? 'is a' : 'are'} deliberate 🔧 mechanics fixture${fixtureNoCheckTotal === 1 ? '' : 's'}, not counted here.)`
+          : '')
     )
     lines.push('')
   }

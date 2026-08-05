@@ -3860,7 +3860,21 @@ function createWindow(): void {
             // primary can fall back), re-fetching the document each tick since
             // DOM node ids go stale.
             let fileNodeId = 0
-            const uploadDeadline = Date.now() + 8000
+            // 30s — the same wait an ordinary element-find now gets, and the same
+            // Playwright uses. The reason is evidence, not taste:
+            //
+            // `Upload fixture check` passed in-app twice, then failed once with
+            // "Could not find the file input on the page", then passed HEADLESS
+            // four minutes later. The site (free-tier Heroku) was simply slow to
+            // serve the page; the in-app engine gave up at 8s and Playwright,
+            // which waits 30s, did not. The same test legitimately disagreeing
+            // with itself depending on which engine ran it is the failure here.
+            //
+            // Kept in step with replay.ts's findTimeout: if the two ever drift,
+            // uploads start disagreeing with every other kind of step about how
+            // long "not there yet" takes — the same class of inconsistency this
+            // change exists to remove.
+            const uploadDeadline = Date.now() + 30000
             for (;;) {
               const doc = (await cdp.sendCommand('DOM.getDocument', { depth: 0 })) as {
                 root: { nodeId: number }
