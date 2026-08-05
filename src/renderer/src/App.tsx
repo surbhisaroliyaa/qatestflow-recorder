@@ -29,7 +29,6 @@ import { generateSuiteDoc, type DocMeta } from './livingDocs'
 import { classifyRuns, type FlakyTag } from './flaky'
 import { trustScore } from './trust'
 import { findWeakAssertions } from './deadAssertions'
-import { diffSteps, diffCounts } from './stepDiff'
 import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
 // F37: loops + branching. Shared with the replay engine so the step list, the
 // export and the run all agree on how markers pair up.
@@ -57,11 +56,18 @@ import {
   EXAMPLE_URLS,
   LOCALE_PRESETS,
   PERF_METRIC_HELP,
-  VERDICT_LABELS
 } from './uiLabels'
 import { MonitorsModal } from './components/MonitorsModal'
 import { ApiEditorModal } from './components/ApiEditorModal'
 import { DraftModal } from './components/DraftModal'
+import { HistoryModal } from './components/HistoryModal'
+import { ExportCodeModal } from './components/ExportCodeModal'
+import { TraceViewerModal } from './components/TraceViewerModal'
+import { LocaleReportModal } from './components/LocaleReportModal'
+import { LocalePickerModal } from './components/LocalePickerModal'
+import { XbrowserModal } from './components/XbrowserModal'
+import { AnalysisModal } from './components/AnalysisModal'
+import { DataPopupModal } from './components/DataPopupModal'
 import { JiraModal } from './components/JiraModal'
 import { MockModal } from './components/MockModal'
 import { CoverageModal } from './components/CoverageModal'
@@ -81,9 +87,7 @@ import {
   assertNeedsValue,
   clip,
   formatBytes,
-  isThirdPartyLine,
   primaryCandidate,
-  siteFirstLines,
   stabilityClass
 } from './uiFormat'
 
@@ -9498,277 +9502,47 @@ function App(): React.JSX.Element {
       {/* === Day 20: data-run overview popup — auto-appears when the matrix
            finishes (which rows passed / failed). Drilling into a row's
            screenshot/recording/explanation is done from the inline panel tabs. */}
-      {dataPopupOpen && dataRun && (
-        <div className="modal-backdrop" onClick={() => setDataPopupDismissed(true)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">
-                Data run: {dataRun.results.filter((r) => r.status === 'passed').length} passed,{' '}
-                {dataRun.results.filter((r) => r.status === 'failed').length} failed
-              </span>
-              <button
-                className="modal-close"
-                onClick={() => setDataPopupDismissed(true)}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-            <ul className="suite-summary">
-              {dataRun.results.map((r, ri) => (
-                <li key={ri} className="suite-result">
-                  <span className={`run-dot ${r.status}`} />
-                  <span className="suite-result-name">{r.label}</span>
-                  {r.status === 'failed' && (
-                    // title: the CSS clamps at 5 lines, so a genuinely enormous error is
-                    // still recoverable on hover rather than lost.
-                    <span
-                      className="suite-result-error"
-                      title={`${r.failedAt !== undefined ? `step ${r.failedAt + 1} — ` : ''}${r.error ?? ''}`}
-                    >
-                      {r.failedAt !== undefined ? `step ${r.failedAt + 1} — ` : ''}
-                      {r.error}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-            <div className="modal-footer">
-              <span className="data-popup-hint">
-                Screenshots, recordings &amp; explanations are in the panel tabs.
-              </span>
-              <button className="modal-btn primary" onClick={() => setDataPopupDismissed(true)}>
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <DataPopupModal
+        dataPopupOpen={dataPopupOpen}
+        dataRun={dataRun}
+        setDataPopupDismissed={setDataPopupDismissed}
+      />
 
       {/* === Day 13: failure analysis + bug report modal. One overlay, two
           views: the diagnosis first, the generated report after the button.
           A modal is safe here even mid-recovery — setOverlay hides the
           native pane while it's open and restores it on close. === */}
-      {analysisOpen && (
-        <div className="modal-backdrop" onClick={closeAnalysis}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">
-                {bugReport ? '🐞 Bug report' : '💡 Failure analysis'}
-              </span>
-              <button className="modal-close" onClick={closeAnalysis} aria-label="Close">
-                ✕
-              </button>
-            </div>
-            {bugReport ? (
-              <pre className="modal-code">
-                <code>{bugReport}</code>
-              </pre>
-            ) : analyzing ? (
-              <div className="analysis-body">
-                <p className="analysis-waiting">
-                  {isDeep
-                    ? '🔬 Deep RCA — reading the whole trace and every step screenshot to find the root cause. This takes longer than a normal explain…'
-                    : 'Analyzing the failure… asking Claude first — if it isn’t available, this falls back to the built-in rules automatically.'}
-                </p>
-              </div>
-            ) : analysis ? (
-              <div className="analysis-body">
-                <div className="analysis-meta">
-                  <span className={`verdict-chip ${analysis.verdict}`}>
-                    {VERDICT_LABELS[analysis.verdict] ?? analysis.verdict}
-                  </span>
-                  {analysis.category && (
-                    <span className={`category-chip cat-${analysis.category}`}>
-                      {CATEGORY_LABELS[analysis.category] ?? analysis.category}
-                    </span>
-                  )}
-                  <span className="analysis-source">
-                    {isDeep && <span className="deep-badge">🔬 Deep RCA · </span>}
-                    {analysis.source === 'ai'
-                      ? 'analyzed by Claude'
-                      : 'built-in rules (Claude unavailable)'}
-                  </span>
-                </div>
-                <p className="analysis-text">{analysis.explanation}</p>
-                {analysis.impact && (
-                  <p className="analysis-impact">
-                    <strong>Impact:</strong> {analysis.impact}
-                  </p>
-                )}
-                {analysis.suggestion && (
-                  <p className="analysis-suggestion">→ {analysis.suggestion}</p>
-                )}
-                {lastEvidence &&
-                (lastEvidence.consoleErrors.length > 0 || lastEvidence.networkErrors.length > 0) ? (
-                  <div className="analysis-evidence">
-                    {lastEvidence.consoleErrors.length > 0 && (
-                      <>
-                        <span className="evidence-title">
-                          Console errors ({lastEvidence.consoleErrors.length})
-                        </span>
-                        <pre className="evidence-lines">
-                          {lastEvidence.consoleErrors.slice(0, 6).join('\n')}
-                        </pre>
-                      </>
-                    )}
-                    {lastEvidence.networkErrors.length > 0 && (
-                      <>
-                        <span className="evidence-title">
-                          Network problems ({lastEvidence.networkErrors.length})
-                        </span>
-                        <div className="evidence-lines">
-                          {siteFirstLines(lastEvidence.networkErrors)
-                            .slice(0, 6)
-                            .map((line, li) => (
-                              <div
-                                key={li}
-                                className={`evidence-line${isThirdPartyLine(line) ? ' dim' : ''}`}
-                              >
-                                {line}
-                              </div>
-                            ))}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ) : (
-                  <p className="analysis-noevidence">
-                    No console or network errors were captured during this run.
-                  </p>
-                )}
-              </div>
-            ) : null}
-            <div className="modal-footer">
-              {bugReport ? (
-                <>
-                  {reportSavedPath && (
-                    <span className="saved-path">Saved to {reportSavedPath}</span>
-                  )}
-                  <button className="modal-btn" onClick={() => setBugReport(null)}>
-                    ← Analysis
-                  </button>
-                  <button className="modal-btn" onClick={handleCopyReport}>
-                    Copy
-                  </button>
-                  {/* F34: turn this failure into a Jira ticket. */}
-                  <button
-                    className="modal-btn"
-                    onClick={handleOpenJira}
-                    title="Create a Jira ticket from this failure — pre-filled summary + the whole report as the description. Push it via API, or copy + open Jira's create page."
-                  >
-                    🎫 Jira
-                  </button>
-                  <button
-                    className="modal-btn primary"
-                    onClick={handleSaveReport}
-                    title="Save as Markdown — paste into GitHub, Jira, Slack, a wiki, or Claude"
-                  >
-                    Save .md
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button className="modal-btn" onClick={closeAnalysis}>
-                    Close
-                  </button>
-                  {/* F9 Stage 3: opt-in deep root-cause over the whole trace —
-                      only when a run trace was kept, and not mid-analysis. */}
-                  {lastTraceId && !analyzing && (
-                    <button
-                      className="modal-btn"
-                      onClick={handleDeepRca}
-                      title="Deep RCA: feed the WHOLE run trace — every step's screenshot, DOM, console/network — to Claude to find a root cause that may be earlier than where it failed. Slower; uses the saved trace."
-                    >
-                      🔬 Deep RCA
-                    </button>
-                  )}
-                  <button
-                    className="modal-btn primary"
-                    onClick={handleGenerateReport}
-                    disabled={analyzing || !lastEvidence}
-                    title="Turn this failure into a ready-to-paste markdown bug report"
-                  >
-                    🐞 Generate bug report
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <AnalysisModal
+        analysis={analysis}
+        analysisOpen={analysisOpen}
+        analyzing={analyzing}
+        bugReport={bugReport}
+        closeAnalysis={closeAnalysis}
+        handleCopyReport={handleCopyReport}
+        handleDeepRca={handleDeepRca}
+        handleGenerateReport={handleGenerateReport}
+        handleOpenJira={handleOpenJira}
+        handleSaveReport={handleSaveReport}
+        isDeep={isDeep}
+        lastEvidence={lastEvidence}
+        lastTraceId={lastTraceId}
+        reportSavedPath={reportSavedPath}
+        setBugReport={setBugReport}
+      />
 
       {/* === F12: version history — past edits on the left, a git-style diff
            of the selected version vs the current steps on the right, with a
            one-click restore. === */}
-      {historyOpen && (
-        <div className="modal-backdrop" onClick={() => setHistoryOpen(false)}>
-          <div className="history-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">🕘 Version history — {testName || 'this test'}</span>
-              <button
-                className="modal-close"
-                onClick={() => setHistoryOpen(false)}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="history-body">
-              <div className="history-versions">
-                {testVersions.map((v, vi) => {
-                  const c = diffCounts(v.steps as RecorderStep[], steps)
-                  return (
-                    <button
-                      key={vi}
-                      className={`history-version${vi === historyIdx ? ' active' : ''}`}
-                      onClick={() => setHistoryIdx(vi)}
-                    >
-                      <span className="history-version-when">
-                        {vi === 0 ? 'Previous edit' : `Edit −${vi}`} ·{' '}
-                        {new Date(v.at).toLocaleString()}
-                      </span>
-                      <span className="history-version-counts">
-                        {(v.steps as RecorderStep[]).length} steps
-                        {c.added > 0 && <span className="diff-add"> +{c.added}</span>}
-                        {c.removed > 0 && <span className="diff-del"> −{c.removed}</span>}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-              <div className="history-diff">
-                <div className="history-diff-head">
-                  This version → <strong>current</strong> (green = added since, red = removed)
-                </div>
-                {testVersions[historyIdx] &&
-                  diffSteps(testVersions[historyIdx].steps as RecorderStep[], steps).map(
-                    (line, li) => (
-                      <div key={li} className={`diff-line ${line.kind}`}>
-                        <span className="diff-mark">
-                          {line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ' '}
-                        </span>
-                        {line.text}
-                      </div>
-                    )
-                  )}
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button className="modal-btn" onClick={() => setHistoryOpen(false)}>
-                Close
-              </button>
-              <button
-                className="modal-btn primary"
-                onClick={handleRestoreVersion}
-                title="Replace the current steps with this version (your current steps are saved as a new version when you next save)"
-              >
-                ↩ Restore this version
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <HistoryModal
+        handleRestoreVersion={handleRestoreVersion}
+        historyIdx={historyIdx}
+        historyOpen={historyOpen}
+        setHistoryIdx={setHistoryIdx}
+        setHistoryOpen={setHistoryOpen}
+        steps={steps}
+        testName={testName}
+        testVersions={testVersions}
+      />
 
       {/* F25: environment / config manager — defined once above (opened from the
           library AND this workspace), rendered here for the workspace screen. */}
@@ -10110,164 +9884,23 @@ function App(): React.JSX.Element {
       {/* === F17: cross-browser runner — pick engines, run real Playwright,
            show per-browser pass/fail. The embedded engine is Chromium only, so
            WebKit/Firefox run via shelled-out Playwright. === */}
-      {xbOpen && (
-        <div className="modal-backdrop" onClick={() => !xbRunning && setXbOpen(false)}>
-          <div className="env-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">🧭 Cross-browser</span>
-              <button
-                className="modal-close"
-                onClick={() => setXbOpen(false)}
-                disabled={xbRunning}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-
-            {xbInstalled === false ? (
-              <div className="env-list">
-                <div className="edge-warn">
-                  ⚠ Cross-browser needs real Playwright (the embedded engine is Chromium only).
-                  Install it once, then reopen this:
-                  <pre className="xb-install">npm i -D @playwright/test{'\n'}npx playwright install</pre>
-                  Tip: you can run these right here by typing{' '}
-                  <code>! npm i -D @playwright/test</code> then{' '}
-                  <code>! npx playwright install</code>.
-                </div>
-                <div className="modal-footer">
-                  <button className="modal-btn" onClick={() => setXbOpen(false)}>
-                    Close
-                  </button>
-                  <button
-                    className="modal-btn"
-                    onClick={async () => setXbInstalled((await window.api.xbrowser.check()).installed)}
-                  >
-                    Re-check
-                  </button>
-                </div>
-              </div>
-            ) : xbBrowsers && (!xbBrowsers.chromium || xbNeedDownload) ? (
-              // The runner shipped with the app, but the engines it drives are a
-              // separate ~400 MB download that no installer should carry. This
-              // is a first-run state on a teammate's machine, so it has to be
-              // self-explanatory and fixable from right here.
-              <div className="env-list">
-                <div className="edge-warn">
-                  ⚠ The test browsers aren&rsquo;t downloaded yet.
-                  <p className="env-list-intro">
-                    QATestFlow ships the Playwright test runner, but the browser engines it
-                    drives (Chromium, Firefox, WebKit) are about 400 MB, so they&rsquo;re
-                    fetched once on first use and shared with any other Playwright project on
-                    this machine. Recording and in-app replay work without them &mdash; headless
-                    runs, parallel suite runs and cross-browser need them.
-                  </p>
-                  {xbInstalling && <pre className="xb-install">{xbInstallLog}</pre>}
-                  {!xbInstalling && xbInstallLog && <p className="env-list-intro">{xbInstallLog}</p>}
-                </div>
-                <div className="modal-footer">
-                  {xbInstalling ? (
-                    // Mid-download the only useful control is a way OUT. A few
-                    // hundred MB with no escape is a trap on a slow or metered
-                    // connection — and a first-time user is exactly who mis-clicks.
-                    <button className="modal-btn danger" onClick={handleCancelInstall}>
-                      Cancel download
-                    </button>
-                  ) : (
-                    <>
-                      <button className="modal-btn" onClick={() => setXbOpen(false)}>
-                        Close
-                      </button>
-                      <button
-                        className="modal-btn"
-                        onClick={() => handleInstallBrowsers(['chromium'])}
-                      >
-                        Chromium only (~150 MB)
-                      </button>
-                      <button
-                        className="modal-btn primary"
-                        onClick={() => handleInstallBrowsers(['chromium', 'firefox', 'webkit'])}
-                      >
-                        ⬇ Download all three (~400 MB)
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div className="env-edit">
-                <p className="env-list-intro">
-                  Run this test on real browser engines via Playwright. Chromium is what the app
-                  already uses; Firefox &amp; WebKit catch engine-specific bugs. Session / HAR /
-                  upload assets aren&rsquo;t included in this run (v1).
-                </p>
-
-                <div className="edge-section">
-                  <span className="env-field-label">Browsers</span>
-                  {(['chromium', 'firefox', 'webkit'] as const).map((b) => (
-                    <label key={b} className="edge-check">
-                      <input
-                        type="checkbox"
-                        checked={xbSel.has(b)}
-                        onChange={(e) => {
-                          const next = new Set(xbSel)
-                          if (e.target.checked) next.add(b)
-                          else next.delete(b)
-                          setXbSel(next)
-                        }}
-                      />
-                      {b === 'chromium' ? 'Chromium' : b === 'firefox' ? 'Firefox' : 'WebKit (Safari)'}
-                    </label>
-                  ))}
-                </div>
-
-                {xbResult && (
-                  <div className="xb-results">
-                    {xbResult.message && <div className="edge-warn">{xbResult.message}</div>}
-                    {xbResult.results.map((r) => (
-                      <div key={r.browser} className={`xb-result ${r.ok ? 'pass' : 'fail'}`}>
-                        <span className="xb-result-icon">{r.ok ? '✓' : '✗'}</span>
-                        <span className="xb-result-name">{r.browser}</span>
-                        {/* HOW MANY tests ran, not just whether they passed. A
-                            data-driven test contributes one test PER ROW, and a
-                            single green tick looks the same whether it ran six
-                            rows or silently collapsed them into one — which is
-                            exactly what this path used to do before the data
-                            table travelled with the spec. */}
-                        {r.total > 0 && (
-                          <span className="xb-result-count">
-                            {r.passed}/{r.total} {r.total === 1 ? 'test' : 'tests'}
-                          </span>
-                        )}
-                        {!r.ok && r.error && <span className="xb-result-error">{r.error}</span>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <div className="modal-footer">
-                  {xbRunning && (
-                    <span className="edge-count">
-                      Running on {xbSel.size} engine{xbSel.size === 1 ? '' : 's'}… (first WebKit run
-                      can take a minute)
-                    </span>
-                  )}
-                  <button className="modal-btn" onClick={() => setXbOpen(false)} disabled={xbRunning}>
-                    Close
-                  </button>
-                  <button
-                    className="modal-btn primary"
-                    onClick={handleRunXbrowser}
-                    disabled={xbRunning || xbSel.size === 0}
-                  >
-                    {xbRunning ? 'Running…' : `▶ Run on ${xbSel.size}`}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      <XbrowserModal
+        handleCancelInstall={handleCancelInstall}
+        handleInstallBrowsers={handleInstallBrowsers}
+        handleRunXbrowser={handleRunXbrowser}
+        setXbInstalled={setXbInstalled}
+        setXbOpen={setXbOpen}
+        setXbSel={setXbSel}
+        xbBrowsers={xbBrowsers}
+        xbInstallLog={xbInstallLog}
+        xbInstalled={xbInstalled}
+        xbInstalling={xbInstalling}
+        xbNeedDownload={xbNeedDownload}
+        xbOpen={xbOpen}
+        xbResult={xbResult}
+        xbRunning={xbRunning}
+        xbSel={xbSel}
+      />
 
       {/* F25 guard: host-mismatch warning, blocks the run until answered. */}
       {envWarnModal}
@@ -10298,168 +9931,19 @@ function App(): React.JSX.Element {
           Electron does not implement — it silently returned null). */}
       {createsDataModal}
       {/* F28: localization sweep — locale picker. */}
-      {localeOpen && (
-        <div className="modal-backdrop" onClick={() => setLocaleOpen(false)}>
-          <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">🌐 Localization sweep</span>
-              <button className="modal-close" onClick={() => setLocaleOpen(false)} aria-label="Close">
-                ✕
-              </button>
-            </div>
-            <div className="api-editor-body">
-              <p className="api-hint">
-                Replays this flow under each language and flags <strong>text overflow</strong>,{' '}
-                <strong>RTL layout</strong>, and strings that never changed from the base (likely{' '}
-                <strong>untranslated</strong>). The first selected locale is the base for comparison.
-              </p>
-              <div className="edge-section">
-                <span className="env-field-label">Languages</span>
-                {LOCALE_PRESETS.map((l) => (
-                  <label key={l.code} className="edge-check">
-                    <input
-                      type="checkbox"
-                      checked={localeSel.has(l.code)}
-                      onChange={(e) => {
-                        const next = new Set(localeSel)
-                        if (e.target.checked) next.add(l.code)
-                        else next.delete(l.code)
-                        setLocaleSel(next)
-                      }}
-                    />
-                    {l.label}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button className="modal-btn" onClick={() => setLocaleOpen(false)}>
-                Close
-              </button>
-              <button
-                className="modal-btn primary"
-                onClick={handleRunLocaleSweep}
-                disabled={localeSel.size === 0}
-              >
-                ▶ Run on {localeSel.size} locale{localeSel.size === 1 ? '' : 's'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <LocalePickerModal
+        handleRunLocaleSweep={handleRunLocaleSweep}
+        localeOpen={localeOpen}
+        localeSel={localeSel}
+        setLocaleOpen={setLocaleOpen}
+        setLocaleSel={setLocaleSel}
+      />
       {/* F28: localization sweep — per-locale results. */}
-      {localeRun && !localeRun.running && localeReportOpen && (
-        <div className="modal-backdrop" onClick={() => setLocaleReportOpen(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">
-                🌐 Localization sweep — {localeRun.results.length} locale
-                {localeRun.results.length === 1 ? '' : 's'}
-              </span>
-              <button
-                className="modal-close"
-                onClick={() => setLocaleReportOpen(false)}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="ac-body">
-              <p className="api-hint">
-                Each language replays your test, then checks three things: did the text
-                actually <strong>translate</strong>, did the <strong>layout hold</strong>{' '}
-                (no text cut off that fit fine in the base language), and did
-                right-to-left languages like Arabic <strong>flip direction</strong>{' '}
-                correctly. A green ✓ means all three are fine. Hover a row for the raw
-                numbers.
-              </p>
-              {(() => {
-                const rows = localeRun.results.map((r, i) => {
-                  const preset = LOCALE_PRESETS.find((l) => l.code === r.locale)
-                  const rtlIssue = !!preset?.rtl && r.dir !== 'rtl'
-                  const untr =
-                    i > 0 ? Math.round((r.unchanged / Math.max(1, r.totalTexts)) * 100) : null
-                  // Overflow RELATIVE TO THE BASE locale — a site trims the same
-                  // footer/menu bits in every language (even the base) by design, so
-                  // only overflow the TRANSLATION adds is a real finding. Text can't be
-                  // matched across locales (it's translated), so compare counts.
-                  const baseOverflow = localeRun.results[0]?.overflowCount ?? 0
-                  const extraOverflow = i === 0 ? 0 : Math.max(0, r.overflowCount - baseOverflow)
-                  // Only flag "unchanged" when a locale is BARELY translated (≥85%
-                  // identical to base = the site likely ignored the language). A normal
-                  // page keeps brand names/URLs identical, so a 60% cutoff cried wolf.
-                  const clean =
-                    r.ok && extraOverflow === 0 && !rtlIssue && (untr === null || untr < 85)
-                  return { r, i, rtlIssue, untr, baseOverflow, extraOverflow, clean }
-                })
-                const good = rows.filter((x) => x.clean).length
-                const issues = rows.length - good
-                return (
-                  <>
-                    <div className="ac-summary">
-                      {good} of {rows.length} language{rows.length === 1 ? '' : 's'} look good
-                      {issues > 0 ? ` · ${issues} need${issues === 1 ? 's' : ''} a look ⚠` : ' ✓'}
-                    </div>
-                    <ul className="ac-list">
-                      {rows.map(({ r, i, rtlIssue, untr, baseOverflow, extraOverflow, clean }) => {
-                        // Plain-English verdict. The raw dir/overflow/% live in the
-                        // hover title for anyone who wants the exact numbers.
-                        const plain = i === 0
-                          ? 'Baseline — every other language is compared against this one.'
-                          : extraOverflow > 0
-                            ? `After translating, text was cut off in ${extraOverflow} spot${extraOverflow === 1 ? '' : 's'} that fit fine in the base language — the layout may break here${r.overflow.length ? ` (e.g. “${r.overflow.slice(0, 2).join('”, “')}”)` : ''}.`
-                            : rtlIssue
-                              ? 'This language should read right-to-left, but the page stayed left-to-right.'
-                              : untr !== null && untr >= 85
-                                ? `Hardly translated — ${untr}% of the on-screen text is still the base language.`
-                                : r.dir === 'rtl'
-                                  ? 'Translated, the layout held up, and it correctly switched to right-to-left.'
-                                  : 'Translated and the layout held up — no text overflowed.'
-                        const raw = `dir=${r.dir} · overflow ${r.overflowCount} (base ${baseOverflow})${untr !== null ? ` · ${untr}% unchanged from base` : ''}`
-                        return (
-                          <li key={r.locale} className={`ac-row ${clean ? 'covered' : 'uncovered'}`}>
-                            <span className="ac-mark">{clean ? '✓' : '⚠'}</span>
-                            <span className="ac-text">
-                              <strong>{r.locale}</strong>
-                              {i === 0 ? ' (base)' : ''}
-                              {r.screenshotPath && (
-                                <button
-                                  className="ac-shot"
-                                  onClick={() =>
-                                    window.api.library.openScreenshot(r.screenshotPath!)
-                                  }
-                                >
-                                  📷
-                                </button>
-                              )}
-                            </span>
-                            {r.ok ? (
-                              <span className="ac-tests" title={raw}>
-                                {plain}
-                              </span>
-                            ) : (
-                              <span className="ac-tests" title={r.error || undefined}>
-                                Couldn’t finish the run
-                                {r.failedAt != null ? ` — stopped at step ${r.failedAt + 1}` : ''}
-                                {r.error ? `: ${r.error}` : ''}
-                              </span>
-                            )}
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  </>
-                )
-              })()}
-            </div>
-            <div className="modal-footer">
-              <button className="modal-btn primary" onClick={() => setLocaleReportOpen(false)}>
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <LocaleReportModal
+        localeReportOpen={localeReportOpen}
+        localeRun={localeRun}
+        setLocaleReportOpen={setLocaleReportOpen}
+      />
 
       {/* === F13: accessibility scan panel — WCAG A/AA violations for the
            current page, grouped by rule, each expandable to the offending
@@ -10761,266 +10245,38 @@ function App(): React.JSX.Element {
 
       {/* === Day 18: run-trace viewer — filmstrip of every step on the left,
            the selected step's screenshot + console/network on the right. === */}
-      {traceView && (
-        <div className="modal-backdrop" onClick={closeTrace}>
-          <div className="trace-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="trace-header">
-              <span className="trace-title">
-                ⏺ Run recording{traceView.testName ? ` — ${traceView.testName}` : ''}
-              </span>
-              <span className={`trace-result ${traceView.ok ? 'ok' : 'fail'}`}>
-                {traceView.ok ? '✓ passed' : '✗ failed'}
-              </span>
-              <span className="trace-when">{new Date(traceView.at).toLocaleString()}</span>
-              {traceSavedAt ? (
-                <span className="trace-saved" title={traceSavedAt}>
-                  ✓ saved
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  className="trace-save"
-                  onClick={saveTraceRecording}
-                  title="Copy this recording to a folder you choose"
-                >
-                  💾 Save recording
-                </button>
-              )}
-              <button className="trace-close" onClick={closeTrace} aria-label="Close">
-                ✕
-              </button>
-            </div>
-            <div className="trace-body">
-              <ol className="trace-steps">
-                {traceView.steps.map((s, pos) => (
-                  <li
-                    key={pos}
-                    className={`trace-step ${s.status}${pos === traceStepIdx ? ' active' : ''}`}
-                    onClick={() => selectTraceStep(pos)}
-                  >
-                    <span className="trace-step-num">{s.index + 1}</span>
-                    {s.thumbData ? (
-                      <img className="trace-thumb" src={s.thumbData} alt="" />
-                    ) : (
-                      <span className="trace-thumb empty" />
-                    )}
-                    <span className="trace-step-text">{s.text}</span>
-                    <span className={`trace-dot ${s.status}`} />
-                  </li>
-                ))}
-              </ol>
-              <div className="trace-preview">
-                {(() => {
-                  const step = traceView.steps[traceStepIdx]
-                  if (!step) return null
-                  return (
-                    <>
-                      <div className="trace-preview-head">
-                        <span className="trace-preview-title">
-                          Step {step.index + 1}: {step.text}
-                        </span>
-                        <span className="trace-preview-meta">
-                          {step.durationMs} ms · {step.status}
-                        </span>
-                      </div>
-                      {step.error && <div className="trace-error">{step.error}</div>}
-                      <div className="trace-shot">
-                        {traceImg ? (
-                          <img src={traceImg} alt="step screenshot" />
-                        ) : (
-                          <span className="trace-shot-loading">
-                            {step.screenshotFile
-                              ? 'Loading screenshot…'
-                              : step.status === 'pending'
-                                ? "This step didn't run — the run stopped before reaching it."
-                                : step.status === 'skipped'
-                                  ? 'This step was skipped — it did not run.'
-                                  : 'No screenshot for this step'}
-                          </span>
-                        )}
-                      </div>
-                      {(step.consoleErrors.length > 0 || step.networkErrors.length > 0) && (
-                        <div className="trace-evidence">
-                          {step.consoleErrors.length > 0 && (
-                            <div className="trace-ev-block">
-                              <div className="trace-ev-label">Console</div>
-                              {step.consoleErrors.map((l, i) => (
-                                <div key={i} className="trace-ev-line">
-                                  {l}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          {step.networkErrors.length > 0 && (
-                            <div className="trace-ev-block">
-                              <div className="trace-ev-label">Network</div>
-                              {step.networkErrors.map((l, i) => (
-                                <div key={i} className="trace-ev-line">
-                                  {l}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      <div className="trace-file-actions">
-                        {step.screenshotFile && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              window.api.trace.openFile(traceView.id, step.screenshotFile!)
-                            }
-                          >
-                            🖼 Open full image
-                          </button>
-                        )}
-                        {step.domFile && (
-                          <button
-                            type="button"
-                            onClick={() => window.api.trace.openFile(traceView.id, step.domFile!)}
-                          >
-                            {'</>'} Open page HTML
-                          </button>
-                        )}
-                      </div>
-                    </>
-                  )
-                })()}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <TraceViewerModal
+        closeTrace={closeTrace}
+        saveTraceRecording={saveTraceRecording}
+        selectTraceStep={selectTraceStep}
+        traceImg={traceImg}
+        traceSavedAt={traceSavedAt}
+        traceStepIdx={traceStepIdx}
+        traceView={traceView}
+      />
 
       {/* === Export preview modal === */}
-      {exportCode !== null && (
-        <div className="modal-backdrop" onClick={() => setExportCode(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">Playwright test</span>
-              <button
-                className="modal-close"
-                onClick={() => setExportCode(null)}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-            {/* An {{env:…}} token whose name the OS also defines. Warned HERE
-                because this is the last moment the name can be changed — once the
-                spec is in CI the symptom is a credentials failure that points
-                nowhere near the cause. */}
-            {exportEnvWarning.length > 0 && (
-              <div className="edge-warn edge-warn-block">
-                ⚠ <strong>{exportEnvWarning.join(', ')}</strong>{' '}
-                {exportEnvWarning.length === 1 ? 'is also an' : 'are also'} operating-system
-                environment variable{exportEnvWarning.length === 1 ? '' : 's'} — on Windows{' '}
-                <code>USERNAME</code> is your login name. Read directly, the test would silently use
-                that instead of your value. This export reads{' '}
-                <code>QA_{exportEnvWarning[0]}</code> instead and fails fast if it isn&rsquo;t set.
-                To remove the guard, rename the token to something app-specific (e.g.{' '}
-                <code>{'{{env:APP_' + exportEnvWarning[0] + '}}'}</code>).
-              </div>
-            )}
-            {/* Day 17: choose inline vs full Page Object Model output */}
-            <div className="export-modes">
-              <button
-                type="button"
-                className={`export-mode${!poExport ? ' chosen' : ''}`}
-                onClick={() => handleTogglePoExport(false)}
-              >
-                Inline
-              </button>
-              <button
-                type="button"
-                className={`export-mode${poExport ? ' chosen' : ''}`}
-                onClick={() => handleTogglePoExport(true)}
-                title="Full Page Object Model: a page class (locators + methods) + a spec that drives it. Single-page tests only."
-              >
-                Page Object
-              </button>
-              {/* In POM mode, two files — tabs to switch between spec and page class */}
-              {exportPage && (
-                <div className="export-file-tabs">
-                  <button
-                    type="button"
-                    className={`export-file-tab${exportTab === 'spec' ? ' chosen' : ''}`}
-                    onClick={() => setExportTab('spec')}
-                  >
-                    spec.ts
-                  </button>
-                  <button
-                    type="button"
-                    className={`export-file-tab${exportTab === 'page' ? ' chosen' : ''}`}
-                    onClick={() => setExportTab('page')}
-                  >
-                    {exportPageFileName}
-                  </button>
-                </div>
-              )}
-            </div>
-            <pre className="modal-code">
-              <code>{exportTab === 'page' && exportPage ? exportPage : exportCode}</code>
-            </pre>
-            <div className="modal-footer">
-              {savedPath && (
-                <span className="saved-path">
-                  {/* Every file, named. This used to list the CI workflow and the
-                      config but NOT the page class — the one file that lands in a
-                      folder the user never picked, so it looked like the POM
-                      export had saved only half of itself. */}
-                  Saved to {savedPath}
-                  {savedExtras.map((p) => (
-                    <span key={p} className="saved-path-extra">
-                      + {p}
-                    </span>
-                  ))}
-                  {savedPageOverwritten && (
-                    <span className="saved-path-warn">
-                      ⚠ A different page class already existed at that path and was replaced. The
-                      class name comes from the TEST name, so another test called “{testName ||
-                        'recorded flow'}” shares this file — its spec now imports a class that no
-                      longer matches it. Rename one of the tests and re-export.
-                    </span>
-                  )}
-                </span>
-              )}
-              {/* F33: opt-in — write a GitHub Actions workflow beside the spec so
-                  the exported tests run on every PR. */}
-              <label
-                className="export-ci-toggle"
-                title="Also write .github/workflows/playwright.yml — runs these tests on every push / PR"
-              >
-                <input
-                  type="checkbox"
-                  checked={exportCi}
-                  onChange={(e) => setExportCi(e.target.checked)}
-                />
-                ⚙️ CI workflow
-              </label>
-              {/* F17: opt-in — write a cross-browser playwright.config.ts beside
-                  the spec so `npx playwright test` runs on all three engines. */}
-              <label
-                className="export-ci-toggle"
-                title="Also write playwright.config.ts — runs the exported test on Chromium + Firefox + WebKit"
-              >
-                <input
-                  type="checkbox"
-                  checked={exportXbrowser}
-                  onChange={(e) => setExportXbrowser(e.target.checked)}
-                />
-                🧭 Cross-browser config
-              </label>
-              <button className="modal-btn" onClick={handleCopyExport}>
-                Copy
-              </button>
-              <button className="modal-btn primary" onClick={handleSaveExport}>
-                {exportPage || exportCi || exportXbrowser ? 'Save files' : 'Save .ts'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ExportCodeModal
+        exportCi={exportCi}
+        exportCode={exportCode}
+        exportEnvWarning={exportEnvWarning}
+        exportPage={exportPage}
+        exportPageFileName={exportPageFileName}
+        exportTab={exportTab}
+        exportXbrowser={exportXbrowser}
+        handleCopyExport={handleCopyExport}
+        handleSaveExport={handleSaveExport}
+        handleTogglePoExport={handleTogglePoExport}
+        poExport={poExport}
+        savedExtras={savedExtras}
+        savedPageOverwritten={savedPageOverwritten}
+        savedPath={savedPath}
+        setExportCi={setExportCi}
+        setExportCode={setExportCode}
+        setExportTab={setExportTab}
+        setExportXbrowser={setExportXbrowser}
+        testName={testName}
+      />
 
     </div>
   )
