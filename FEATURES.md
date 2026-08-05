@@ -569,10 +569,30 @@ with its own pinned environment and alerts on failure. Failures retry up to 3 ti
 — one transient blip shouldn't wake you — and alerts go to a desktop notification and optionally a
 Slack/Discord/Teams webhook.
 
-**How to run it.** Welcome screen → **📡 Monitors** → promote a test → set interval → enable.
+**How to run it.** Welcome screen **or the workspace toolbar** → **📡 Monitors** → promote a test →
+set interval → enable.
+
+**Editing one afterwards.** Both the **schedule** and the **environment** are dropdowns on the
+monitor's own card, so you can change either in place. Neither used to be editable — changing a
+monitor's cadence meant deleting it and building a new one, which threw away its entire run history.
+A monitor whose environment has since been deleted shows an amber **⚠ deleted environment** rather
+than looking like a normal setting: with no environment pinned, *none* of its variables are applied.
+
+**When a variable is missing.** If the test uses `{{env:NAME}}` and nothing supplies a value, the
+monitor refuses to run and says so — *"1 environment variable had no value: `{{env:SAUCE_PW}}`"* —
+recorded as **⚠ Can't run** rather than ✗ Failing. The two mean different things: your setup is
+broken, not the site. (Before this, the run went ahead with the raw token as a password, stayed on
+the login page, and reported a failed URL assertion — an error that says nothing about the cause.)
+
+**Watching one mid-run.** The dashboard opens from the workspace as well as the welcome screen, and
+stays available while a batch is running. While it's open you'll see an amber note that the page is
+hidden — any open dialog hides the embedded browser, and a screenshot taken then would come back
+blank. Close it to bring the page back.
 
 *Honest scope:* this runs while the app is open. It's a strong local "is my test still green while
-I work" watchdog, not 24/7 synthetic monitoring.
+I work" watchdog, not 24/7 synthetic monitoring. A scheduled monitor also waits for any batch you're
+running (suite, data-driven, locales or edge cases) to finish before it starts, so a background run
+can never gatecrash your foreground work.
 
 ### CI export
 
@@ -618,6 +638,35 @@ Rather than let you find these the hard way:
 - **Bug check** grounds to one page at a time; ride-along covers multi-page.
 - **Drafted tests** need their action steps grounded by recording over them.
 - **Mock Studio** shows nothing on a static site — it needs a site that makes real API calls.
+
+---
+
+# How the app itself is tested
+
+A testing tool that isn't tested is a bad joke, so here's the honest picture.
+
+**Unit tests — 66 of them, ~0.4 seconds.** They cover the four modules where this project has
+actually shipped bugs: the `{{token}}` engine, the control-flow pairing that matches `repeat` with
+`endRepeat`, the failure classifier for headless runs, and the list of environment-variable names
+the operating system already defines. They were chosen by bug history, not by what was easy to
+reach.
+
+**The suite was mutation-tested.** The source was broken on purpose, four different ways, to check
+the tests noticed. Three were caught immediately. The fourth wasn't — a test that was passing for
+the wrong reason — and chasing that turned up a piece of dead code in the failure classifier, which
+is now documented rather than quietly tested into a false green.
+
+**A pre-commit hook runs the suite**, so a commit that breaks any of it is refused rather than
+merely discouraged.
+
+*Honest scope:* this covers pure logic only. Anything needing a real window — recording, replay, the
+embedded browser, IPC between processes — is still verified by hand and by running exported specs
+for real. That last technique is what found most of the serious bugs in this project: the in-app
+engine is lenient, real Playwright is not, and comparing the two is what exposed exports that had
+never compiled and tests that passed while checking nothing.
+
+*(These are developer tests. They run from the project folder with `npm test`; they are not part of
+the installed app, which ships compiled and has no source to test.)*
 
 ---
 
