@@ -704,10 +704,31 @@ export function buildFailureMarkScript(step: ReplayStep, error: string): string 
       document.body.appendChild(box);
     }`
     : ''
-  return `(() => { try {${banner}${outline}
+  // Resolves only once the marks have been PAINTED, and reports whether the
+  // banner is actually in the DOM.
+  //
+  // It used to return `{ ok: true }` the instant the node was appended, and the
+  // caller then slept 120ms and captured. Appending is not painting: under a
+  // suite run — where axe-core has just been injected and the page is busy — the
+  // frame sometimes had not composited yet, so capturePage() photographed a
+  // clean page and the failure evidence arrived with no banner on it. The same
+  // test produced a banner on one run and not the next, which is what made this
+  // look like an injection race. It never was: the injection always succeeded.
+  //
+  // Two rAFs guarantee a frame has actually been through the compositor (one
+  // schedules, the second fires after that frame is drawn). The 400ms timeout is
+  // not belt-and-braces — rAF does NOT fire on a hidden or occluded window, and
+  // this must never hang a run for a decoration.
+  return `(() => new Promise((resolve) => {
+    try {${banner}${outline}
     } catch (e) { /* decoration only — never block the screenshot */ }
-    return { ok: true };
-  })()`
+    const done = () => resolve({
+      ok: true,
+      painted: !!document.getElementById('__qaflow_fail_banner')
+    });
+    const t = setTimeout(done, 400);
+    requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); done(); }));
+  }))()`
 }
 
 // Erase the markings after capture so the live page stays clean.

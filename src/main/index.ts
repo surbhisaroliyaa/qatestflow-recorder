@@ -4346,13 +4346,35 @@ function createWindow(): void {
               // cost the screenshot), but no longer INVISIBLE: the reason is
               // recorded as console evidence, so a future miss is diagnosable
               // instead of mysterious.
+              // The retry now turns on whether the banner was actually PAINTED,
+              // not on whether the injection threw.
+              //
+              // The first version retried on a thrown error — but the injection
+              // never threw. It appended the node, returned instantly, and the
+              // caller slept 120ms and captured; when the page was busy the frame
+              // had not composited and the PNG came out clean. Retrying an
+              // operation that already succeeded fixed nothing, and the run that
+              // proved it (multiple features flow, 23:24) logged no failure at
+              // all — which is exactly why the miss stayed mysterious.
+              //
+              // buildFailureMarkScript now resolves after two animation frames
+              // and reports `painted`, so this can retry the case that actually
+              // occurs, and say so when it still loses.
               let marked = false
               for (let attempt = 0; attempt < 2 && !marked; attempt++) {
                 try {
                   if (attempt > 0) await wait(150) // let the renderer settle
-                  await currentWC.executeJavaScript(buildFailureMarkScript(step, message), true)
-                  marked = true
-                  await wait(120) // let the scroll + overlay paint before capture
+                  const res = (await currentWC.executeJavaScript(
+                    buildFailureMarkScript(step, message),
+                    true
+                  )) as { ok?: boolean; painted?: boolean } | undefined
+                  marked = res?.painted === true
+                  if (!marked && attempt === 1) {
+                    addEvidence(
+                      consoleErrors,
+                      'failure-screenshot: the error banner never painted, so this screenshot has no annotation.'
+                    )
+                  }
                 } catch (e) {
                   if (attempt === 1) {
                     addEvidence(
