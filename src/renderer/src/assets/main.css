@@ -5793,6 +5793,15 @@ body {
   color: #e0e0e0;
   text-transform: capitalize;
 }
+/* How many tests the engine ran. Quieter than the engine name — it is context
+   for the verdict, not the verdict — but present, because "6/6 tests" and
+   "1/1 test" are the difference between a data-driven run working and silently
+   collapsing to a single test. */
+.xb-result-count {
+  font-size: 11.5px;
+  color: #8a97a8;
+  white-space: nowrap;
+}
 
 .xb-result-error {
   font-size: 11px;

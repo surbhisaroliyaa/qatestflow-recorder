@@ -303,7 +303,12 @@ const api = {
       sessionFile?: string,
       // F40: refs for this test's secret steps, so main can put PASSWORD into the
       // run's env — the exported spec reads process.env.PASSWORD, not the file.
-      secretRefs?: string[]
+      secretRefs?: string[],
+      // Upload fixtures (absolute source paths) + a HAR filename from _hars/.
+      // The parallel runner has always carried these; this one did not, so an
+      // upload step failed on a missing file and a HAR test silently ran live.
+      fixturePaths?: string[],
+      harFile?: string
     ): Promise<unknown> =>
       ipcRenderer.invoke(
         'xbrowser:run',
@@ -311,7 +316,9 @@ const api = {
         browsers,
         envOverride,
         sessionFile,
-        secretRefs
+        secretRefs,
+        fixturePaths,
+        harFile
       ),
 
     // F40: export the library (or a selection) as a portable bundle folder.

@@ -39,6 +39,8 @@ export type BrowserName = 'chromium' | 'firefox' | 'webkit'
 export interface BrowserResult {
   browser: BrowserName
   ok: boolean
+  total: number // tests this engine ran — a data-driven test contributes one PER ROW
+  passed: number // …and how many of them passed
   failingTest?: string // the spec title that failed
   error?: string // first error message (trimmed)
 }
@@ -714,7 +716,11 @@ function collectTests(
 }
 
 // Run the given spec across the selected browsers. `specCode` is the exported
-// Playwright test source (self-contained — no fixtures/sessions/HAR in v1).
+// Playwright test source. Sessions, upload fixtures and a HAR archive are all
+// copied into the run folder and the spec's relative references repointed —
+// the same treatment runSuiteParallel gives them. (This shipped as "no
+// fixtures/sessions/HAR in v1"; sessions arrived later, and the other two were
+// left behind long enough to become bugs of their own.)
 export async function runCrossBrowser(
   specCode: string,
   browsers: BrowserName[],
@@ -723,7 +729,12 @@ export async function runCrossBrowser(
   envVars: Record<string, string> = {},
   // F32: a saved session to start the run already logged in. `srcPath` is copied
   // into the run dir and its absolute path is fed to the config's storageState.
-  session?: { name: string; srcPath: string }
+  session?: { name: string; srcPath: string },
+  // Absolute source paths of upload fixtures, and a HAR archive to replay
+  // against. Both are copied in and the spec's relative references repointed —
+  // the same treatment runSuite has always given them.
+  fixturePaths?: string[],
+  harPath?: string
 ): Promise<CrossBrowserResult> {
   const { installed, root } = checkPlaywright()
   if (!installed || !root) {
@@ -757,7 +768,40 @@ export async function runCrossBrowser(
   const specDir = join(workDir, 'specs')
   try {
     await mkdir(specDir, { recursive: true })
-    await writeFile(join(specDir, 'crossbrowser.spec.ts'), specCode, 'utf-8')
+    // Uploads and HAR archives, exactly as runSuite does it. This runner shipped
+    // as "self-contained — no fixtures/sessions/HAR in v1", and sessions were
+    // added later without the other two. The consequence was invisible from here
+    // and loud everywhere else: the exported spec refers to `fixtures/<name>` by
+    // RELATIVE path, so a monitored or cross-browser run of any test with an
+    // upload step died on `ENOENT …\fixtures\<name>` — a real test failing for a
+    // reason that had nothing to do with the test.
+    let code = specCode
+    for (const src of fixturePaths ?? []) {
+      const base = src.split(/[\\/]/).pop() || ''
+      if (!base) continue
+      const dstDir = join(workDir, 'fixtures')
+      const dst = join(dstDir, base)
+      try {
+        await mkdir(dstDir, { recursive: true })
+        await copyFile(src, dst)
+        code = pointAtAbsolute(code, `fixtures/${base}`, dst)
+      } catch {
+        // Leave the relative path alone: the run then fails with a missing file,
+        // which is the truth — the source file really is gone.
+      }
+    }
+    if (harPath) {
+      const base = harPath.split(/[\\/]/).pop() || ''
+      const dst = join(workDir, 'hars', base)
+      try {
+        await mkdir(join(workDir, 'hars'), { recursive: true })
+        await copyFile(harPath, dst)
+        code = pointAtAbsolute(code, `hars/${base}`, dst)
+      } catch {
+        // as above — a missing archive should fail honestly
+      }
+    }
+    await writeFile(join(specDir, 'crossbrowser.spec.ts'), code, 'utf-8')
     // F32: copy the saved session in and pass its ABSOLUTE path to storageState so
     // a "starts logged in" test isn't kicked back to the login page (→ timeout).
     let storageStatePath: string | undefined
@@ -861,12 +905,26 @@ export async function runCrossBrowser(
       if (forBrowser.length === 0) {
         // Other engines DID report, so this is specific to this one — but we
         // still don't know why, so we say exactly that rather than inventing it.
-        return { browser: b, ok: false, error: 'no result — this engine never reported back' }
+        return {
+          browser: b,
+          ok: false,
+          total: 0,
+          passed: 0,
+          error: 'no result — this engine never reported back'
+        }
       }
       const failed = forBrowser.find((t) => !t.ok)
       return {
         browser: b,
         ok: !failed,
+        // How many tests this engine actually ran. Already known here and
+        // previously discarded, which left the UI unable to answer the one
+        // question a data-driven run raises: "did it run all six rows, or one
+        // test six times faster?" A green tick looks identical either way — and
+        // this path DID silently collapse a 6-row test into a single test until
+        // the data table started travelling with it.
+        total: forBrowser.length,
+        passed: forBrowser.filter((t) => t.ok).length,
         failingTest: failed?.title,
         error: failed?.error
       }

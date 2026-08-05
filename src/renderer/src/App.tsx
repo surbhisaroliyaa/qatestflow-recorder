@@ -36,6 +36,17 @@ import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
 import { analyzeControlFlow, isControlStep, type ConditionKind } from '../../shared/controlFlow'
 import { saveSpecWarning } from '../../shared/apiSaveSpec'
 import { collidesWithOsEnv } from '../../shared/osEnvNames'
+// The shared run-input rules. Every run path should reach for these rather than
+// re-deciding locally — that divergence is what produced the same bug in four
+// different places over two days.
+import {
+  mergeEnvValues,
+  missingEnvMessage,
+  missingEnvNames,
+  runData,
+  runFixturePaths,
+  runSecretRefs
+} from '../../shared/runInputs'
 import { SUGGESTED_TAGS, parseTags, normalizeTag, allTags, matchesTags } from './tags'
 import { headlessBlockers, blockerSummary, defaultWorkers, headlessCategory } from './headless'
 
@@ -1162,24 +1173,58 @@ function App(): React.JSX.Element {
   // `skipRetarget`: resolve {{env:}} vars as usual, but leave navigations on the
   // host they were recorded against. Used when the host-mismatch warning offers
   // "run without environment" — the creds are still wanted, the retarget isn't.
+  // Resolve every {{env:…}} name an IN-APP run needs, and record which had no
+  // value. The five in-app paths — plain replay, one row, all rows, the locale
+  // sweep and each test of a suite — each wrote these same three lines out
+  // separately, which is how `rows` came to be included in four of them and
+  // omitted in the fifth.
+  //
+  // Unlike the headless paths this does NOT hand an environment to a process; it
+  // returns values to substitute INTO the steps. The decision about what counts
+  // as missing is the same either way, so it comes from the same shared rule.
+  // THE single place this renderer asks main to resolve {{env:…}}. Every run
+  // path — in-app or headless — comes through here, so "what counts as missing"
+  // and "what may overwrite what" are decided once, by the shared rules.
+  //
+  // `provided` is anything the caller already has out of band (a monitor's
+  // pinned environment). It always wins: resolveEnv only knows the ACTIVE
+  // environment plus the process, so it cannot see a pin.
+  const resolveEnvVars = async (
+    names: string[],
+    provided: Record<string, string> = {}
+  ): Promise<{ values: Record<string, string>; missing: string[] }> => {
+    if (!names.length) return { values: { ...provided }, missing: [] }
+    const resolved = await window.api.recorder.resolveEnv(names)
+    return {
+      values: mergeEnvValues(provided, resolved.values),
+      missing: missingEnvNames(names, resolved, provided)
+    }
+  }
+
+  const resolveEnvForRun = async (
+    flat: RecorderStep[],
+    rows: Record<string, string>[] = []
+  ): Promise<{ values: Record<string, string>; missing: string[] }> => {
+    const out = await resolveEnvVars(envVarNames(flat, rows))
+    // A token with no value used to be substituted as '' in silence — the run
+    // typed nothing and failed several steps later with a message pointing
+    // nowhere near the cause. Record it so the run can say which name is
+    // missing; the substitution still happens, so nothing else changes.
+    unresolvedEnvRef.current = out.missing
+    return out
+  }
+
   const applyEnv = async (
     flat: RecorderStep[],
     fromBase: string,
     skipRetarget = false
   ): Promise<RecorderStep[]> => {
     let list = flat
-    const names = envVarNames(flat, [])
-    if (names.length) {
-      const res = await window.api.recorder.resolveEnv(names)
-      // A token with no value used to be substituted as '' in silence — the run
-      // typed nothing and failed several steps later with a message pointing
-      // nowhere near the cause. Record it so the run can say which name is
-      // missing; the substitution still happens, so nothing else changes.
-      unresolvedEnvRef.current = res.unresolved
-      list = substituteSteps(list, {}, res.values)
-    } else {
-      unresolvedEnvRef.current = []
-    }
+    // Rows deliberately omitted: this is the PLAIN-replay path, where there is no
+    // row to bind. A data-driven test replays through the isDataDriven branch,
+    // which passes its row in.
+    const { values } = await resolveEnvForRun(flat)
+    if (Object.keys(values).length) list = substituteSteps(list, {}, values)
     if (activeEnv?.baseURL && !skipRetarget) {
       list = retargetSteps(list, fromBase || deriveBaseURL(flat), activeEnv.baseURL)
     }
@@ -2360,9 +2405,7 @@ function App(): React.JSX.Element {
       // scans steps against an empty row set — never sees them. Record what
       // didn't resolve here too, or the run reports nothing while every row
       // types an empty password.
-      const { values: envMap, unresolved: envMissing } =
-        await window.api.recorder.resolveEnv(envVarNames(flat, [row]))
-      unresolvedEnvRef.current = envMissing
+      const { values: envMap } = await resolveEnvForRun(flat, [row])
       let list = substituteSteps(flat, resolveRow(row, envMap), envMap)
       if (activeEnv?.baseURL && !noEnv) list = retargetSteps(list, fromBase, activeEnv.baseURL)
       await runOnce(list, testFileName, false)
@@ -2507,10 +2550,8 @@ function App(): React.JSX.Element {
     // flattened flow (the index map lets per-row marks hit the right rows).
     const { flat, map } = await buildRunPlan(steps)
     runPlanRef.current = map
-    // Env tokens in the data rows are invisible to applyEnv — collect them here.
-    const { values: envMap, unresolved: envMissing } =
-      await window.api.recorder.resolveEnv(envVarNames(flat, dataRows))
-    unresolvedEnvRef.current = envMissing
+    // Env tokens in the data rows are invisible to applyEnv — pass the rows in.
+    const { values: envMap } = await resolveEnvForRun(flat, dataRows)
     setDataRun({ total: dataRows.length, current: 0, currentLabel: '', results: [], running: true })
     const results: DataRunEntry[] = []
     for (let i = 0; i < dataRows.length; i++) {
@@ -2600,9 +2641,7 @@ function App(): React.JSX.Element {
     // whichever user logs in), so bind the first row — mirroring the data runner.
     let listBase: RecorderStep[]
     if (isDataDriven && dataRows.length > 0) {
-      const { values: envMap, unresolved: envMissing } =
-        await window.api.recorder.resolveEnv(envVarNames(flat, dataRows))
-      unresolvedEnvRef.current = envMissing
+      const { values: envMap } = await resolveEnvForRun(flat, dataRows)
       listBase = substituteSteps(flat, resolveRow(dataRows[0], envMap), envMap)
       if (activeEnv?.baseURL && !localeNoEnv) {
         listBase = retargetSteps(listBase, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
@@ -3066,9 +3105,11 @@ function App(): React.JSX.Element {
     }
   }
 
-  // Export the current flow to a self-contained spec and run it on the selected
-  // engines via real Playwright (main). Session/HAR/fixtures are omitted in v1 —
-  // the cross-browser run exercises the functional flow.
+  // Export the current flow to a spec and run it on the selected engines via real
+  // Playwright (main). Session, data table, {{env:…}} variables, upload fixtures
+  // and HAR all travel with it — each of those was missing at some point, and
+  // each absence showed up as an identical failure on all three engines, which
+  // reads as "every browser is broken" rather than "we forgot to send something".
   const handleRunXbrowser = async (): Promise<void> => {
     if (xbSel.size === 0) return
     const { flat } = await buildRunPlan(steps)
@@ -3079,7 +3120,12 @@ function App(): React.JSX.Element {
       // F36: an iPhone/iPad preset is a WebKit device in Playwright's catalogue,
       // so running it on the webkit project here is the one place the emulation
       // is the REAL engine and not Chromium in a costume.
-      device: deviceId ? deviceById(deviceId) : undefined
+      device: deviceId ? deviceById(deviceId) : undefined,
+      // This path passed NO data block, so a data-driven test was generated as an
+      // ordinary one: its {{username}} tokens stayed literal text and got typed
+      // into the form. It failed on all three engines identically, which reads as
+      // "the site is broken in every browser" rather than "we dropped the table".
+      data: runData(dataColumns(flat), dataRows)
     })
     setXbRunning(true)
     setXbResult(null)
@@ -3089,17 +3135,31 @@ function App(): React.JSX.Element {
       // the refs have to travel or the login types an empty string and EVERY
       // engine times out identically. The parallel runner and monitors already
       // did this; this path didn't, which is what broke Test B.
-      const secretRefs = flat
-        .map((s) => s.secretRef)
-        .filter((r): r is string => typeof r === 'string' && !!r)
+      const secretRefs = runSecretRefs(flat)
+      // …and the same was true of ordinary {{env:…}} variables. main's
+      // runCrossBrowser takes an envVars argument precisely so "a spec that reads
+      // process.env.USERNAME / BASE_URL runs against it here too" (xbrowser.ts),
+      // but this caller passed `undefined` and nothing ever filled it in. A test
+      // using {{env:API_KEY}} therefore ran with the variable unset on every
+      // engine. Unresolved names are surfaced the same way every other path does
+      // rather than being substituted as ''.
+      const { values: envOverride, missing } = await resolveEnvVars(
+        envVarNames(flat, dataRows)
+      )
+      unresolvedEnvRef.current = missing
       const res = await window.api.xbrowser.run(
         code,
         [...xbSel] as ('chromium' | 'firefox' | 'webkit')[],
-        undefined,
+        envOverride,
         // A test that starts already logged in needs its session here too, for
         // the same reason: otherwise it's bounced to a login page it can't pass.
         storageState || undefined,
-        secretRefs
+        secretRefs,
+        // Uploads and the HAR archive now travel as well. Previously an upload
+        // step died on a missing file, and a HAR-backed test ran against the LIVE
+        // site — which is the more dangerous of the two, because it passes.
+        runFixturePaths(flat),
+        harField || undefined
       )
       setXbResult(res)
       setXbInstalled(res.installed)
@@ -3818,6 +3878,11 @@ function App(): React.JSX.Element {
         fixturePaths?: string[]
         harFile?: string
       }[] = []
+      // Every {{env:…}} name any test in the batch needs. The batch used to send
+      // only PASSWORD, so a suite whose tests read {{env:API_KEY}} or
+      // {{env:BASE_URL}} ran headless with those unset — silently, because an
+      // unset variable substitutes as empty rather than refusing.
+      const batchEnvNames = new Set<string>()
       for (const t of tests) {
         const data = await window.api.library.load(t.fileName)
         if (!data) {
@@ -3846,8 +3911,8 @@ function App(): React.JSX.Element {
           parallelSkipReasons.current.set(t.fileName, cfErrors[0])
           continue
         }
-        const cols = dataColumns(flat)
         const rows = data.dataRows ?? []
+        for (const n of envVarNames(flat, rows)) batchEnvNames.add(n)
         safe.push({
           test: t,
           code: generatePlaywrightTest(flat, {
@@ -3856,19 +3921,13 @@ function App(): React.JSX.Element {
             viewport: data.viewport,
             device: data.deviceId ? deviceById(data.deviceId) : undefined, // F36
             tags: data.tags, // F38
-            data: cols.length > 0 && rows.length > 0 ? { columns: cols, rows } : undefined
+            data: runData(dataColumns(flat), rows)
           }),
           sessionFile: data.storageState || undefined,
-          refs: flat.map((s) => s.secretRef),
+          refs: runSecretRefs(flat),
           // Absolute source paths — main copies them into the run folder and
           // repoints the spec at the copies.
-          fixturePaths: Array.from(
-            new Set(
-              flat
-                .filter((s) => s.type === 'upload' && !s.disabled && s.value)
-                .flatMap((s) => (s.value ?? '').split('\n').filter(Boolean))
-            )
-          ),
+          fixturePaths: runFixturePaths(flat),
           harFile: (data as { har?: string }).har || undefined
         })
       }
@@ -3880,6 +3939,14 @@ function App(): React.JSX.Element {
           .flatMap((s) => s.refs)
           .filter((r): r is string => typeof r === 'string' && !!r)
         let batchEnv: Record<string, string> | undefined = suiteNoEnv ? {} : undefined
+        // Resolve the batch's {{env:…}} names before PASSWORD, so an explicitly
+        // configured PASSWORD still wins below. `suiteNoEnv` means the user chose
+        // "run without environment" at the host-mismatch prompt — honour it.
+        if (!suiteNoEnv && batchEnvNames.size) {
+          const out = await resolveEnvVars([...batchEnvNames], batchEnv ?? {})
+          batchEnv = out.values
+          unresolvedEnvRef.current = out.missing
+        }
         if (secretRefs.length) {
           const resolved = await window.api.xbrowser.resolveSecrets(secretRefs)
           const password = secretRefs.map((r) => resolved[r]).find((v) => v)
@@ -4021,9 +4088,7 @@ function App(): React.JSX.Element {
           // password column of {{env:SAUCE_PW}}), which applyEnv never scans —
           // so without this a data-driven test reported nothing while all 5 rows
           // typed an empty password. Found by exactly that, on Positive Login.
-          const { values: envMap, unresolved: envMissing } =
-            await window.api.recorder.resolveEnv(envVarNames(flatSuite, suiteRows))
-          unresolvedEnvRef.current = envMissing
+          const { values: envMap } = await resolveEnvForRun(flatSuite, suiteRows)
           const rowOutcomes: { label: string; r: Awaited<ReturnType<typeof runOnce>> }[] = []
           let rowAborted = false
           for (let r = 0; r < suiteRows.length; r++) {
@@ -4726,13 +4791,17 @@ function App(): React.JSX.Element {
     // Build the run inputs ONCE — they don't change between retries.
     let code: string
     let session: string | undefined
+    // Uploads + HAR travel with a monitored run now. A monitored test with an
+    // upload step used to die on a missing file, and a HAR-backed one ran
+    // against the live site — passing, and telling you nothing was wrong.
+    let fixtures: string[] | undefined
+    let har: string | undefined
     const envVars: Record<string, string> = {}
     try {
       const flat = await expandForRun(test.steps)
-      // A data-driven test carries {{column}} tokens that only resolve when the
-      // DATA TABLE is handed to the generator (same trap as the F28 fix).
-      const cols = dataColumns(flat)
       const rows = test.dataRows ?? []
+      fixtures = runFixturePaths(flat)
+      har = (test as { har?: string }).har || undefined
       code = generatePlaywrightTest(flat, {
         name: test.name || 'monitored flow',
         baseURL: test.baseURL || deriveBaseURL(flat),
@@ -4741,7 +4810,11 @@ function App(): React.JSX.Element {
         // spec's test.use() overrides the run config, so a mobile monitor really
         // runs mobile.
         device: test.deviceId ? deviceById(test.deviceId) : undefined,
-        data: cols.length > 0 && rows.length > 0 ? { columns: cols, rows } : undefined
+        // A data-driven test carries {{column}} tokens that only resolve when the
+        // DATA TABLE is handed to the generator. runData() decides that once, for
+        // every run path — the inline version of this rule was written out three
+        // times and cross-browser's copy was missing entirely.
+        data: runData(dataColumns(flat), rows)
       })
       // F32: run against the monitor's PINNED environment, not the global "Run
       // against" — always an explicit override so the active env can't retarget it.
@@ -4757,9 +4830,7 @@ function App(): React.JSX.Element {
         // the value lives in userData. Ask main for it (same machine, same user).
         // A pre-F40 test that still holds a literal is honoured too, so a monitor
         // keeps working in the window between upgrading and the migration run.
-        const refs = flat
-          .map((s) => s.secretRef)
-          .filter((r): r is string => typeof r === 'string' && !!r)
+        const refs = runSecretRefs(flat)
         if (refs.length) {
           const resolved = await window.api.xbrowser.resolveSecrets(refs)
           const first = refs.map((r) => resolved[r]).find((v) => v)
@@ -4782,31 +4853,24 @@ function App(): React.JSX.Element {
       // Recorded as 'error' (setup is broken), not 'failed' (the app under test is
       // broken) — the two mean different things, and errors are deliberately not
       // retried, since running it twice more cannot conjure a missing value.
+      // The emptiness-vs-undefined subtlety that broke the first version of this
+      // guard now lives in missingEnvNames/mergeEnvValues, where a unit test pins
+      // it. That is the whole point of the move: this path states WHAT it wants,
+      // and the rule for HOW is written once.
       const needed = envVarNames(flat, rows)
       if (needed.length) {
-        const { values, unresolved } = await window.api.recorder.resolveEnv(needed)
-        // The pinned environment wins; resolveEnv only knows the ACTIVE one plus the
-        // process, so anything the pin already supplied is not missing.
-        //
-        // Tested on EMPTINESS, not `undefined`. env:get resolves a missing name to
-        // '' and reports it in `unresolved` (index.ts:4577) — so an `undefined`
-        // check copies that empty string in, decides the variable is present, and
-        // the guard never fires. Which is precisely the failure this guard exists
-        // to catch: an empty value passing itself off as a real one.
-        for (const n of needed) {
-          if (!envVars[n] && values[n]) envVars[n] = values[n]
-        }
-        const missing = unresolved.filter((n) => !envVars[n])
+        // The pinned environment is passed as `provided`, so it wins.
+        const out = await resolveEnvVars(needed, envVars)
+        Object.assign(envVars, out.values)
+        const missing = out.missing
         if (missing.length) {
-          const names = missing.map((n) => `{{env:${n}}}`).join(', ')
-          const why =
-            mon.envId && !pinned
-              ? ' This monitor is pinned to an environment that no longer exists, so none of its variables were applied — pick a different one on the monitor’s card.'
-              : ' Add the value to the environment this monitor runs against, or pick a different one on its card.'
           const run = {
             at: new Date().toISOString(),
             status: 'error' as const,
-            detail: `${missing.length} environment variable${missing.length === 1 ? '' : 's'} had no value: ${names}.${why}`
+            detail: missingEnvMessage(missing, {
+              pinnedButMissing: !!mon.envId && !pinned,
+              fixHint: 'Pick an environment on the monitor’s card, or add the value to it.'
+            })
           }
           setMonitors(await window.api.monitors.recordRun(mon.id, run))
           if (mon.alertOnFail) await fireMonitorAlert(mon, run)
@@ -4833,7 +4897,15 @@ function App(): React.JSX.Element {
       attempts = a + 1
       const at = new Date().toISOString()
       try {
-        const res = await window.api.xbrowser.run(code, ['chromium'], envVars, session)
+        const res = await window.api.xbrowser.run(
+          code,
+          ['chromium'],
+          envVars,
+          session,
+          undefined, // PASSWORD is already resolved into envVars above
+          fixtures,
+          har
+        )
         if (!res.installed) {
           run = { at, status: 'error', detail: 'Playwright is not installed — monitor runs need it.' }
           break
@@ -12551,6 +12623,17 @@ function App(): React.JSX.Element {
                       <div key={r.browser} className={`xb-result ${r.ok ? 'pass' : 'fail'}`}>
                         <span className="xb-result-icon">{r.ok ? '✓' : '✗'}</span>
                         <span className="xb-result-name">{r.browser}</span>
+                        {/* HOW MANY tests ran, not just whether they passed. A
+                            data-driven test contributes one test PER ROW, and a
+                            single green tick looks the same whether it ran six
+                            rows or silently collapsed them into one — which is
+                            exactly what this path used to do before the data
+                            table travelled with the spec. */}
+                        {r.total > 0 && (
+                          <span className="xb-result-count">
+                            {r.passed}/{r.total} {r.total === 1 ? 'test' : 'tests'}
+                          </span>
+                        )}
                         {!r.ok && r.error && <span className="xb-result-error">{r.error}</span>}
                       </div>
                     ))}

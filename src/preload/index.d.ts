@@ -189,6 +189,8 @@ type BrowserName = 'chromium' | 'firefox' | 'webkit'
 interface BrowserResult {
   browser: BrowserName
   ok: boolean
+  total: number // tests this engine ran — a data-driven test contributes one PER ROW
+  passed: number // …and how many of them passed
   failingTest?: string
   error?: string
 }
@@ -225,7 +227,10 @@ interface XBrowserAPI {
     browsers: BrowserName[],
     envOverride?: Record<string, string>,
     sessionFile?: string,
-    secretRefs?: string[]
+    secretRefs?: string[],
+    // Absolute source paths of upload fixtures, and a HAR filename from _hars/.
+    fixturePaths?: string[],
+    harFile?: string
   ) => Promise<CrossBrowserResult>
   // === F40: shareable bundles ===
   exportBundle: (

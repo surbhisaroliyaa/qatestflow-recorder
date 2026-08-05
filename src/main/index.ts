@@ -4801,7 +4801,13 @@ function createWindow(): void {
       // as "the browsers are broken" when the truth is "no password arrived".
       // The parallel runner and monitors already did this; this path never did,
       // so F17 has been quietly broken since F40 moved passwords to userData.
-      secretRefs?: string[]
+      secretRefs?: string[],
+      // Uploads + HAR, same as the parallel runner has always taken. Without
+      // them a monitored or cross-browser run of any test with an upload step
+      // died on `ENOENT …\fixtures\<name>` — and a HAR-backed test quietly ran
+      // against the live site instead of the archive, which is worse: it passes.
+      fixturePaths?: string[],
+      harFile?: string
     ) => {
       let envVars: Record<string, string> = {}
       if (envOverride) {
@@ -4823,7 +4829,16 @@ function createWindow(): void {
       const session = sessionFile
         ? { name: sessionFile, srcPath: join(libraryDir(), '_sessions', sessionFile) }
         : undefined
-      return runCrossBrowser(specCode, browsers, envVars, session)
+      return runCrossBrowser(
+        specCode,
+        browsers,
+        envVars,
+        session,
+        fixturePaths?.length ? fixturePaths : undefined,
+        // A HAR is stored by bare filename in the library's _hars/, like a
+        // session — resolved here, not in the renderer, for the same reason.
+        harFile ? join(libraryDir(), '_hars', harFile) : undefined
+      )
     }
   )
 
