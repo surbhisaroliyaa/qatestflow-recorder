@@ -50,176 +50,28 @@ import {
 import { SUGGESTED_TAGS, parseTags, normalizeTag, allTags, matchesTags } from './tags'
 import { headlessBlockers, blockerSummary, defaultWorkers, headlessCategory } from './headless'
 
-const EXAMPLE_URLS = ['saucedemo.com', 'google.com', 'github.com']
+import {
+  ASSERT_KINDS,
+  ASSERT_LABELS,
+  CATEGORY_LABELS,
+  CATEGORY_WHY,
+  EXAMPLE_URLS,
+  LOCALE_PRESETS,
+  PERF_METRIC_HELP,
+  VERDICT_LABELS
+} from './uiLabels'
+import { MonitorsModal } from './components/MonitorsModal'
+import {
+  a11yImpactRank,
+  assertNeedsValue,
+  clip,
+  formatBytes,
+  isThirdPartyLine,
+  primaryCandidate,
+  siteFirstLines,
+  stabilityClass
+} from './uiFormat'
 
-// Day 16(+): human-friendly byte size for the download toast.
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-/**
- * Shorten text but break at a word boundary — a blunt slice() ends messages
- * mid-word ("…8 × loca"), which reads as broken rather than trimmed. Mirrors
- * clip() in main/xbrowser.ts, which trims the same errors upstream.
- */
-function clip(s: string, max = 300): string {
-  if (s.length <= max) return s
-  const cut = s.slice(0, max)
-  const space = cut.lastIndexOf(' ')
-  return (space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd() + '…'
-}
-
-// Day 9: the checks offered by the assertion chooser, in display order.
-// checked/unchecked only make sense on a checkbox/radio — the chooser hides
-// them unless the picked element reported a live `checked` state (Day 11).
-const ASSERT_KINDS: AssertKind[] = [
-  'visible',
-  'hidden',
-  'text-equals',
-  'text-contains',
-  'value',
-  'empty',
-  'count',
-  'enabled',
-  'disabled',
-  'editable',
-  'focused',
-  'checked',
-  'unchecked',
-  'attribute',
-  'class'
-]
-const ASSERT_LABELS: Record<AssertKind, string> = {
-  visible: 'Visible',
-  hidden: 'Hidden',
-  'text-equals': 'Text =',
-  'text-contains': 'Contains',
-  value: 'Value',
-  empty: 'Empty',
-  count: 'Count',
-  enabled: 'Enabled',
-  disabled: 'Disabled',
-  editable: 'Editable',
-  focused: 'Focused',
-  checked: 'Checked',
-  unchecked: 'Unchecked',
-  attribute: 'Attribute',
-  class: 'Has class',
-  'url-contains': 'URL contains',
-  title: 'Page title',
-  nl: 'AI check'
-}
-// Day 13: network evidence lines carry [site] / [third-party] tags (whose
-// server failed — stamped at capture in main). Third-party noise is shown
-// DIMMED and sorted last, never hidden: the tag is a fact, not a judgment.
-// MIRROR WARNING: tag text + ordering must match relationTag (main/index.ts)
-// and siteFirst (main/translator.ts).
-const isThirdPartyLine = (l: string): boolean => l.includes('[third-party]')
-const siteFirstLines = (lines: string[]): string[] =>
-  [...lines].sort((a, b) => Number(isThirdPartyLine(a)) - Number(isThirdPartyLine(b)))
-
-// Day 13: how the analysis modal names each verdict.
-const VERDICT_LABELS: Record<FailureVerdict, string> = {
-  'app-bug': 'App bug',
-  'test-bug': 'Test bug',
-  timing: 'Timing',
-  environment: 'Environment',
-  unknown: 'Unclassified'
-}
-
-// F9 (finer categories): the precise triage sub-type shown beside the verdict.
-const CATEGORY_LABELS: Record<FailureCategory, string> = {
-  'stale-selector': 'stale selector',
-  'stale-data': 'stale data',
-  'app-bug': 'app bug',
-  timing: 'timing',
-  environment: 'unreachable',
-  authoring: 'weak selector',
-  unknown: 'unclassified'
-}
-
-// WHY each label was chosen. Two tests can fail with the identical message
-// ("Element not found") and be filed under DIFFERENT categories, because the
-// classifier also weighs whether the page itself logged errors. Without the
-// rule stated, that looks arbitrary — and "app bug" is a claim the reader may
-// have to defend to a developer, so it has to be defensible on sight.
-// MIRROR: these must match the branches in main/translator.ts ruleBasedExplain.
-const CATEGORY_WHY: Record<FailureCategory, string> = {
-  'stale-selector':
-    'the element was not found, and the page itself looked healthy (no console or network errors) — so the selector, not the app, is what changed',
-  'stale-data':
-    'the element was found; its value or state differs from what was recorded — either the app is wrong or the expected value is out of date',
-  'app-bug':
-    'the element was missing or never usable AND the page logged real console/network errors — so it is likely absent because the app failed to render it',
-  timing:
-    'the element was found but never became visible or enabled in time, on a page showing no errors — usually slower than the test, not broken',
-  environment: 'the page could not be loaded at all — network, URL or the site being down',
-  authoring:
-    'the recorded element has no stable hooks (no id, role or text), so replay refused to guess rather than act on the wrong element',
-  unknown: 'the error did not match any known pattern — read the screenshot and logs'
-}
-
-// F13: how severe axe considers each violation — drives the sort order (worst
-// first) and the chip colour. Anything unrated sorts last.
-const A11Y_IMPACT_ORDER: Record<string, number> = {
-  critical: 0,
-  serious: 1,
-  moderate: 2,
-  minor: 3
-}
-const a11yImpactRank = (impact: string): number => A11Y_IMPACT_ORDER[impact] ?? 4
-
-// F14: a one-line "what does this measure" for each perf metric, shown under
-// its name in the panel so the numbers explain themselves. Lower is better for
-// all of them.
-const PERF_METRIC_HELP: Record<string, string> = {
-  lcp: 'How fast the main content appears',
-  cls: 'How much the layout jumps around while loading',
-  fcp: 'When the first pixels paint (context — no gate)',
-  ttfb: 'How fast the server sends the first byte (context — no gate)',
-  load: 'Everything finished loading (info only)',
-  dcl: 'HTML parsed and ready (info only)'
-}
-
-// These kinds compare against an expected value the user can edit.
-const assertNeedsValue = (kind: AssertKind): boolean =>
-  kind === 'text-equals' ||
-  kind === 'text-contains' ||
-  kind === 'value' ||
-  kind === 'count' ||
-  kind === 'attribute' ||
-  kind === 'class' ||
-  kind === 'url-contains' ||
-  kind === 'title' ||
-  kind === 'nl'
-
-// The candidate the step's primary selector points at. After a hand-pick the
-// primary is no longer necessarily the top-scored candidates[0].
-function primaryCandidate(step: RecorderStep): SelectorCandidate | undefined {
-  return step.candidates?.find((c) => c.locator === step.selector) ?? step.candidates?.[0]
-}
-
-// Map a stability score (0–100) to a traffic-light class for the dot.
-function stabilityClass(score: number | undefined): string {
-  if (score === undefined) return ''
-  if (score >= 80) return 'high'
-  if (score >= 50) return 'med'
-  return 'low'
-}
-
-// F28: locales the localization sweep can run the flow under. en-US is the base
-// everything else is compared against (a string that DIDN'T change from base is a
-// likely-untranslated candidate). ar is included to exercise RTL layout.
-const LOCALE_PRESETS: { code: string; label: string; rtl?: boolean }[] = [
-  { code: 'en-US', label: 'English (US) — base' },
-  { code: 'es-ES', label: 'Spanish' },
-  { code: 'de-DE', label: 'German (long words)' },
-  { code: 'fr-FR', label: 'French' },
-  { code: 'ja-JP', label: 'Japanese' },
-  { code: 'ar', label: 'Arabic (RTL)', rtl: true }
-]
 
 interface LocaleResult {
   locale: string
@@ -7119,310 +6971,35 @@ function App(): React.JSX.Element {
 
   // F32: the monitors dashboard — promote a saved test to a scheduled monitor,
   // see each one's status/last result, toggle/run/remove, and read its history.
-  const monitorsModal = monitorsOpen && (
-    <div className="modal-backdrop" onClick={() => setMonitorsOpen(false)}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">📡 Monitors — scheduled re-runs + failure alerts</span>
-          <button className="modal-close" onClick={() => setMonitorsOpen(false)} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="ac-body">
-          <p className="api-hint">
-            A monitor re-runs a saved test on a schedule (headless) and pops a desktop alert when it
-            fails — catching regressions between your manual runs.{' '}
-            <strong>It only runs while this app is open</strong> (there's no background service), and
-            it needs Playwright installed (same as cross-browser).
-          </p>
-          {monRunningId && (
-            <p className="api-hint" style={{ color: '#7fd39a' }}>
-              ⏳ A monitor run is in progress (headless, ~10–30s)… the row updates when it finishes.
-            </p>
-          )}
-          {/* Opening ANY modal shrinks the native browser pane to nothing, or the
-              dialog would render underneath it. That is normally invisible — but
-              a screenshot of a hidden view comes back EMPTY, so a variant that
-              fails while this is open loses its failure screenshot. Now that this
-              dashboard can be opened mid-batch from the workspace, say so instead
-              of quietly costing evidence. */}
-          {(suiteRun?.running ||
-            dataRun?.running ||
-            localeRun?.running ||
-            edgeRun?.running) && (
-            <p className="api-hint" style={{ color: '#e0b56b' }}>
-              ⚠ A batch is running. The page is hidden while this dialog is open — the run
-              continues normally, but a step that fails right now would save an empty failure
-              screenshot. Close this to bring the page back.
-            </p>
-          )}
-          {/* F32b: a failing run retries up to 3× before alerting (kills transient
-              blips); alerts also POST to this webhook if set (off-machine reach). */}
-          <label className="api-field">
-            <span>Alert webhook — Slack / Discord / Teams (optional)</span>
-            <input
-              className="url-input"
-              type="text"
-              placeholder="https://hooks.slack.com/services/…  (also fires the desktop alert)"
-              value={monWebhook}
-              onChange={(e) => {
-                setMonWebhook(e.target.value)
-                const v = e.target.value.trim()
-                if (v) localStorage.setItem('monitor.webhookUrl', v)
-                else localStorage.removeItem('monitor.webhookUrl')
-              }}
-            />
-          </label>
-          <div className="mon-add">
-            <select
-              className="env-bar-select"
-              value={monTestSel}
-              onChange={(e) => setMonTestSel(e.target.value)}
-            >
-              <option value="">Pick a test to monitor…</option>
-              {savedTests.map((t) => (
-                <option key={t.fileName} value={t.fileName}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-            <select
-              className="env-bar-select"
-              value={monInterval}
-              onChange={(e) => setMonInterval(Number(e.target.value))}
-            >
-              <option value={5}>every 5 min</option>
-              <option value={15}>every 15 min</option>
-              <option value={30}>every 30 min</option>
-              <option value={60}>every hour</option>
-              <option value={240}>every 4 hours</option>
-            </select>
-            <select
-              className="env-bar-select"
-              value={monEnvId}
-              onChange={(e) => setMonEnvId(e.target.value)}
-              title="Which environment this monitor always runs against (independent of the global Run-against selection)"
-            >
-              <option value="">against recorded URLs</option>
-              {envState.environments.map((env) => (
-                <option key={env.id} value={env.id}>
-                  against {env.name}
-                </option>
-              ))}
-            </select>
-            <label className="mon-alert-toggle" title="Fire a desktop notification when a run fails">
-              <input
-                type="checkbox"
-                checked={monAlert}
-                onChange={(e) => setMonAlert(e.target.checked)}
-              />{' '}
-              alert on fail
-            </label>
-            <button
-              className="modal-btn primary"
-              disabled={!monTestSel}
-              onClick={async () => {
-                const t = savedTests.find((s) => s.fileName === monTestSel)
-                if (!t) return
-                setMonitors(
-                  await window.api.monitors.save({
-                    id: `mon-${Date.now()}`,
-                    fileName: t.fileName,
-                    name: t.name,
-                    intervalMin: monInterval,
-                    enabled: true,
-                    alertOnFail: monAlert,
-                    envId: monEnvId || null,
-                    lastRunAt: null,
-                    runs: []
-                  })
-                )
-                setMonTestSel('')
-              }}
-            >
-              + Add monitor
-            </button>
-          </div>
-          {monitors.length === 0 ? (
-            <p className="api-hint">No monitors yet — pick a test above to start watching it.</p>
-          ) : (
-            <>
-              <div className="mon-runall">
-                <button
-                  className="mon-btn primary"
-                  disabled={monRunningId !== null}
-                  onClick={runAllMonitorsNow}
-                >
-                  {monRunningId ? '⏳ running…' : `▶ Run all ${monitors.length} now`}
-                </button>
-                <span className="mon-runall-hint">
-                  Runs every monitor once, in order — a one-click health check.
-                </span>
-              </div>
-              <ul className="mon-list">
-              {monitors.map((m) => {
-                const last = m.runs[0]
-                // One obvious status per monitor, so it's never a mystery whether
-                // it's running, healthy, broken, or off.
-                const running = monRunningId === m.id
-                const status = running
-                  ? { cls: 'running', label: '⏳ Running…' }
-                  : !m.enabled
-                    ? { cls: 'paused', label: '⏸ Paused' }
-                    : !last
-                      ? { cls: 'new', label: '• Never run' }
-                      : last.status === 'passed'
-                        ? { cls: 'pass', label: '✓ Passing' }
-                        : last.status === 'failed'
-                          ? { cls: 'fail', label: '✗ Failing' }
-                          : { cls: 'err', label: '⚠ Can’t run' }
-                // A monitor can outlive the environment it was pinned to. That used
-                // to be near-silent — grey text reading "a deleted env" — while the
-                // real consequence was severe: no pinned env means NO variables are
-                // applied at all (see the `pinned` lookup in doMonitorRun), so a
-                // test whose data rows use {{env:…}} logs in with an unresolved
-                // token and fails on whatever assertion happens to come first.
-                const envMissing = !!m.envId && !envState.environments.some((e) => e.id === m.envId)
-                return (
-                  <li key={m.id} className={`mon-card ${status.cls}`}>
-                    <div className="mon-card-head">
-                      <span className={`mon-status ${status.cls}`}>{status.label}</span>
-                      <span className="mon-title">{m.name}</span>
-                      <div className="mon-actions">
-                        <button
-                          className="mon-btn"
-                          onClick={async () =>
-                            setMonitors(await window.api.monitors.save({ ...m, enabled: !m.enabled }))
-                          }
-                          title={m.enabled ? 'Pause this monitor' : 'Resume this monitor'}
-                        >
-                          {m.enabled ? '⏸ pause' : '▶ resume'}
-                        </button>
-                        <button
-                          className="mon-btn primary"
-                          disabled={monRunningId !== null}
-                          title={
-                            monRunningId && !running
-                              ? 'Another monitor is running — one headless run at a time'
-                              : 'Run this test headless right now (~10–30s)'
-                          }
-                          onClick={() => runMonitorNow(m)}
-                        >
-                          {running ? '⏳ running…' : '▶ run now'}
-                        </button>
-                        <button
-                          className="mon-btn"
-                          onClick={() => setMonHistoryFor(monHistoryFor === m.id ? null : m.id)}
-                        >
-                          {monHistoryFor === m.id ? 'hide history' : `history (${m.runs.length})`}
-                        </button>
-                        <button
-                          className="mon-btn danger"
-                          onClick={async () => setMonitors(await window.api.monitors.delete(m.id))}
-                        >
-                          remove
-                        </button>
-                      </div>
-                    </div>
-                    <div className="mon-meta">
-                      {/* The schedule is EDITABLE here. It used to be plain text,
-                          set once when the monitor was created and never again —
-                          so changing a monitor's cadence meant deleting it and
-                          rebuilding it, which threw away its whole run history.
-                          Takes effect immediately: the scheduler computes "due"
-                          as lastRunAt + intervalMin, so shortening the interval
-                          on a monitor that ran a while ago makes it due at once. */}
-                      Runs{' '}
-                      <select
-                        className="mon-interval"
-                        value={m.intervalMin}
-                        title="How often this monitor re-runs (applies from its last run)"
-                        onChange={async (e) =>
-                          setMonitors(
-                            await window.api.monitors.save({
-                              ...m,
-                              intervalMin: Number(e.target.value)
-                            })
-                          )
-                        }
-                      >
-                        <option value={5}>every 5 min</option>
-                        <option value={15}>every 15 min</option>
-                        <option value={30}>every 30 min</option>
-                        <option value={60}>every hour</option>
-                        <option value={240}>every 4 hours</option>
-                      </select>{' '}
-                      · against{' '}
-                      {/* Also editable now. Pinning was set once at creation, so a
-                          monitor pointing at a deleted (or simply wrong) environment
-                          could only be corrected by deleting and rebuilding it —
-                          throwing away its whole run history to change one field. */}
-                      <select
-                        className={`mon-interval${envMissing ? ' missing' : ''}`}
-                        value={envMissing ? '__missing' : (m.envId ?? '')}
-                        title="Which environment's baseURL + variables this monitor runs against"
-                        onChange={async (e) =>
-                          setMonitors(
-                            await window.api.monitors.save({
-                              ...m,
-                              envId: e.target.value === '' ? null : e.target.value
-                            })
-                          )
-                        }
-                      >
-                        <option value="">recorded URLs</option>
-                        {envState.environments.map((e) => (
-                          <option key={e.id} value={e.id}>
-                            {e.name}
-                          </option>
-                        ))}
-                        {/* Kept selectable-looking so the dropdown shows the truth
-                            rather than silently reading as "recorded URLs", which is
-                            what it actually falls back to at run time. */}
-                        {envMissing && (
-                          <option value="__missing" disabled>
-                            ⚠ deleted environment
-                          </option>
-                        )}
-                      </select>
-                      {m.alertOnFail ? ' · 🔔 alerts on failure' : ''} ·{' '}
-                      {last
-                        ? `last run ${last.status} at ${new Date(last.at).toLocaleTimeString()}`
-                        : 'not run yet'}
-                    </div>
-                    {monHistoryFor === m.id && (
-                      <div className="mon-history">
-                        {m.runs.length === 0 ? (
-                          <div className="mon-history-empty">No runs yet — hit “run now”.</div>
-                        ) : (
-                          m.runs.map((r, i) => (
-                            <div key={i} className={`mon-history-row ${r.status}`}>
-                              <span className="mon-history-mark">
-                                {r.status === 'passed' ? '✓' : r.status === 'failed' ? '✗' : '⚠'}
-                              </span>
-                              <span className="mon-history-when">
-                                {new Date(r.at).toLocaleString()}
-                              </span>
-                              <span className="mon-history-detail">{r.detail || 'passed'}</span>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    )}
-                  </li>
-                )
-              })}
-              </ul>
-            </>
-          )}
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn primary" onClick={() => setMonitorsOpen(false)}>
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
+  // F32 dashboard — the markup lives in components/MonitorsModal.tsx. Kept as a
+  // value (not inline JSX) because it renders from BOTH returns; see the note there.
+  const monitorsModal = (
+    <MonitorsModal
+      monitorsOpen={monitorsOpen}
+      setMonitorsOpen={setMonitorsOpen}
+      monitors={monitors}
+      setMonitors={setMonitors}
+      monRunningId={monRunningId}
+      monWebhook={monWebhook}
+      setMonWebhook={setMonWebhook}
+      monTestSel={monTestSel}
+      setMonTestSel={setMonTestSel}
+      monInterval={monInterval}
+      setMonInterval={setMonInterval}
+      monAlert={monAlert}
+      setMonAlert={setMonAlert}
+      monEnvId={monEnvId}
+      setMonEnvId={setMonEnvId}
+      monHistoryFor={monHistoryFor}
+      setMonHistoryFor={setMonHistoryFor}
+      savedTests={savedTests}
+      envState={envState}
+      runMonitorNow={runMonitorNow}
+      runAllMonitorsNow={runAllMonitorsNow}
+      batchRunning={
+        !!(suiteRun?.running || dataRun?.running || localeRun?.running || edgeRun?.running)
+      }
+    />
   )
 
   // F23: the coverage gap map — crawl progress, then the tested/untested overlay.
