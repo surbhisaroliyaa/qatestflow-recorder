@@ -5858,6 +5858,20 @@ body {
   font-size: 13px;
   line-height: 1.55;
   color: #ddd;
+  /* THE BODY is the part that scrolls. `.modal` is a flex column with
+     max-height:100% and overflow:hidden, which only works if its middle child
+     can shrink — otherwise the body grows to its content height and pushes the
+     footer past the clipped edge.
+     That is exactly what happened: with 3 retargeted hosts AND 3 uncovered API
+     hosts, the dialog outgrew the window and Cancel / Run anyway / Run without
+     environment were sliced off. Not cosmetic — this dialog BLOCKS a run waiting
+     for an answer you then cannot give.
+     `min-height: 0` is the load-bearing half: a flex item's default
+     min-height:auto refuses to shrink below its content, so overflow-y alone
+     would not have fixed it. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .env-warn-body p {
   margin: 0 0 12px;
