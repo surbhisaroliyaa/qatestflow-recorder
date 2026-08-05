@@ -1,0 +1,5 @@
+# core.autocrlf is true on this machine, so checked-out files get CRLF endings.
+# That is fine for source, but FATAL for a shell script: `#!/bin/sh\r` makes the
+# kernel look for an interpreter literally named "sh\r" and the hook dies with a
+# "bad interpreter" error — on a fresh clone, silently, at the worst moment.
+.githooks/** text eol=lf

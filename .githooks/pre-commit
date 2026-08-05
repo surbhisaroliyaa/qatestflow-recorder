@@ -1,0 +1,24 @@
+#!/bin/sh
+# Run the unit suite before every commit. It takes well under a second, so the
+# cost of always running it is far below the cost of one regression reaching a
+# commit and being found days later by hand.
+#
+# Deliberately NOT running typecheck or the full build here — those take tens of
+# seconds, and a hook people are tempted to skip is worse than no hook.
+#
+# Lives in .githooks/ (not .git/hooks/) so it is version-controlled and travels
+# with the repo. Enabled by:  git config core.hooksPath .githooks
+#
+# To bypass in a genuine emergency:  git commit --no-verify
+
+echo "pre-commit: running unit tests…"
+
+if ! npm test --silent; then
+  echo ""
+  echo "✗ Unit tests failed — commit aborted."
+  echo "  Fix the test above, or re-run with --no-verify if you truly must commit."
+  exit 1
+fi
+
+echo "✓ Unit tests passed."
+exit 0
