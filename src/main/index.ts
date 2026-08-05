@@ -1290,7 +1290,20 @@ function createWindow(): void {
         // the app UI's OWN localStorage (e.g. the saved traceMode). All tabs share
         // this one partition, so cookies/session-block/downloads stay shared as
         // before — only the app UI is now insulated from the wipe.
-        partition: 'persist:qaflow-browser'
+        partition: 'persist:qaflow-browser',
+        // Chromium throttles a renderer whose window is not focused: timers slow
+        // down and requestAnimationFrame stops firing, so the page STOPS PAINTING.
+        // For a browser tab that is the right default. For the page under test it
+        // is not — an unattended Run All is precisely a run nobody is watching.
+        //
+        // This is what made the failure screenshot's red banner intermittent. The
+        // banner was injected and really was in the DOM, but with the window in
+        // the background no frame was ever composited, so capturePage() returned
+        // the last painted frame — the page WITHOUT the banner. It appeared when
+        // Surbhi watched a single replay and vanished during long suite runs,
+        // which is exactly backwards from how a race normally reads and is why it
+        // survived two attempts at fixing it.
+        backgroundThrottling: false
       }
     })
     mainWindow.contentView.addChildView(view)

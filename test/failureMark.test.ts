@@ -119,7 +119,9 @@ describe('buildFailureMarkScript', () => {
     expect(env.timers.length, 'no fallback timer was scheduled').toBe(1)
     expect(env.timers[0].ms).toBeLessThanOrEqual(1000)
     env.fireTimers()
-    expect(await p).toMatchObject({ ok: true })
+    // …and it reports painted:FALSE, because nothing was composited. Saying
+    // painted:true here is what let a bannerless screenshot be saved silently.
+    expect(await p).toMatchObject({ ok: true, framed: false, painted: false })
   })
 
   it('truncates a very long error so the banner stays readable', async () => {

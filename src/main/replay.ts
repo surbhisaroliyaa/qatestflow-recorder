@@ -722,12 +722,24 @@ export function buildFailureMarkScript(step: ReplayStep, error: string): string 
   return `(() => new Promise((resolve) => {
     try {${banner}${outline}
     } catch (e) { /* decoration only — never block the screenshot */ }
-    const done = () => resolve({
+    // painted requires BOTH: the node is in the DOM, and a frame actually went
+    // through the compositor.
+    //
+    // The first version reported painted purely from getElementById, so when the
+    // window was in the background — rAF throttled, nothing painting — it
+    // resolved via the timeout and still said painted:true. The caller believed
+    // it, skipped its retry, logged nothing, and saved a screenshot with no
+    // banner. Claiming success on the strength of "the element exists" is the
+    // same disease this app exists to catch, in the app itself.
+    const finish = (framed) => resolve({
       ok: true,
-      painted: !!document.getElementById('__qaflow_fail_banner')
+      framed: framed,
+      painted: framed && !!document.getElementById('__qaflow_fail_banner')
     });
-    const t = setTimeout(done, 400);
-    requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); done(); }));
+    // rAF does not fire on a throttled/occluded window, so this must still
+    // settle — but it settles HONESTLY, as not-painted.
+    const t = setTimeout(() => finish(false), 400);
+    requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); finish(true); }));
   }))()`
 }
 
