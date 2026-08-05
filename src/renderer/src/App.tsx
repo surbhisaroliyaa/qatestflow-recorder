@@ -34,7 +34,6 @@ import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
 // F37: loops + branching. Shared with the replay engine so the step list, the
 // export and the run all agree on how markers pair up.
 import { analyzeControlFlow, isControlStep, type ConditionKind } from '../../shared/controlFlow'
-import { saveSpecWarning } from '../../shared/apiSaveSpec'
 import { collidesWithOsEnv } from '../../shared/osEnvNames'
 // The shared run-input rules. Every run path should reach for these rather than
 // re-deciding locally — that divergence is what produced the same bug in four
@@ -61,6 +60,18 @@ import {
   VERDICT_LABELS
 } from './uiLabels'
 import { MonitorsModal } from './components/MonitorsModal'
+import { ApiEditorModal } from './components/ApiEditorModal'
+import { DraftModal } from './components/DraftModal'
+import { JiraModal } from './components/JiraModal'
+import { MockModal } from './components/MockModal'
+import { CoverageModal } from './components/CoverageModal'
+import { EnvWarnModal } from './components/EnvWarnModal'
+import { AcModal } from './components/AcModal'
+import { SnapEditorModal } from './components/SnapEditorModal'
+import { ApiResponseModal } from './components/ApiResponseModal'
+import { BugPromptModal } from './components/BugPromptModal'
+import { AiPromptModal } from './components/AiPromptModal'
+import { CreatesDataModal } from './components/CreatesDataModal'
 import { EnvManagerModal } from './components/EnvManagerModal'
 import { F40Modals } from './components/F40Modals'
 import { SuiteReport } from './components/SuiteReport'
@@ -5512,113 +5523,15 @@ function App(): React.JSX.Element {
     setEnvWarn(null)
     setEnvWarnRemember(false)
   }
-  const envWarnModal = envWarn && (
-    <div className="modal-backdrop">
-      <div className="modal env-warn" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">
-            {envWarn.mismatches.length === 0
-              ? '⚠ API steps bypass this environment'
-              : '⚠ Environment retargets this run'}
-          </span>
-        </div>
-        <div className="env-warn-body">
-          {/* Navigations retargeted to another site (the original F25 warning). */}
-          {envWarn.mismatches.length > 0 && (
-            <>
-              <p>
-                The active environment <strong>{activeEnv?.name}</strong> re-points every navigation
-                at <code className="env-warn-to">{envWarn.mismatches[0].to}</code>.{' '}
-                {envWarn.mismatches.length === 1 && envWarn.mismatches[0].tests.length === 1
-                  ? 'This test was recorded somewhere else.'
-                  : `${envWarn.mismatches.reduce((n, m) => n + m.tests.length, 0)} test(s) in this run were recorded on ${envWarn.mismatches.length} other host(s).`}
-              </p>
-              <div className="env-warn-hosts">
-                {envWarn.mismatches.map((m) => (
-                  <div key={m.from} className="env-warn-row">
-                    <code>{m.from}</code>
-                    <span className="env-warn-arrow">→</span>
-                    <code className="env-warn-to">{m.to}</code>
-                    <span className="env-warn-count" title={m.tests.join('\n')}>
-                      {m.tests.length === 1 ? m.tests[0] : `${m.tests.length} tests`}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <p className="env-warn-hint">
-                If those aren’t the same app, the run will hit pages that don’t exist.
-              </p>
-            </>
-          )}
-          {/* F24: API steps calling a host the environment does NOT cover. These
-              are NOT retargeted — the danger is an app's own API on a separate
-              host, where a "staging" run would still write to PRODUCTION. */}
-          {envWarn.apiHosts.length > 0 && (
-            <>
-              <p className="env-warn-api-lead">
-                🔌 This run’s <strong>API steps</strong> call{' '}
-                {envWarn.apiHosts.length === 1 ? 'a host' : `${envWarn.apiHosts.length} hosts`} the
-                environment does <strong>not</strong> cover. Those calls are{' '}
-                <strong>not retargeted</strong> — they go to the host below exactly as recorded,
-                even though the rest of the run goes to {activeEnv?.name}.
-              </p>
-              <div className="env-warn-hosts">
-                {envWarn.apiHosts.map((a) => (
-                  <div key={a.host} className="env-warn-row">
-                    <code className="env-warn-api">{a.host}</code>
-                    <span className="env-warn-arrow">↛</span>
-                    <span className="env-warn-nochange">not retargeted</span>
-                    <span className="env-warn-count" title={a.tests.join('\n')}>
-                      {a.tests.length === 1 ? a.tests[0] : `${a.tests.length} tests`}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <p className="env-warn-hint">
-                Fine for a third-party API (Stripe, a public endpoint). But if that host is{' '}
-                <strong>your own API</strong>, this run will read and write <strong>real
-                production data</strong> while everything else points at {activeEnv?.name} — add it
-                to the environment’s base URL, or edit the step to use a relative host.
-              </p>
-            </>
-          )}
-          <label className="env-warn-remember">
-            <input
-              type="checkbox"
-              checked={envWarnRemember}
-              onChange={(e) => setEnvWarnRemember(e.target.checked)}
-            />
-            <span>
-              Don’t ask again for{' '}
-              {envWarn.mismatches.length + envWarn.apiHosts.length === 1 ? (
-                envWarn.mismatches.length === 1 ? (
-                  <>
-                    <code>{envWarn.mismatches[0].from}</code> →{' '}
-                    <code>{envWarn.mismatches[0].to}</code>
-                  </>
-                ) : (
-                  <code>{envWarn.apiHosts[0].host}</code>
-                )
-              ) : (
-                <>these {envWarn.mismatches.length + envWarn.apiHosts.length} hosts</>
-              )}
-              <em> (these hosts only — a new one still asks)</em>
-            </span>
-          </label>
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={() => settleEnvWarn('cancel')}>
-            Cancel
-          </button>
-          <button className="modal-btn" onClick={() => settleEnvWarn('run')}>
-            Run anyway
-          </button>
-          <button className="modal-btn primary" onClick={() => settleEnvWarn('noenv')}>
-            Run without environment
-          </button>
-        </div>
-      </div>
-    </div>
+  // Markup in components/EnvWarnModal.tsx.
+  const envWarnModal = (
+    <EnvWarnModal
+      activeEnv={activeEnv}
+      envWarn={envWarn}
+      envWarnRemember={envWarnRemember}
+      setEnvWarnRemember={setEnvWarnRemember}
+      settleEnvWarn={settleEnvWarn}
+    />
   )
 
   // F24: the response panel — a Postman-style view of what the server actually
@@ -5678,429 +5591,63 @@ function App(): React.JSX.Element {
   // pane, which would otherwise paint straight over it — see setOverlay).
   const apiResponseStep = apiPanelIndex !== null ? steps[apiPanelIndex] : undefined
   const apiResponseEv = apiPanelIndex !== null ? apiResponses[apiPanelIndex] : undefined
-  const apiResponseModal = apiPanelIndex !== null && apiResponseEv && (
-    <div className="modal-backdrop" onClick={() => setApiPanelIndex(null)}>
-      <div className="modal api-response-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">
-            ↩ Response — step {apiPanelIndex + 1}
-            {apiResponseStep ? ` · ${apiResponseStep.apiMethod ?? 'GET'}` : ''}
-          </span>
-          <button className="modal-close" onClick={() => setApiPanelIndex(null)} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="api-response-body">
-          <div className={`api-panel-status${statusIsOk(apiResponseEv.status) ? ' ok' : ' bad'}`}>
-            {apiResponseEv.status != null
-              ? apiResponseEv.status
-              : 'no response — the request never reached the server'}
-            {apiResponseEv.durationMs != null && (
-              <span className="api-panel-meta">· {apiResponseEv.durationMs} ms</span>
-            )}
-            {apiResponseEv.sizeBytes != null && (
-              <span className="api-panel-meta">· {formatBytes(apiResponseEv.sizeBytes)}</span>
-            )}
-          </div>
-          <div className="api-panel-lbl">Sent</div>
-          <pre className="api-panel-pre">
-            {`${apiResponseEv.method} ${apiResponseEv.url}`}
-            {apiResponseEv.requestHeaders ? `\n${apiResponseEv.requestHeaders}` : ''}
-            {apiResponseEv.requestBody ? `\n\n${apiResponseEv.requestBody}` : ''}
-          </pre>
-          <div className="api-panel-lbl">Received</div>
-          {apiResponseEv.responseHeaders && (
-            <pre className="api-panel-pre api-panel-headers">{apiResponseEv.responseHeaders}</pre>
-          )}
-          <pre className="api-panel-pre">
-            {prettyBody(apiResponseEv.responseBody) || '(empty body)'}
-          </pre>
-          <p className="api-panel-note">
-            Credentials are masked (••••). Long bodies are cut at 2,000 characters — the size above
-            is the real one.
-          </p>
-          {/* F24.2: capture the SHAPE of this known-good response as a contract.
-              This is the check that catches a backend renaming `total` → `amount`:
-              no value assertion can, because the field simply isn't there. */}
-          {apiResponseStep?.type === 'api' && (
-            <div className="api-contract-capture">
-              <button
-                type="button"
-                className="modal-btn"
-                onClick={() => handleCaptureContract(apiPanelIndex!)}
-                disabled={!apiResponseEv.responseBody}
-                title="Remember this response's SHAPE. Later runs fail if a field is renamed, dropped, or changes type."
-              >
-                📐 Save this shape as the contract
-              </button>
-              <span className="api-panel-note">
-                {apiResponseStep.apiContract
-                  ? `Contract set — ${fieldCount(Object.keys(apiResponseStep.apiContract).length)} being enforced.`
-                  : 'No contract yet: a renamed or dropped field would go unnoticed.'}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+  // Markup in components/ApiResponseModal.tsx.
+  const apiResponseModal = (
+    <ApiResponseModal
+      apiPanelIndex={apiPanelIndex}
+      apiResponseEv={apiResponseEv}
+      apiResponseStep={apiResponseStep}
+      fieldCount={fieldCount}
+      handleCaptureContract={handleCaptureContract}
+      prettyBody={prettyBody}
+      setApiPanelIndex={setApiPanelIndex}
+      statusIsOk={statusIsOk}
+    />
   )
 
   // F24: the API-request step editor. `request` runs in the main process, so it
   // reaches any endpoint regardless of what page the browser is on.
   const apiMethod = (apiDraft?.apiMethod ?? 'GET') as string
   const apiSendsBody = apiMethod !== 'GET' && apiMethod !== 'DELETE'
-  const apiEditorModal = apiDraft && apiEditIndex !== null && (
-    <div className="modal-backdrop" onClick={closeApiEditor}>
-      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">🔌 API request</span>
-          <button className="modal-close" onClick={closeApiEditor} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="api-editor-body">
-          <div className="api-row api-req-line">
-            <select
-              className="api-method"
-              value={apiMethod}
-              onChange={(e) => patchApiDraft({ apiMethod: e.target.value as RecorderStep['apiMethod'] })}
-            >
-              {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-            <input
-              className="api-url"
-              type="text"
-              placeholder="https://api.example.com/users/1"
-              value={apiDraft.url ?? ''}
-              onChange={(e) => patchApiDraft({ url: e.target.value })}
-            />
-          </div>
-          <label className="api-field">
-            <span>Headers — one per line, e.g. Authorization: Bearer {'{{env:TOKEN}}'}</span>
-            <textarea
-              className="api-headers"
-              rows={3}
-              placeholder={'Content-Type: application/json\nAuthorization: Bearer …'}
-              value={apiDraft.apiHeaders ?? ''}
-              onChange={(e) => patchApiDraft({ apiHeaders: e.target.value })}
-            />
-          </label>
-          {apiSendsBody && (
-            <label className="api-field">
-              <span>Request body</span>
-              <textarea
-                className="api-body"
-                rows={4}
-                placeholder={'{ "name": "morpheus" }'}
-                value={apiDraft.apiBody ?? ''}
-                onChange={(e) => patchApiDraft({ apiBody: e.target.value })}
-              />
-            </label>
-          )}
-          <div className="api-row api-expect">
-            <label className="api-field api-field-inline">
-              <span>Expect status</span>
-              <input
-                type="text"
-                placeholder="2xx  ·  200  ·  204,404"
-                value={apiDraft.apiExpectStatus ?? ''}
-                onChange={(e) => patchApiDraft({ apiExpectStatus: e.target.value })}
-              />
-            </label>
-            <label className="api-field api-field-inline">
-              <span>Response body contains (optional)</span>
-              <input
-                type="text"
-                placeholder='e.g. "success" or an id'
-                value={apiDraft.apiExpectBody ?? ''}
-                onChange={(e) => patchApiDraft({ apiExpectBody: e.target.value })}
-              />
-            </label>
-          </div>
-          {/* F24.2: REAL assertions. "Body contains" is a substring match — it
-              passes on {"id": null}, which is the dead-assertion disease F6 exists
-              to catch, reinvented in API form. */}
-          <label className="api-field">
-            <span>
-              ✅ Response checks — <strong>assertions</strong>. One per line:{' '}
-              <code>path op value</code>
-            </span>
-            <textarea
-              className="api-headers"
-              rows={3}
-              placeholder={
-                'id not-empty\nstatus equals CONFIRMED\nitems count-gt 0\nheader:content-type contains application/json'
-              }
-              value={apiDraft.apiChecks ?? ''}
-              onChange={(e) => patchApiDraft({ apiChecks: e.target.value })}
-            />
-          </label>
-          <p className="api-hint api-ops">
-            <strong>Operators:</strong> <code>equals</code> · <code>not-equals</code> ·{' '}
-            <code>contains</code> · <code>not-contains</code> · <code>exists</code> ·{' '}
-            <code>not-empty</code> · <code>empty</code> · <code>gt</code> · <code>lt</code> ·{' '}
-            <code>count-eq</code> · <code>count-gt</code> · <code>count-lt</code> ·{' '}
-            <code>is-number</code> · <code>is-string</code> · <code>is-boolean</code> ·{' '}
-            <code>is-array</code>. Prefix a path with <code>header:</code> to check a response
-            header.
-          </p>
-          <div className="api-row api-expect">
-            <label className="api-field api-field-inline">
-              <span>Must respond within (ms) — SLA, blank = no limit</span>
-              <input
-                type="text"
-                placeholder="e.g. 500"
-                value={apiDraft.apiMaxMs != null ? String(apiDraft.apiMaxMs) : ''}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10)
-                  patchApiDraft({ apiMaxMs: Number.isFinite(n) && n > 0 ? n : undefined })
-                }}
-              />
-            </label>
-            <label className="api-field api-field-inline">
-              <span>Give up after (seconds) — default 30</span>
-              <input
-                type="text"
-                placeholder="30"
-                value={apiDraft.apiTimeoutMs != null ? String(apiDraft.apiTimeoutMs / 1000) : ''}
-                onChange={(e) => {
-                  const n = parseFloat(e.target.value)
-                  patchApiDraft({
-                    apiTimeoutMs: Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : undefined
-                  })
-                }}
-              />
-            </label>
-          </div>
-          {/* F24.2: the contract. Captured from the response panel, shown here so
-              you can see it exists and drop it. */}
-          {apiDraft.apiContract && Object.keys(apiDraft.apiContract).length > 0 && (
-            <div className="api-contract-row">
-              <span>
-                📐 <strong>Contract:</strong> {fieldCount(Object.keys(apiDraft.apiContract).length)}{' '}
-                — fails if any is renamed, dropped, or changes type.
-              </span>
-              <button
-                type="button"
-                className="modal-btn"
-                onClick={() => patchApiDraft({ apiContract: undefined })}
-              >
-                Remove
-              </button>
-            </div>
-          )}
-          {/* F24.1: the piece that makes create → verify → delete possible. The
-              server invents the id, so it cannot be typed when authoring. */}
-          {/* Visually separated from "Response checks" above. The two were
-              adjacent, identically styled textareas with different grammars
-              (`path op value` vs `name = path`), and a check typed into this one
-              was silently dropped. */}
-          <label className="api-field api-save-field">
-            <span>
-              💾 Save from response — <strong>not a check</strong>. One{' '}
-              <code>name = path</code> per line, used later as <code>{'{{saved:name}}'}</code>
-            </span>
-            <textarea
-              className="api-headers"
-              rows={2}
-              placeholder={'orderId = id\ntoken = data.accessToken'}
-              value={apiDraft.apiSave ?? ''}
-              onChange={(e) => patchApiDraft({ apiSave: e.target.value })}
-            />
-          </label>
-          {/* Say so IMMEDIATELY. This warning exists because a dropped line cost
-              a real assertion that looked saved and green for hours. */}
-          {saveSpecWarning(apiDraft.apiSave) && (
-            <p className="api-hint api-save-warn">⚠ {saveSpecWarning(apiDraft.apiSave)}</p>
-          )}
-          {/* F24.3: hand this response's auth to the browser — the suite-scale win. */}
-          <div className="api-auth-block">
-            <label className="api-check-line">
-              <input
-                type="checkbox"
-                checked={!!apiDraft.apiInjectCookies}
-                onChange={(e) => patchApiDraft({ apiInjectCookies: e.target.checked })}
-              />
-              <span>
-                🔑 Log the <strong>browser</strong> in with this response’s cookies — the UI steps
-                after this start already authenticated, with no login screen.
-              </span>
-            </label>
-            <label className="api-field">
-              <span>
-                …or, if the API returns a <strong>token in the body</strong>: set localStorage —
-                one <code>key = value</code> per line
-              </span>
-              <textarea
-                className="api-headers"
-                rows={2}
-                placeholder={'authToken = {{saved:token}}'}
-                value={apiDraft.apiInjectStorage ?? ''}
-                onChange={(e) => patchApiDraft({ apiInjectStorage: e.target.value })}
-              />
-            </label>
-          </div>
-          <p className="api-hint">
-            The request runs from the app itself (not the browser tab), so it works on any page. A
-            failed status or missing body text fails the step like any check.
-          </p>
-          <p className="api-hint">
-            <strong>Re-runnable tests:</strong> use <code>{'{{uuid}}'}</code>,{' '}
-            <code>{'{{timestamp}}'}</code> or <code>{'{{randomInt}}'}</code> anywhere in the URL,
-            headers or body to create data that never collides on a second run (
-            <code>qa+{'{{timestamp}}'}@x.com</code>). For a teardown check, an{' '}
-            <strong>Expect status</strong> of <code>204,404</code> accepts either — so “already
-            gone” still passes and the test doesn’t go red forever after run 1.
-          </p>
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={closeApiEditor}>
-            Cancel
-          </button>
-          <button
-            className="modal-btn primary"
-            onClick={saveApiEditor}
-            disabled={!(apiDraft.url ?? '').trim()}
-          >
-            Save step
-          </button>
-        </div>
-      </div>
-    </div>
+  // F24 API step editor — markup in components/ApiEditorModal.tsx.
+  const apiEditorModal = (
+    <ApiEditorModal
+      apiDraft={apiDraft}
+      apiEditIndex={apiEditIndex}
+      apiMethod={apiMethod}
+      apiSendsBody={apiSendsBody}
+      patchApiDraft={patchApiDraft}
+      saveApiEditor={saveApiEditor}
+      closeApiEditor={closeApiEditor}
+      fieldCount={fieldCount}
+    />
   )
 
   // F15: the visual-snapshot editor — mask dynamic regions + freeze animations.
-  const snapEditorModal = snapDraft && snapEditIndex !== null && (
-    <div className="modal-backdrop" onClick={closeSnapEditor}>
-      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">📸 Visual snapshot settings</span>
-          <button className="modal-close" onClick={closeSnapEditor} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="api-editor-body">
-          <label className="api-field">
-            <span>Ignore these regions (mask) — CSS selectors, one per line</span>
-            <textarea
-              className="api-headers"
-              rows={3}
-              placeholder={'.timestamp\n#carousel\n.ad-banner'}
-              value={snapDraft.maskSelectors ?? ''}
-              onChange={(e) => patchSnapDraft({ maskSelectors: e.target.value })}
-            />
-            <span className="api-hint">
-              A clock, ad, or carousel that changes every run would otherwise fail the diff. Masked
-              areas are painted over identically on both baseline and current, so they’re excluded.
-            </span>
-          </label>
-          <label className="api-field api-field-inline" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={snapDraft.freezeAnimations !== false}
-              onChange={(e) => patchSnapDraft({ freezeAnimations: e.target.checked })}
-            />
-            <span>Freeze animations &amp; transitions before capture (recommended)</span>
-          </label>
-          <label className="api-field api-field-inline">
-            <span>Allowed difference (%)</span>
-            <input
-              type="text"
-              placeholder="1"
-              value={snapDraft.value ?? '1'}
-              onChange={(e) => patchSnapDraft({ value: e.target.value })}
-            />
-          </label>
-          <label className="api-field api-field-inline">
-            <span>Also fail past N changed pixels</span>
-            <input
-              type="text"
-              placeholder="200"
-              value={snapDraft.maxDiffPixels ?? ''}
-              onChange={(e) => {
-                const n = parseInt(e.target.value, 10)
-                patchSnapDraft({ maxDiffPixels: Number.isFinite(n) && n >= 0 ? n : undefined })
-              }}
-            />
-          </label>
-          <p className="api-hint">
-            On a big full-page snapshot, a small change (one button, a badge) can stay under the %
-            bar. This also fails once more than N real pixels change — so localized regressions
-            aren&apos;t diluted. Blank = 200.
-          </p>
-          {snapStatus && <p className="api-hint" style={{ color: '#8ab4f8' }}>{snapStatus}</p>}
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={closeSnapEditor}>
-            Cancel
-          </button>
-          <button
-            className="modal-btn primary"
-            onClick={saveSnapEditor}
-            title="Save these settings AND re-capture the baseline from the current page with them applied"
-          >
-            Save &amp; re-capture baseline
-          </button>
-        </div>
-      </div>
-    </div>
+  // Markup in components/SnapEditorModal.tsx.
+  const snapEditorModal = (
+    <SnapEditorModal
+      closeSnapEditor={closeSnapEditor}
+      patchSnapDraft={patchSnapDraft}
+      saveSnapEditor={saveSnapEditor}
+      snapDraft={snapDraft}
+      snapEditIndex={snapEditIndex}
+      snapStatus={snapStatus}
+    />
   )
 
   // F18: the AI-prompt step composer. Grounded to the CURRENT page's elements,
   // so it's a per-page authoring aid — the produced steps are a draft to verify.
-  const aiPromptModal = aiPromptOpen && (
-    <div className="modal-backdrop" onClick={() => setAiPromptOpen(false)}>
-      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">🪄 AI step — describe what to do</span>
-          <button className="modal-close" onClick={() => setAiPromptOpen(false)} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="api-editor-body">
-          <label className="api-field">
-            <span>Plain English — what should happen on THIS page?</span>
-            <textarea
-              className="api-body"
-              rows={3}
-              placeholder={'e.g. log in as standard_user with password secret_sauce'}
-              value={aiPromptText}
-              onChange={(e) => setAiPromptText(e.target.value)}
-              autoFocus
-            />
-          </label>
-          <p className="api-hint">
-            The AI reads the elements on the page you’re viewing and turns your intent into steps —
-            grounded to real elements, so it can’t invent selectors. It sees one page at a time, so
-            for a multi-page flow, generate on each page. Always review + Replay the result.
-          </p>
-          {aiPromptNote && (
-            <p
-              className="api-hint"
-              style={{ color: aiPromptNote.startsWith('✓') ? '#7ee787' : '#f0b232' }}
-            >
-              {aiPromptNote}
-            </p>
-          )}
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={() => setAiPromptOpen(false)}>
-            Close
-          </button>
-          <button
-            className="modal-btn primary"
-            onClick={handleGenerateAiSteps}
-            disabled={!aiPromptText.trim()}
-          >
-            🪄 Generate steps
-          </button>
-        </div>
-      </div>
-    </div>
+  // Markup in components/AiPromptModal.tsx.
+  const aiPromptModal = (
+    <AiPromptModal
+      aiPromptNote={aiPromptNote}
+      aiPromptOpen={aiPromptOpen}
+      aiPromptText={aiPromptText}
+      handleGenerateAiSteps={handleGenerateAiSteps}
+      setAiPromptOpen={setAiPromptOpen}
+      setAiPromptText={setAiPromptText}
+    />
   )
 
   // F22: draft a whole test from a user story (+ optional local PR diff). No live
@@ -6110,466 +5657,100 @@ function App(): React.JSX.Element {
     s.type === 'navigate' ? '🧭' : s.type === 'assert' ? '✅' : '⏸'
   const draftStepKind = (s: RecorderStep): string =>
     s.type === 'navigate' ? 'Go to' : s.type === 'assert' ? 'Check' : 'Do (ground this)'
-  const draftModal = draftOpen && (
-    <div className="modal-backdrop" onClick={() => !draftBusy && setDraftOpen(false)}>
-      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">📝 Draft a test — from a story or PR diff</span>
-          <button
-            className="modal-close"
-            onClick={() => setDraftOpen(false)}
-            disabled={draftBusy}
-            aria-label="Close"
-          >
-            ✕
-          </button>
-        </div>
-        <div className="api-editor-body">
-          <label className="api-field">
-            <span>User story / acceptance criteria</span>
-            <textarea
-              className="api-body"
-              rows={5}
-              placeholder={
-                'e.g. As a shopper I can sort products by price (low to high) on the inventory page, and the list re-orders so the cheapest item is first.'
-              }
-              value={draftStory}
-              onChange={(e) => setDraftStory(e.target.value)}
-              autoFocus
-            />
-          </label>
-          <div className="draft-diff-row">
-            <button className="modal-btn" onClick={handleLoadDiff} disabled={draftBusy}>
-              📁 {draftDiff ? 'Change PR diff…' : 'Load PR diff from repo…'}
-            </button>
-            {draftDiff && (
-              <span className="draft-diff-chip">
-                {draftDiff.summary}
-                <button
-                  className="draft-diff-clear"
-                  onClick={() => {
-                    setDraftDiff(null)
-                    setDraftNote('')
-                  }}
-                  title="Remove the diff"
-                  aria-label="Remove the diff"
-                >
-                  ✕
-                </button>
-              </span>
-            )}
-          </div>
-          <p className="api-hint">
-            The AI turns your story into a draft: <strong>navigations</strong> and{' '}
-            <strong>✅ checks</strong> run for real; <strong>⏸ actions</strong> are plain-English
-            placeholders you ground by recording over them (there’s no live page to read selectors
-            from yet). Optionally point at the app’s local git repo to steer the draft from its diff.
-          </p>
-          {draftNote && (
-            <p
-              className="api-hint"
-              style={{ color: draftNote.startsWith('✓') ? '#7ee787' : '#f0b232' }}
-            >
-              {draftNote}
-            </p>
-          )}
-          {draftResult && (
-            <>
-              <div className="ac-summary">
-                Draft: <strong>{draftResult.title}</strong> · {draftResult.steps.length} steps
-              </div>
-              <ul className="ac-list">
-                {draftResult.steps.map((s, i) => {
-                  // The story named no address for this "Go to", so the URL below
-                  // is our guess. Flag it here — at replay it would just look
-                  // like the site is broken.
-                  const guessedUrl = draftResult.guessed.includes(i)
-                  return (
-                    <li key={i} className="ac-row">
-                      <span className="ac-mark">{guessedUrl ? '⚠' : draftStepIcon(s)}</span>
-                      <span className="ac-text">
-                        <strong>{draftStepKind(s)}</strong>
-                        <span
-                          className="mon-sub"
-                          style={guessedUrl ? { color: '#f0b232' } : undefined}
-                          title={
-                            guessedUrl
-                              ? 'The story didn’t say where to go — this address is a guess. Set it before you replay.'
-                              : undefined
-                          }
-                        >
-                          {s.type === 'navigate'
-                            ? s.url || '(no address — set this before replaying)'
-                            : s.value}
-                          {guessedUrl && s.url ? ' — guessed' : ''}
-                        </span>
-                      </span>
-                    </li>
-                  )
-                })}
-              </ul>
-            </>
-          )}
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={() => setDraftOpen(false)} disabled={draftBusy}>
-            Close
-          </button>
-          {draftResult ? (
-            <>
-              <button className="modal-btn" onClick={handleGenerateDraft} disabled={draftBusy}>
-                ↻ Regenerate
-              </button>
-              <button className="modal-btn primary" onClick={handleInsertDraft} disabled={draftBusy}>
-                ＋ Insert {draftResult.steps.length} steps
-              </button>
-            </>
-          ) : (
-            <button
-              className="modal-btn primary"
-              onClick={handleGenerateDraft}
-              disabled={draftBusy || (!draftStory.trim() && !draftDiff)}
-            >
-              {draftBusy ? '✨ Drafting…' : '✨ Generate draft'}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
+  // Markup in components/DraftModal.tsx.
+  const draftModal = (
+    <DraftModal
+      draftOpen={draftOpen}
+      draftBusy={draftBusy}
+      draftDiff={draftDiff}
+      draftNote={draftNote}
+      draftStepIcon={draftStepIcon}
+      draftStepKind={draftStepKind}
+      draftStory={draftStory}
+      draftResult={draftResult}
+      handleGenerateDraft={handleGenerateDraft}
+      handleInsertDraft={handleInsertDraft}
+      handleLoadDiff={handleLoadDiff}
+      setDraftDiff={setDraftDiff}
+      setDraftNote={setDraftNote}
+      setDraftOpen={setDraftOpen}
+      setDraftStory={setDraftStory}
+    />
   )
 
   // F35 (Mock Studio): pick a captured API response, edit its status/body into a
   // scenario (sold-out, a 500, an empty list), and copy the Playwright route/fulfill.
-  const mockModal = mockOpen && (
-    <div className="modal-backdrop" onClick={() => setMockOpen(false)}>
-      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">🎭 Mock Studio — edit a captured response into a scenario</span>
-          <button className="modal-close" onClick={() => setMockOpen(false)} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="api-editor-body">
-          {!mockEntries.length ? (
-            <p className="api-hint">
-              {mockNote ||
-                'No mockable API responses captured yet. Record a flow with 🌐 Net capture ON, then reopen Mock Studio.'}
-            </p>
-          ) : (
-            <>
-              <p className="api-hint">
-                Pick a captured API call, edit its <strong>status</strong> and{' '}
-                <strong>body</strong> into the scenario you want to test (sold-out, a server error,
-                an empty list), then copy the Playwright mock. Paste it into your test to force that
-                exact response — no backend needed.
-              </p>
-              <div className="ac-summary">Captured responses ({mockEntries.length})</div>
-              <ul className="ac-list mock-list">
-                {mockEntries.map((e, i) => (
-                  <li
-                    key={i}
-                    className={`ac-row mock-row${mockSel === i ? ' selected' : ''}`}
-                    onClick={() => selectMock(i)}
-                  >
-                    <span className={`mock-verb verb-${e.method.toLowerCase()}`}>{e.method}</span>
-                    <span className="ac-text">
-                      <strong>{(() => { try { return new URL(e.url).pathname } catch { return e.url } })()}</strong>
-                      <span className="mon-sub">
-                        {e.status} {e.statusText} · {e.mimeType || '—'}
-                        {e.resourceType ? ` · ${e.resourceType}` : ''}
-                      </span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-              {mockSel != null && mockEntries[mockSel] && (
-                <div className="mock-editor">
-                  <div className="mock-controls">
-                    <label className="mock-status-field">
-                      <span>Status</span>
-                      <input
-                        className="mock-status-input"
-                        value={mockStatus}
-                        onChange={(e) => setMockStatus(e.target.value.replace(/[^\d]/g, ''))}
-                      />
-                    </label>
-                    <div className="mock-quick">
-                      <button className="modal-btn" onClick={() => { setMockStatus('500'); setMockBody('{"error":"Internal Server Error"}') }}>
-                        Force 500
-                      </button>
-                      <button className="modal-btn" onClick={() => { setMockStatus('404'); setMockBody('{"error":"Not Found"}') }}>
-                        Force 404
-                      </button>
-                      <button className="modal-btn" onClick={() => setMockBody('[]')}>
-                        Empty list []
-                      </button>
-                      <button className="modal-btn" onClick={() => { const e = mockEntries[mockSel]; setMockStatus(String(e.status)); setMockBody(e.body) }}>
-                        ↺ Reset
-                      </button>
-                    </div>
-                  </div>
-                  <label className="api-field">
-                    <span>Response body (edit into your scenario)</span>
-                    <textarea
-                      className="api-body mock-body"
-                      rows={7}
-                      value={mockBody}
-                      onChange={(e) => setMockBody(e.target.value)}
-                      spellCheck={false}
-                    />
-                  </label>
-                  <div className="ac-summary">Playwright mock (paste into your test)</div>
-                  <pre className="mock-snippet"><code>{mockSnippet()}</code></pre>
-                </div>
-              )}
-            </>
-          )}
-          {mockNote && mockEntries.length > 0 && (
-            <p className="api-hint" style={{ color: mockNote.startsWith('✓') ? '#7ee787' : '#f0b232' }}>
-              {mockNote}
-            </p>
-          )}
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={() => setMockOpen(false)}>
-            Close
-          </button>
-          {mockSel != null && (
-            <button className="modal-btn primary" onClick={copyMockSnippet}>
-              {mockCopied ? '✓ Copied!' : '📋 Copy Playwright mock'}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
+  // Markup in components/MockModal.tsx.
+  const mockModal = (
+    <MockModal
+      copyMockSnippet={copyMockSnippet}
+      mockBody={mockBody}
+      mockCopied={mockCopied}
+      mockEntries={mockEntries}
+      mockNote={mockNote}
+      mockOpen={mockOpen}
+      mockSel={mockSel}
+      mockSnippet={mockSnippet}
+      mockStatus={mockStatus}
+      selectMock={selectMock}
+      setMockBody={setMockBody}
+      setMockOpen={setMockOpen}
+      setMockStatus={setMockStatus}
+    />
   )
 
   // F34: create a Jira ticket from a failure. Pre-filled summary + the whole bug
   // report as the description. Two paths: push via API token, or copy + open
   // Jira's create page (no token). Site/email/project persist; token never stored.
-  const jiraModal = jiraOpen && (
-    <div className="modal-backdrop" onClick={() => !jiraBusy && setJiraOpen(false)}>
-      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">🎫 Create a Jira ticket</span>
-          <button
-            className="modal-close"
-            onClick={() => setJiraOpen(false)}
-            disabled={jiraBusy}
-            aria-label="Close"
-          >
-            ✕
-          </button>
-        </div>
-        <div className="api-editor-body">
-          <label className="api-field">
-            <span>Summary (ticket title)</span>
-            <input
-              className="url-input"
-              type="text"
-              value={jiraSummaryText}
-              onChange={(e) => setJiraSummaryText(e.target.value)}
-            />
-          </label>
-          <label className="api-field">
-            <span>Description</span>
-            <textarea
-              className="api-body"
-              rows={8}
-              value={jiraDescText}
-              onChange={(e) => setJiraDescText(e.target.value)}
-              spellCheck={false}
-            />
-          </label>
-          <p className="api-hint">
-            Push it straight to Jira with an API token, or use <strong>Copy + open Jira</strong> (no
-            token — paste the ticket into Jira’s create page). Your site, email and project are
-            remembered; the token is never stored.
-          </p>
-          <div className="jira-cred-grid">
-            <label className="api-field">
-              <span>Jira site URL</span>
-              <input
-                className="url-input"
-                type="text"
-                placeholder="https://yourteam.atlassian.net"
-                value={jiraBaseUrl}
-                onChange={(e) => setJiraBaseUrl(e.target.value)}
-              />
-            </label>
-            <label className="api-field">
-              <span>Project key</span>
-              <input
-                className="url-input"
-                type="text"
-                placeholder="QA"
-                value={jiraProject}
-                onChange={(e) => setJiraProject(e.target.value)}
-              />
-            </label>
-            <label className="api-field">
-              <span>Your email</span>
-              <input
-                className="url-input"
-                type="text"
-                placeholder="you@team.com"
-                value={jiraEmail}
-                onChange={(e) => setJiraEmail(e.target.value)}
-              />
-            </label>
-            <label className="api-field">
-              <span>
-                API token <span className="mon-sub">(not stored)</span>
-              </span>
-              <input
-                className="url-input"
-                type="password"
-                placeholder="Atlassian API token"
-                value={jiraToken}
-                onChange={(e) => setJiraToken(e.target.value)}
-              />
-            </label>
-          </div>
-          {jiraNote && (
-            <p
-              className="api-hint"
-              style={{
-                color: jiraNote.startsWith('✓')
-                  ? '#7ee787'
-                  : jiraNote.startsWith('⚠')
-                    ? '#f0b232'
-                    : '#9aa4b2'
-              }}
-            >
-              {jiraNote}
-            </p>
-          )}
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={() => setJiraOpen(false)} disabled={jiraBusy}>
-            Close
-          </button>
-          <button className="modal-btn" onClick={handleJiraCopyOpen} disabled={jiraBusy}>
-            📋 Copy + open Jira
-          </button>
-          <button className="modal-btn primary" onClick={handleJiraCreate} disabled={jiraBusy}>
-            {jiraBusy ? '⏳ Creating…' : '⚡ Create in Jira'}
-          </button>
-        </div>
-      </div>
-    </div>
+  // Markup in components/JiraModal.tsx.
+  const jiraModal = (
+    <JiraModal
+      handleJiraCopyOpen={handleJiraCopyOpen}
+      handleJiraCreate={handleJiraCreate}
+      jiraBaseUrl={jiraBaseUrl}
+      jiraBusy={jiraBusy}
+      jiraDescText={jiraDescText}
+      jiraEmail={jiraEmail}
+      jiraNote={jiraNote}
+      jiraOpen={jiraOpen}
+      jiraProject={jiraProject}
+      jiraSummaryText={jiraSummaryText}
+      jiraToken={jiraToken}
+      setJiraBaseUrl={setJiraBaseUrl}
+      setJiraDescText={setJiraDescText}
+      setJiraEmail={setJiraEmail}
+      setJiraOpen={setJiraOpen}
+      setJiraProject={setJiraProject}
+      setJiraSummaryText={setJiraSummaryText}
+      setJiraToken={setJiraToken}
+    />
   )
 
   // F21: paste a bug's repro + expected result → a regression test (repro steps + a
   // plain-English check of the expected behaviour). Same close-first + toast flow.
-  const bugPromptModal = bugPromptOpen && (
-    <div className="modal-backdrop" onClick={() => setBugPromptOpen(false)}>
-      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">🐛 Bug check — this page</span>
-          <button className="modal-close" onClick={() => setBugPromptOpen(false)} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="api-editor-body">
-          <label className="api-field">
-            <span>Steps to reproduce (plain English)</span>
-            <textarea
-              className="api-body"
-              rows={4}
-              placeholder={
-                'e.g. log in as standard_user, add the backpack to the cart, then open the cart'
-              }
-              value={bugReproText}
-              onChange={(e) => setBugReproText(e.target.value)}
-              autoFocus
-            />
-          </label>
-          <label className="api-field">
-            <span>Expected result (what SHOULD happen)</span>
-            <textarea
-              className="api-body"
-              rows={2}
-              placeholder={'e.g. the cart shows 1 item and the backpack is listed'}
-              value={bugExpectedText}
-              onChange={(e) => setBugExpectedText(e.target.value)}
-            />
-          </label>
-          <p className="api-hint">
-            Adds a smart check for <strong>the page you’re on right now</strong>. The AI reproduces
-            your steps (grounded to real elements on THIS page, so it can’t invent selectors), then
-            adds a plain-English check of the expected result — one it reasons about like a human,
-            not a rigid selector match. Replay it BEFORE the fix — the check fails; AFTER the fix —
-            it passes. It only covers this one page: for a bug that spans several pages, record the
-            navigation to reach each page, then run this on the page where the check belongs. Always
-            review + Replay.
-          </p>
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={() => setBugPromptOpen(false)}>
-            Close
-          </button>
-          <button
-            className="modal-btn primary"
-            onClick={handleGenerateRegressionTest}
-            disabled={!bugReproText.trim()}
-          >
-            🐛 Build check
-          </button>
-        </div>
-      </div>
-    </div>
+  // Markup in components/BugPromptModal.tsx.
+  const bugPromptModal = (
+    <BugPromptModal
+      bugExpectedText={bugExpectedText}
+      bugPromptOpen={bugPromptOpen}
+      bugReproText={bugReproText}
+      handleGenerateRegressionTest={handleGenerateRegressionTest}
+      setBugExpectedText={setBugExpectedText}
+      setBugPromptOpen={setBugPromptOpen}
+      setBugReproText={setBugReproText}
+    />
   )
 
   // F27: name the data a step creates. Enter saves, Esc/backdrop cancels.
-  const createsDataModal = createsDataIndex !== null && (
-    <div className="modal-backdrop" onClick={() => setCreatesDataIndex(null)}>
-      <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">🗃️ What does this step create?</span>
-          <button
-            className="modal-close"
-            onClick={() => setCreatesDataIndex(null)}
-            aria-label="Close"
-          >
-            ✕
-          </button>
-        </div>
-        <div className="api-editor-body">
-          <label className="api-field">
-            <span>Data created by this step</span>
-            <input
-              type="text"
-              placeholder='e.g. "user account", "order"'
-              value={createsDataDraft}
-              onChange={(e) => setCreatesDataDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleSaveCreatesData()
-                if (e.key === 'Escape') setCreatesDataIndex(null)
-              }}
-              autoFocus
-            />
-          </label>
-          <p className="api-hint">
-            Tracked so a suite can flag it if nothing cleans it up. A test that creates data but has
-            no 🧹 teardown step is an orphan — its records pile up in the environment run after run,
-            and eventually a later run fails on data its own suite left behind.
-          </p>
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={() => setCreatesDataIndex(null)}>
-            Cancel
-          </button>
-          <button
-            className="modal-btn primary"
-            onClick={handleSaveCreatesData}
-            disabled={!createsDataDraft.trim()}
-          >
-            🗃️ Save
-          </button>
-        </div>
-      </div>
-    </div>
+  // Markup in components/CreatesDataModal.tsx.
+  const createsDataModal = (
+    <CreatesDataModal
+      createsDataDraft={createsDataDraft}
+      createsDataIndex={createsDataIndex}
+      handleSaveCreatesData={handleSaveCreatesData}
+      setCreatesDataDraft={setCreatesDataDraft}
+      setCreatesDataIndex={setCreatesDataIndex}
+    />
   )
 
   // F31: the living-docs modal, opened by 📖 Suite docs on the library screen.
@@ -6604,80 +5785,19 @@ function App(): React.JSX.Element {
   )
 
   // F31: acceptance-criteria checklist — enter ACs, AI maps them to covering tests.
-  const acModal = acOpen && (
-    <div className="modal-backdrop" onClick={closeAcChecklist}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">✅ AC checklist — which tests cover each requirement</span>
-          <button className="modal-close" onClick={closeAcChecklist} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="ac-body">
-          <label className="api-field">
-            <span>Acceptance criteria — one per line</span>
-            <textarea
-              className="api-body"
-              rows={5}
-              placeholder={
-                'e.g. A user can log in with valid credentials\nInvalid login shows an error message\nThe cart shows the number of items added'
-              }
-              value={acText}
-              onChange={(e) => setAcText(e.target.value)}
-            />
-          </label>
-          <p className="api-hint">
-            The AI reads your {savedTests.length} saved test{savedTests.length === 1 ? '' : 's'} and
-            marks which cover each criterion — an <strong>uncovered AC is a real coverage gap</strong>.
-            It judges coverage (needs the Claude CLI), so sanity-check the matches. Your criteria are
-            saved between sessions.
-          </p>
-          {acFailed && (
-            <p className="api-hint" style={{ color: '#f0b232' }}>
-              ⚠ The AI is unavailable (needs the Claude CLI). Try again.
-            </p>
-          )}
-          {acResult &&
-            (() => {
-              const covered = acResult.filter((r) => r.tests.length).length
-              const gaps = acResult.length - covered
-              return (
-                <div className="ac-results">
-                  <div className="ac-summary">
-                    {covered} of {acResult.length} covered
-                    {gaps > 0 ? ` · ${gaps} gap${gaps === 1 ? '' : 's'} ⚠` : ' · full coverage ✓'}
-                  </div>
-                  <ul className="ac-list">
-                    {acResult.map((r, i) => (
-                      <li key={i} className={`ac-row ${r.tests.length ? 'covered' : 'uncovered'}`}>
-                        <span className="ac-mark">{r.tests.length ? '✓' : '⚠'}</span>
-                        <span className="ac-text">{r.ac}</span>
-                        <span className="ac-tests">
-                          {r.tests.length
-                            ? `covered by ${r.tests.join(', ')}`
-                            : 'NOT covered by any test'}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )
-            })()}
-        </div>
-        <div className="modal-footer">
-          <button className="modal-btn" onClick={closeAcChecklist}>
-            Close
-          </button>
-          <button
-            className="modal-btn primary"
-            onClick={handleMatchAcs}
-            disabled={acBusy || !acText.trim()}
-          >
-            {acBusy ? 'Matching…' : '🤖 Match to tests'}
-          </button>
-        </div>
-      </div>
-    </div>
+  // Markup in components/AcModal.tsx.
+  const acModal = (
+    <AcModal
+      acBusy={acBusy}
+      acFailed={acFailed}
+      acOpen={acOpen}
+      acResult={acResult}
+      acText={acText}
+      closeAcChecklist={closeAcChecklist}
+      handleMatchAcs={handleMatchAcs}
+      savedTests={savedTests}
+      setAcText={setAcText}
+    />
   )
 
   // F32: the monitors dashboard — promote a saved test to a scheduled monitor,
@@ -6714,112 +5834,14 @@ function App(): React.JSX.Element {
   )
 
   // F23: the coverage gap map — crawl progress, then the tested/untested overlay.
-  const coverageModal = coverageOpen && (
-    <div
-      className="modal-backdrop"
-      onClick={() => {
-        if (!coverageRun?.running) setCoverageOpen(false)
-      }}
-    >
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">🗺️ Coverage gap map</span>
-          <button className="modal-close" onClick={() => setCoverageOpen(false)} aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="ac-body">
-          {coverageRun?.running ? (
-            <p className="api-hint">
-              ⏳ Crawling from your current page… found <strong>{coverageRun.found}</strong> page
-              {coverageRun.found === 1 ? '' : 's'} so far. The browser is walking the links — it
-              returns to where you were when it's done.
-            </p>
-          ) : !coverageRun?.result || coverageRun.result.pages.length === 0 ? (
-            <p className="api-hint">
-              Nothing to map. Open your app in the browser first (navigate, and log in if it needs a
-              session), then run 🗺️ Coverage from that page — it crawls outward from wherever you are.
-            </p>
-          ) : (
-            (() => {
-              const { result, coveredExact, coveredContains } = coverageRun
-              const isCov = (path: string): boolean => {
-                // Navigate coverage is scoped to THIS crawled site (origin+path),
-                // so a same-path test on a different site isn't credited here.
-                const full = result.origin + normCovPath(path)
-                if (coveredExact.has(full)) return true
-                // url-contains: matched against the PATH only (matching the full
-                // URL would let a value like "https" cover everything), AND only
-                // when the assert's own test drives this site, AND the value is
-                // specific enough — a lone "/" or "" is too loose to be coverage.
-                const p = normCovPath(path)
-                return coveredContains.some(
-                  (c) =>
-                    c.value.replace(/\/+$/, '').length > 1 &&
-                    c.origins.includes(result.origin) &&
-                    p.includes(c.value)
-                )
-              }
-              const seen = new Set<string>()
-              const pages = result.pages.filter((p) => {
-                const k = normCovPath(p.path)
-                if (seen.has(k)) return false
-                seen.add(k)
-                return true
-              })
-              const coveredCount = pages.filter((p) => isCov(p.path)).length
-              const gaps = pages.length - coveredCount
-              const pct = Math.round((coveredCount / Math.max(1, pages.length)) * 100)
-              const ordered = [...pages].sort(
-                (a, b) => Number(isCov(a.path)) - Number(isCov(b.path))
-              )
-              return (
-                <>
-                  <p className="api-hint">
-                    Crawled <strong>{pages.length}</strong> page{pages.length === 1 ? '' : 's'} from{' '}
-                    <code>{result.origin}</code>
-                    {result.capped ? ' (stopped at the 40-page cap)' : ''}. A page counts as tested
-                    when a saved test <strong>navigates</strong> to it or <strong>asserts its URL</strong>
-                    — one reached only by clicking through can still show as a gap, which is a nudge to
-                    add an explicit check there.
-                  </p>
-                  <div className="ac-summary">
-                    {coveredCount} of {pages.length} pages covered ({pct}%)
-                    {gaps ? ` · ${gaps} gap${gaps === 1 ? '' : 's'} ⚠` : ' · full coverage ✓'}
-                  </div>
-                  <ul className="ac-list">
-                    {ordered.map((p) => {
-                      const cov = isCov(p.path)
-                      return (
-                        <li key={p.path} className={`ac-row ${cov ? 'covered' : 'uncovered'}`}>
-                          <span className="ac-mark">{cov ? '✓' : '⚠'}</span>
-                          <span className="ac-text">
-                            <strong>{p.path}</strong>
-                            <span className="mon-sub">
-                              {cov ? 'covered by a test' : 'no test visits or verifies this page'}
-                              {p.title && p.title !== p.path ? ` · ${p.title}` : ''}
-                            </span>
-                          </span>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </>
-              )
-            })()
-          )}
-        </div>
-        <div className="modal-footer">
-          <button
-            className="modal-btn primary"
-            onClick={() => setCoverageOpen(false)}
-            disabled={coverageRun?.running}
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
+  // Markup in components/CoverageModal.tsx.
+  const coverageModal = (
+    <CoverageModal
+      coverageOpen={coverageOpen}
+      coverageRun={coverageRun}
+      normCovPath={normCovPath}
+      setCoverageOpen={setCoverageOpen}
+    />
   )
 
   // === F40 modals (shared by BOTH views) ==============================
