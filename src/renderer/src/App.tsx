@@ -34,6 +34,8 @@ import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
 // export and the run all agree on how markers pair up.
 import { analyzeControlFlow, isControlStep, type ConditionKind } from '../../shared/controlFlow'
 import { collidesWithOsEnv } from '../../shared/osEnvNames'
+import { buildEdgeReport, edgeBasisNote, edgeCtxOf, edgeVerdict } from './edgeReport'
+import { generateSuiteReport } from './suiteReportText'
 // The shared run-input rules. Every run path should reach for these rather than
 // re-deciding locally — that divergence is what produced the same bug in four
 // different places over two days.
@@ -52,7 +54,6 @@ import {
   ASSERT_KINDS,
   ASSERT_LABELS,
   CATEGORY_LABELS,
-  CATEGORY_WHY,
   EXAMPLE_URLS,
   LOCALE_PRESETS,
   PERF_METRIC_HELP,
@@ -2673,172 +2674,10 @@ function App(): React.JSX.Element {
     await refreshEdgeHistory(testFileName)
   }
 
-  // F20 verdict for one variant.
-  // 'accepted' = the app took the hostile input and still reached success (a bug
-  // to investigate — worst for injection). 'rejected' = the app blocked it
-  // (good). 'unknown' = we cannot tell, and MUST NOT guess.
-  //
-  // ORIGINALLY this was just `ok ? accepted : rejected`, which is only meaningful
-  // when the test HAS a success check. Without one, `ok` means "the steps
-  // completed" — and typing garbage into a field and clicking Login always
-  // complete, whatever the app says next. So `ok` carried NO information, and
-  // SauceDemo rejecting all 14 hostile inputs was reported as 14 ACCEPTED, with
-  // the SQL injection flagged as a serious vulnerability. Manufacturing a
-  // security finding is the worst thing a QA tool can do.
-  //
-  // Three sources of truth, most authoritative first:
-  //   1. a success rule the user typed  — explicit beats inferred, always
-  //   2. the test's own ✓ check         — what they actually asserted
-  //   3. the BASELINE's final URL       — valid input lands on the post-login
-  //      page; a variant that ends elsewhere was rejected. No hand-written
-  //      assertion needed, which is the whole point: nobody adds one before
-  //      running edge cases for the first time.
-  // Only when none of the three can speak do we say 'unknown'.
-  const normEdgeUrl = (u?: string): string => {
-    if (!u) return ''
-    try {
-      const x = new URL(u)
-      // origin + path only. Query/hash routinely carry per-run noise (tokens,
-      // scroll anchors) that would make identical pages compare as different.
-      return (x.origin + x.pathname).replace(/\/+$/, '').toLowerCase()
-    } catch {
-      return u.trim().replace(/\/+$/, '').toLowerCase()
-    }
-  }
-  type EdgeBasis = 'stored' | 'rule' | 'check' | 'url' | 'none'
-  const edgeVerdict = (
-    r: { ok: boolean; finalUrl?: string; verdict?: 'accepted' | 'rejected' | 'unknown' },
-    ctx: {
-      baselineOk: boolean
-      hasAssertion: boolean
-      successUrl: string
-      startUrl: string
-      baselineUrl: string
-    }
-  ): { verdict: 'accepted' | 'rejected' | 'unknown'; basis: EdgeBasis } => {
-    // A re-opened SAVED run carries the verdict it was given the day it ran.
-    // Reuse it: stored evidence must not change meaning later just because the
-    // judging rules improved, and the context it was judged with (the success
-    // rule, the start URL) isn't all persisted.
-    if (r.verdict) return { verdict: r.verdict, basis: 'stored' }
-    // Baseline broken → the valid input didn't even work, so nothing below means
-    // anything.
-    if (!ctx.baselineOk) return { verdict: 'unknown', basis: 'none' }
-
-    // 1. An explicit rule the user typed.
-    const rule = ctx.successUrl.trim().toLowerCase()
-    if (rule) {
-      if (!r.finalUrl) return { verdict: 'unknown', basis: 'none' }
-      return {
-        verdict: r.finalUrl.toLowerCase().includes(rule) ? 'accepted' : 'rejected',
-        basis: 'rule'
-      }
-    }
-
-    // 2. The test's own check.
-    if (ctx.hasAssertion) return { verdict: r.ok ? 'accepted' : 'rejected', basis: 'check' }
-
-    // 3. Inferred from the baseline. Usable ONLY if success visibly moves the
-    //    page — on an app that stays put (a SPA swapping content in place) the
-    //    baseline ends where it started, the signal can't discriminate, and
-    //    saying so beats guessing.
-    const base = normEdgeUrl(ctx.baselineUrl)
-    const start = normEdgeUrl(ctx.startUrl)
-    const mine = normEdgeUrl(r.finalUrl)
-    if (base && start && base !== start && mine) {
-      return { verdict: mine === base ? 'accepted' : 'rejected', basis: 'url' }
-    }
-    return { verdict: 'unknown', basis: 'none' }
-  }
-
-  // The context every verdict in a run shares. Derived once from the run itself,
-  // so the report, the markdown and the saved record can never disagree.
-  const edgeCtxOf = (run: {
-    hasAssertion: boolean
-    successUrl?: string
-    startUrl?: string
-    results: { case: { baseline?: boolean }; ok: boolean; finalUrl?: string }[]
-  }): {
-    baselineOk: boolean
-    hasAssertion: boolean
-    successUrl: string
-    startUrl: string
-    baselineUrl: string
-  } => {
-    const baseline = run.results.find((r) => r.case.baseline)
-    return {
-      baselineOk: !!baseline?.ok,
-      hasAssertion: run.hasAssertion,
-      successUrl: run.successUrl ?? '',
-      startUrl: run.startUrl ?? '',
-      baselineUrl: baseline?.finalUrl ?? ''
-    }
-  }
-
-  // How the verdicts in this run were reached — shown so a verdict is never a
-  // black box, and so an INFERRED one is visibly weaker than an asserted one.
-  const edgeBasisNote = (ctx: { hasAssertion: boolean; successUrl: string; startUrl: string; baselineUrl: string; baselineOk: boolean }): string => {
-    if (!ctx.baselineOk) return ''
-    if (ctx.successUrl.trim()) return `Judged by your rule: success = URL contains “${ctx.successUrl.trim()}”.`
-    if (ctx.hasAssertion) return 'Judged by the test’s own ✓ check.'
-    const base = normEdgeUrl(ctx.baselineUrl)
-    const start = normEdgeUrl(ctx.startUrl)
-    if (base && start && base !== start) {
-      return `Inferred: the valid-input baseline ended on ${ctx.baselineUrl} — a variant that ended elsewhere was rejected.`
-    }
-    return ''
-  }
-
-  // A ready-to-paste markdown summary of an edge-case run (Copy button).
-  const buildEdgeReport = (): string => {
-    if (!edgeRun) return ''
-    const baseline = edgeRun.results.find((r) => r.case.baseline)
-    const baselineOk = !!baseline?.ok
-    const variants = edgeRun.results.filter((r) => !r.case.baseline)
-    const ctx = edgeCtxOf(edgeRun)
-    const verdicts = variants.map((r) => edgeVerdict(r, ctx).verdict)
-    const accepted = verdicts.filter((v) => v === 'accepted').length
-    const rejected = verdicts.filter((v) => v === 'rejected').length
-    const undetermined = verdicts.filter((v) => v === 'unknown').length
-    const lines: string[] = []
-    lines.push(`# Edge-case report${testName ? ` — ${testName}` : ''}`)
-    lines.push('')
-    lines.push(`- Variants run: ${variants.length}`)
-    // Only claim accepted/rejected counts when they mean something. Printing
-    // "0 rejected" beside "14 undetermined" reads as a finding; it isn't one.
-    if (undetermined === variants.length) {
-      lines.push(`- ? Undetermined: ${undetermined} — no verdict is possible for this run (see below).`)
-    } else {
-      lines.push(`- ⚠ Accepted (app took the bad input — review): ${accepted}`)
-      lines.push(`- ✓ Rejected (handled): ${rejected}`)
-      if (undetermined) lines.push(`- ? Undetermined: ${undetermined}`)
-    }
-    // How the verdicts were reached travels WITH them — an inferred verdict is
-    // weaker than an asserted one and the reader has to be able to see which.
-    const note = edgeBasisNote(ctx)
-    if (note) lines.push(`- ${note}`)
-    if (!baselineOk) lines.push(`- ⚠ Baseline (happy path) FAILED — fix the test first, then re-run; nothing here can be judged until the valid inputs pass.`)
-    if (undetermined === variants.length && baselineOk)
-      lines.push(`- ⚠ No success check in this test AND the valid-input baseline didn't move the page, so there is nothing to compare against. Add an assertion, or set a success rule in the 🧨 dialog, and re-run.`)
-    lines.push('')
-    for (const r of variants) {
-      const v = edgeVerdict(r, ctx).verdict
-      const mark =
-        v === 'accepted'
-          ? '⚠ ACCEPTED'
-          : v === 'rejected'
-            ? '✓ rejected'
-            : baselineOk
-              ? '? undetermined'
-              : '· (baseline broken)'
-      lines.push(`- ${mark} — **${r.case.fieldLabel}** = ${r.case.edgeLabel}: \`${r.case.value.slice(0, 60) || '(empty)'}\``)
-      lines.push(`  - ${r.case.hint}`)
-    }
-    return lines.join('\n')
-  }
+  // The F20 verdict + report logic lives in ./edgeReport (pure, unit-tested).
 
   const handleCopyEdgeReport = (): void => {
-    navigator.clipboard.writeText(buildEdgeReport())
+    navigator.clipboard.writeText(buildEdgeReport(edgeRun, testName))
   }
 
   // F20 export: turn the variants into a runnable Playwright negative suite —
@@ -4092,104 +3931,13 @@ function App(): React.JSX.Element {
 
   // B: one shareable markdown report for a whole suite run — pass/fail, the
   // by-category failure breakdown, and the auto-healed tests.
-  const generateSuiteReport = (): string => {
-    if (!suiteRun) return ''
-    const r = suiteRun.results
-    const passed = r.filter((x) => x.status === 'passed').length
-    const failed = r.length - passed
-    const healed = r.reduce((s, x) => s + (x.healed ?? 0), 0)
-    const byCat = new Map<string, number>()
-    for (const x of r) {
-      if (x.status === 'failed') {
-        const c = x.category ?? 'unknown'
-        byCat.set(c, (byCat.get(c) ?? 0) + 1)
-      }
-    }
-    const lines: string[] = [
-      `# Suite run — ${suiteRun.suite}`,
-      '',
-      `**${passed}/${r.length} passed · ${failed} failed${healed ? ` · ${healed} selector${healed > 1 ? 's' : ''} auto-healed` : ''}**`,
-      ''
-    ]
-    if (byCat.size) {
-      lines.push('## Failures by type', '')
-      for (const [c, n] of [...byCat.entries()].sort((a, b) => b[1] - a[1])) {
-        // The reason travels WITH the count. Pasted into a ticket or a PR, this
-        // report is read by someone who can't hover a chip to find out why an
-        // "app bug" was called an app bug.
-        const why = CATEGORY_WHY[c as FailureCategory]
-        lines.push(`- **${CATEGORY_LABELS[c as FailureCategory] ?? c}: ${n}**${why ? ` — ${why}` : ''}`)
-      }
-      lines.push('')
-    }
-    // F25: unresolved {{env:…}} — in the pasted report too, since that's what
-    // reaches a ticket. Without it the reader sees only the downstream failure.
-    {
-      const byVar = new Map<string, string[]>()
-      for (const r of suiteRun.results) {
-        for (const v of r.unresolvedEnv ?? []) {
-          byVar.set(v, [...(byVar.get(v) ?? []), r.name])
-        }
-      }
-      if (byVar.size) {
-        lines.push('## ⚠ Environment variables with no value', '')
-        lines.push(
-          `Each was replaced with an empty string, so a failure below may be about the environment rather than the test.`,
-          ''
-        )
-        for (const [v, tests] of byVar) {
-          lines.push(
-            `- \`{{env:${v}}}\` — ${tests.length} test${tests.length === 1 ? '' : 's'}: ${tests.join(', ')}` +
-              (collidesWithOsEnv(v)
-                ? ' _(never read from the OS, which defines this name too)_'
-                : '')
-          )
-        }
-        lines.push('')
-      }
-    }
-    if (suiteRun.healables?.length) {
-      lines.push('## Healable failures (review before accepting)', '')
-      for (const hf of suiteRun.healables) {
-        lines.push(
-          `- ${hf.name} → suggests "${hf.healable.label}" (${hf.healable.signals.join(' + ')} · ${hf.healable.score}/100)`
-        )
-      }
-      lines.push('')
-    }
-    lines.push('## Tests', '')
-    // Two tests can share a display name in different sections (Daily/… and
-    // E2E/… both hold a "saucedemo.com flow"). Listing the bare name made one
-    // pass and one fail read as the SAME test reported twice with contradictory
-    // results — the report looked broken when it was being accurate. Only the
-    // ambiguous ones get the section, so the common case stays uncluttered.
-    const nameCounts = new Map<string, number>()
-    for (const x of r) nameCounts.set(x.name, (nameCounts.get(x.name) ?? 0) + 1)
-    const sectionOf = (fileName: string): string =>
-      fileName.includes('/') ? fileName.slice(0, fileName.lastIndexOf('/')) : ''
-    for (const x of r) {
-      const icon = x.status === 'passed' ? '✓' : '✗'
-      const tags = [
-        x.healed ? `🤖 ${x.healed} healed` : '',
-        x.status === 'failed' && x.category ? (CATEGORY_LABELS[x.category] ?? x.category) : ''
-      ]
-        .filter(Boolean)
-        .join(' · ')
-      const section =
-        (nameCounts.get(x.name) ?? 0) > 1 ? sectionOf(x.fileName) : ''
-      lines.push(
-        `- ${icon} **${x.name}**${section ? ` \`(${section})\`` : ''}${tags ? ` — ${tags}` : ''}` +
-          (x.status === 'failed' && x.error ? `\n  - ${x.error}` : '')
-      )
-    }
-    return lines.join('\n')
-  }
+  // The suite-report markdown lives in ./suiteReportText (pure).
   const handleCopySuiteReport = (): void => {
-    navigator.clipboard.writeText(generateSuiteReport()).catch(() => {})
+    navigator.clipboard.writeText(generateSuiteReport(suiteRun)).catch(() => {})
   }
   const handleSaveSuiteReport = async (): Promise<void> => {
     const slug = (suiteRun?.suite || 'suite').toLowerCase().replace(/[^a-z0-9]+/g, '-')
-    await window.api.translator.saveReport(generateSuiteReport(), `${slug}-run-report.md`)
+    await window.api.translator.saveReport(generateSuiteReport(suiteRun), `${slug}-run-report.md`)
   }
 
   // Clone a saved test: duplicate it (steps + session + data + viewport) under a
