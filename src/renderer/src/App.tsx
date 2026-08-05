@@ -7027,6 +7027,22 @@ function App(): React.JSX.Element {
               ⏳ A monitor run is in progress (headless, ~10–30s)… the row updates when it finishes.
             </p>
           )}
+          {/* Opening ANY modal shrinks the native browser pane to nothing, or the
+              dialog would render underneath it. That is normally invisible — but
+              a screenshot of a hidden view comes back EMPTY, so a variant that
+              fails while this is open loses its failure screenshot. Now that this
+              dashboard can be opened mid-batch from the workspace, say so instead
+              of quietly costing evidence. */}
+          {(suiteRun?.running ||
+            dataRun?.running ||
+            localeRun?.running ||
+            edgeRun?.running) && (
+            <p className="api-hint" style={{ color: '#e0b56b' }}>
+              ⚠ A batch is running. The page is hidden while this dialog is open — the run
+              continues normally, but a step that fails right now would save an empty failure
+              screenshot. Close this to bring the page back.
+            </p>
+          )}
           {/* F32b: a failing run retries up to 3× before alerting (kills transient
               blips); alerts also POST to this webhook if set (off-machine reach). */}
           <label className="api-field">
@@ -7147,15 +7163,13 @@ function App(): React.JSX.Element {
                         : last.status === 'failed'
                           ? { cls: 'fail', label: '✗ Failing' }
                           : { cls: 'err', label: '⚠ Can’t run' }
-                const everyText =
-                  m.intervalMin < 60
-                    ? `${m.intervalMin} minutes`
-                    : m.intervalMin === 60
-                      ? 'hour'
-                      : `${m.intervalMin / 60} hours`
-                const envName = m.envId
-                  ? (envState.environments.find((e) => e.id === m.envId)?.name ?? 'a deleted env')
-                  : 'recorded URLs'
+                // A monitor can outlive the environment it was pinned to. That used
+                // to be near-silent — grey text reading "a deleted env" — while the
+                // real consequence was severe: no pinned env means NO variables are
+                // applied at all (see the `pinned` lookup in doMonitorRun), so a
+                // test whose data rows use {{env:…}} logs in with an unresolved
+                // token and fails on whatever assertion happens to come first.
+                const envMissing = !!m.envId && !envState.environments.some((e) => e.id === m.envId)
                 return (
                   <li key={m.id} className={`mon-card ${status.cls}`}>
                     <div className="mon-card-head">
@@ -7198,7 +7212,66 @@ function App(): React.JSX.Element {
                       </div>
                     </div>
                     <div className="mon-meta">
-                      Runs every {everyText} · against <strong>{envName}</strong>
+                      {/* The schedule is EDITABLE here. It used to be plain text,
+                          set once when the monitor was created and never again —
+                          so changing a monitor's cadence meant deleting it and
+                          rebuilding it, which threw away its whole run history.
+                          Takes effect immediately: the scheduler computes "due"
+                          as lastRunAt + intervalMin, so shortening the interval
+                          on a monitor that ran a while ago makes it due at once. */}
+                      Runs{' '}
+                      <select
+                        className="mon-interval"
+                        value={m.intervalMin}
+                        title="How often this monitor re-runs (applies from its last run)"
+                        onChange={async (e) =>
+                          setMonitors(
+                            await window.api.monitors.save({
+                              ...m,
+                              intervalMin: Number(e.target.value)
+                            })
+                          )
+                        }
+                      >
+                        <option value={5}>every 5 min</option>
+                        <option value={15}>every 15 min</option>
+                        <option value={30}>every 30 min</option>
+                        <option value={60}>every hour</option>
+                        <option value={240}>every 4 hours</option>
+                      </select>{' '}
+                      · against{' '}
+                      {/* Also editable now. Pinning was set once at creation, so a
+                          monitor pointing at a deleted (or simply wrong) environment
+                          could only be corrected by deleting and rebuilding it —
+                          throwing away its whole run history to change one field. */}
+                      <select
+                        className={`mon-interval${envMissing ? ' missing' : ''}`}
+                        value={envMissing ? '__missing' : (m.envId ?? '')}
+                        title="Which environment's baseURL + variables this monitor runs against"
+                        onChange={async (e) =>
+                          setMonitors(
+                            await window.api.monitors.save({
+                              ...m,
+                              envId: e.target.value === '' ? null : e.target.value
+                            })
+                          )
+                        }
+                      >
+                        <option value="">recorded URLs</option>
+                        {envState.environments.map((e) => (
+                          <option key={e.id} value={e.id}>
+                            {e.name}
+                          </option>
+                        ))}
+                        {/* Kept selectable-looking so the dropdown shows the truth
+                            rather than silently reading as "recorded URLs", which is
+                            what it actually falls back to at run time. */}
+                        {envMissing && (
+                          <option value="__missing" disabled>
+                            ⚠ deleted environment
+                          </option>
+                        )}
+                      </select>
                       {m.alertOnFail ? ' · 🔔 alerts on failure' : ''} ·{' '}
                       {last
                         ? `last run ${last.status} at ${new Date(last.at).toLocaleTimeString()}`
@@ -9512,6 +9585,22 @@ function App(): React.JSX.Element {
                   title="Cross-browser: run this test on real Chromium + Firefox + WebKit via Playwright (the embedded engine is Chromium only)"
                 >
                   🧭 Cross-browser
+                </button>
+                {/* F32: the monitors dashboard, reachable from the workspace too.
+                    NOT disabled while a replay or batch runs — unlike the buttons
+                    around it, this one never touches the loaded test, and the one
+                    moment you most need it (a scheduled run firing during a long
+                    batch) is exactly when everything else is disabled. */}
+                <button
+                  className={`data-btn${monitors.some((m) => m.enabled) ? ' monitoring' : ''}`}
+                  onClick={() => {
+                    setMonTestSel('')
+                    setMonHistoryFor(null)
+                    setMonitorsOpen(true)
+                  }}
+                  title="Monitors: scheduled re-runs of saved tests, with failure alerts (runs while the app is open)"
+                >
+                  📡 Monitors{monitors.length ? ` (${monitors.length})` : ''}
                 </button>
                 {/* Pillar 4: save/insert reusable step blocks */}
                 <button
@@ -11966,6 +12055,12 @@ function App(): React.JSX.Element {
       {/* F25: environment / config manager — defined once above (opened from the
           library AND this workspace), rendered here for the workspace screen. */}
       {envManagerModal}
+      {/* F32: the monitors dashboard. It was rendered ONLY in the welcome return,
+          so monitors were invisible and unmanageable the moment you loaded a
+          test — you couldn't watch a scheduled run, pause one that was about to
+          fire, or reschedule it without going Home (which drops an unsaved
+          recording). Same modal object, rendered on both screens. */}
+      {monitorsModal}
       {/* F23: coverage gap map — crawled from the workspace's live browser. */}
       {coverageModal}
 

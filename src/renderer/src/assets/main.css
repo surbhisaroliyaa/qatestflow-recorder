@@ -4911,9 +4911,32 @@ body {
 }
 
 /* F32 — monitors dashboard */
-.env-bar-manage.monitoring {
+.env-bar-manage.monitoring,
+.data-btn.monitoring {
   border-color: #2f6b43;
   color: #7fd39a;
+}
+/* The editable schedule, inline in the small grey meta line. Sized to match the
+   surrounding 11.5px text so the row still reads as a sentence, not a form. */
+.mon-interval {
+  padding: 1px 4px;
+  font-size: 11.5px;
+  font-family: inherit;
+  color: #cdd7e3;
+  background: #1b212a;
+  border: 1px solid #2a3542;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mon-interval:hover {
+  border-color: #3d78b5;
+}
+/* A monitor pinned to an environment that no longer exists. Amber, not red: the
+   monitor still runs, it just runs without any variables — which is exactly the
+   quiet failure this colouring exists to stop being quiet. */
+.mon-interval.missing {
+  color: #e0b56b;
+  border-color: #7a5c2e;
 }
 .mon-add {
   display: flex;
