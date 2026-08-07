@@ -788,7 +788,7 @@ export interface NlVerdict {
 // any fence marker occurring in the content itself has to be defanged — else a
 // page could close the fence early and have whatever follows read as prompt.
 const FENCE = '<<<PAGE_DATA>>>'
-function defang(s: string): string {
+export function defang(s: string): string {
   return String(s ?? '')
     .split(FENCE)
     .join('<<<PAGE_DATA_>>>')
@@ -898,7 +898,7 @@ function parseNlAnswer(text: string): { pass: boolean; reason: string } | null {
 }
 
 /** Pull "N. RESULT: … / REASON: …" blocks out of a batched answer, by number. */
-function parseNlAnswers(text: string, count: number): ({ pass: boolean; reason: string } | null)[] {
+export function parseNlAnswers(text: string, count: number): ({ pass: boolean; reason: string } | null)[] {
   const out: ({ pass: boolean; reason: string } | null)[] = new Array(count).fill(null)
   // Split on a leading "<n>." / "<n>)" so each claim's block is isolated; a
   // REASON sentence can itself contain the word RESULT without confusing us.
@@ -1012,7 +1012,7 @@ function buildAiStepsPrompt(intent: string, elements: AiElement[]): string {
 
 // Extract the first top-level JSON array from the model output (tolerant of a
 // stray sentence or a ```json fence around it).
-function parseAiActions(text: string, elementCount: number): AiAction[] {
+export function parseAiActions(text: string, elementCount: number): AiAction[] {
   const start = text.indexOf('[')
   const end = text.lastIndexOf(']')
   if (start < 0 || end <= start) return []
