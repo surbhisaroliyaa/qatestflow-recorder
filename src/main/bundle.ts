@@ -63,7 +63,7 @@ export interface BundleExportResult {
 }
 
 /** Steps that reference a live-link block, so its file travels too. */
-function blockRefsIn(steps: unknown[]): string[] {
+export function blockRefsIn(steps: unknown[]): string[] {
   const out: string[] = []
   for (const raw of Array.isArray(steps) ? steps : []) {
     const s = raw as Record<string, unknown>
@@ -73,7 +73,7 @@ function blockRefsIn(steps: unknown[]): string[] {
 }
 
 /** Upload steps' fixture files, so the exported test can actually run. */
-function uploadFilesIn(steps: unknown[]): string[] {
+export function uploadFilesIn(steps: unknown[]): string[] {
   const out: string[] = []
   for (const raw of Array.isArray(steps) ? steps : []) {
     const s = raw as Record<string, unknown>
@@ -82,7 +82,7 @@ function uploadFilesIn(steps: unknown[]): string[] {
   return out
 }
 
-function hasVisualStep(steps: unknown[]): boolean {
+export function hasVisualStep(steps: unknown[]): boolean {
   return (Array.isArray(steps) ? steps : []).some(
     (raw) => (raw as Record<string, unknown>)?.type === 'snapshot'
   )
@@ -199,7 +199,7 @@ export async function exportBundle(
 }
 
 /** A human-readable note in the bundle, so it explains itself without the app. */
-function readmeFor(m: BundleManifest): string {
+export function readmeFor(m: BundleManifest): string {
   const lines = [
     '# QATestFlow test bundle',
     '',

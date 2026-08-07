@@ -212,7 +212,16 @@ export function placeholderSecrets(steps: unknown[]): unknown[] {
  * live. So the rows travel and the sensitive COLUMNS are placeholdered, matched
  * by name — the same convention CI systems use.
  */
-const SENSITIVE_COLUMN = /pass|pwd|secret|token|apikey|api_key|card|cvv|ssn|auth/i
+// `api[-_ ]?key` rather than the two literal spellings it used to list: it
+// covered `apikey` and `api_key` and missed `api-key`, which is the commonest of
+// the three — so a column named that carried a live key into a bundle meant for
+// git. The space is there because a data column's name comes from a {{token}},
+// and the token syntax permits spaces ("api key").
+//
+// MIRROR: apiStep.ts's SECRET_KEY already got this right (`api[-_]?key`). Two
+// "is this name a credential?" patterns in one codebase, and the weaker one was
+// guarding the artefact that gets COMMITTED.
+const SENSITIVE_COLUMN = /pass|pwd|secret|token|api[-_ ]?key|card|cvv|ssn|auth/i
 
 export function scrubDataRows(
   rows: Record<string, string>[] | undefined
