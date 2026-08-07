@@ -2076,7 +2076,15 @@ export function generatePageObjectTest(
     // F1 (HAR): serve saved network responses from this archive (routeFromHAR).
     har?: string
   }
-): { spec: string; page: string; pageFileName: string; className: string } | null {
+): {
+  spec: string
+  // Every page-object class, one per file — tab 0's first. Write them all.
+  pages: { fileName: string; className: string; source: string }[]
+  // The MAIN class, repeated for callers that only ever handled one page file.
+  page: string
+  pageFileName: string
+  className: string
+} | null {
   // Same bare-selector repair as the inline export — a POM class field would
   // otherwise compile to `page.getByTestId(username)` just the same.
   const enabled = repairSteps(steps).filter((s) => !s.disabled)
@@ -2543,57 +2551,71 @@ export function generatePageObjectTest(
     gotoUrl = u
   }
 
-  // === Build the page class file ===
-  // One class per tab, side by side in the one file. Tab 0 comes first (it is
-  // what the spec imports and instantiates); the rest follow in tab order.
+  // === Build the page class files ===
+  // ONE CLASS PER FILE — the convention every page-object codebase follows, and
+  // what makes a generated POM something a team can adopt rather than tidy up.
+  // Tab 0's class is the one the spec instantiates; each other tab gets its own
+  // file, and tab 0's file imports the ones its methods construct.
   const orderedTabs = [...tabs.values()].sort((a, b) => a.windowId - b.windowId)
   const usedTabs = orderedTabs.filter(
     (t) => t.windowId === 0 || t.locatorDefs.length || t.methods.length || t.frameDefs.length
   )
-  // Only import the types actually used — an unused type import trips a lint
-  // rule in the user's repo, and this file is meant to be committed as-is.
-  const pageTypes = ['Page', 'Locator']
-  if (usedTabs.some((t) => t.frameDefs.length)) pageTypes.push('FrameLocator')
-  if (usedTabs.some((t) => t.methods.some((m) => m.returns?.type === 'Download'))) {
-    pageTypes.push('Download')
-  }
-  const pageLines: string[] = []
-  pageLines.push(`import { ${pageTypes.map((t) => `type ${t}`).join(', ')} } from '@playwright/test'`)
-  for (const ctx of usedTabs) {
-    pageLines.push('')
-    pageLines.push(`export class ${ctx.className} {`)
-    pageLines.push(`  readonly page: Page`)
+  const classFile = (ctx: TabCtx): string => {
+    // Only import the types this file uses — an unused import trips a lint rule
+    // in the user's repo, and these files are meant to be committed as-is.
+    const types = ['Page', 'Locator']
+    if (ctx.frameDefs.length) types.push('FrameLocator')
+    if (ctx.methods.some((m) => m.returns?.type === 'Download')) types.push('Download')
+    const lines: string[] = []
+    lines.push(`import { ${types.map((t) => `type ${t}`).join(', ')} } from '@playwright/test'`)
+    // A method that opens a tab returns that tab's page object, which now lives
+    // next door rather than lower down the same file.
+    for (const m of ctx.methods) {
+      const returned = m.returns?.type
+      if (returned && returned !== 'Download') lines.push(`import { ${returned} } from './${returned}'`)
+    }
+    lines.push('')
+    lines.push(`export class ${ctx.className} {`)
+    lines.push(`  readonly page: Page`)
     // Frames first: every locator below is scoped to one of them.
-    for (const f of ctx.frameDefs) pageLines.push(`  readonly ${f.name}: FrameLocator`)
-    for (const d of ctx.locatorDefs) pageLines.push(`  readonly ${d.name}: Locator`)
-    pageLines.push('')
-    pageLines.push(`  constructor(page: Page) {`)
-    pageLines.push(`    this.page = page`)
+    for (const f of ctx.frameDefs) lines.push(`  readonly ${f.name}: FrameLocator`)
+    for (const d of ctx.locatorDefs) lines.push(`  readonly ${d.name}: Locator`)
+    lines.push('')
+    lines.push(`  constructor(page: Page) {`)
+    lines.push(`    this.page = page`)
     // …and assigned first too, or a locator would read an undefined field.
-    for (const f of ctx.frameDefs) pageLines.push(`    this.${f.name} = ${f.expr}`)
-    for (const d of ctx.locatorDefs) pageLines.push(`    this.${d.name} = ${d.base}.${d.selector}`)
-    pageLines.push(`  }`)
+    for (const f of ctx.frameDefs) lines.push(`    this.${f.name} = ${f.expr}`)
+    for (const d of ctx.locatorDefs) lines.push(`    this.${d.name} = ${d.base}.${d.selector}`)
+    lines.push(`  }`)
     // Only the tab the test STARTS in has somewhere to navigate to; a popup
     // arrives already pointed at its URL.
     if (ctx.windowId === 0) {
-      pageLines.push('')
-      pageLines.push(`  async goto(): Promise<void> {`)
-      pageLines.push(`    await this.page.goto(${quote(gotoUrl)})`)
-      pageLines.push(`  }`)
+      lines.push('')
+      lines.push(`  async goto(): Promise<void> {`)
+      lines.push(`    await this.page.goto(${quote(gotoUrl)})`)
+      lines.push(`  }`)
     }
     for (const m of ctx.methods) {
-      pageLines.push('')
+      lines.push('')
       // A data-using method receives the current row; its body already references
       // `data.column` (env tokens read process.env directly, so they need no arg).
       const params = m.usesData ? 'data: Record<string, string>' : ''
-      pageLines.push(`  async ${m.name}(${params}): Promise<${m.returns?.type ?? 'void'}> {`)
-      for (const b of m.body) pageLines.push(b)
-      if (m.returns) pageLines.push(`    return ${m.returns.expr}`)
-      pageLines.push(`  }`)
+      lines.push(`  async ${m.name}(${params}): Promise<${m.returns?.type ?? 'void'}> {`)
+      for (const b of m.body) lines.push(b)
+      if (m.returns) lines.push(`    return ${m.returns.expr}`)
+      lines.push(`  }`)
     }
-    pageLines.push(`}`)
+    lines.push(`}`)
+    return `${lines.join('\n')}\n`
   }
-  const page = `${pageLines.join('\n')}\n`
+  const pages = usedTabs.map((ctx) => ({
+    fileName: `${ctx.className}.ts`,
+    className: ctx.className,
+    source: classFile(ctx)
+  }))
+  // The main class, also returned on its own for every caller that only ever
+  // dealt with one page file.
+  const page = pages[0].source
 
   // === Build the spec file ===
   const hasA11y = enabled.some((s) => s.type === 'a11y')
@@ -2641,11 +2663,12 @@ export function generatePageObjectTest(
     // F24.1: parity with the inline export — the POM spec runs the same API steps.
     (runtimeTokenUse(enabled).uuid ? "import { randomUUID } from 'node:crypto'\n" : '') +
     // Every tab's class the spec NAMES — tab 0 to instantiate it, and any other
-    // tab only when the spec has to build one itself (see tabVar).
-    `import { ${usedTabs
+    // tab only when the spec has to build one itself (see tabVar). One import
+    // per file, since each class now lives in its own.
+    usedTabs
       .filter((t) => t.specConstructs)
-      .map((t) => t.className)
-      .join(', ')} } from './pages/${className}'\n` +
+      .map((t) => `import { ${t.className} } from './pages/${t.className}'\n`)
+      .join('') +
     // F24.2: same shared check engine as the inline export — an api step must mean
     // the same thing whichever export style you picked.
     (anyApiChecks(enabled) ? `\n${API_CHECK_HELPER}` : '')
@@ -2688,7 +2711,7 @@ export function generatePageObjectTest(
       `${runtimeTokenPreamble(enabled, '    ')}${inner}\n` +
       `  })\n` +
       `}\n`
-    return { spec, page, pageFileName, className }
+    return { spec, pages, page, pageFileName, className }
   }
 
   const { main: specMain, down: specDown } = splitTeardown(enabled, specBody, specTeardownIdx)
@@ -2701,5 +2724,5 @@ export function generatePageObjectTest(
     `${withTeardown(specMain, specDown, '\n')}\n` +
     `})\n`
 
-  return { spec, page, pageFileName, className }
+  return { spec, pages, page, pageFileName, className }
 }

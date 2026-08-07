@@ -97,8 +97,9 @@ interface RecorderAPI {
     code: string,
     fixturePaths?: string[],
     sessionFile?: string,
-    pageObjectCode?: string,
-    pageObjectFileName?: string,
+    // Every page-object class, ONE PER FILE (a multi-tab flow has a class per
+    // tab). All are written into pages/ beside the spec.
+    pageFiles?: { fileName: string; source: string }[],
     harFile?: string, // F1: copy this .har into hars/ beside the exported spec
     ciWorkflow?: string, // F33: write .github/workflows/playwright.yml beside the spec
     configFile?: string // F17: write playwright.config.ts (cross-browser) beside the spec
@@ -154,6 +155,9 @@ interface RecorderAPI {
   onCheckOffer: (callback: (info: { afterIndex: number; url: string }) => void) => () => void
   checkOfferRespond: (resp: { stop?: boolean }) => void
   setPicking: (active: boolean) => Promise<void>
+  // The recording-local windowId of the tab in view — for a page-level check
+  // (URL / title / AI), which has no element to inherit a tab from.
+  activeWindowId: () => Promise<number>
   onPicked: (callback: (picked: PickedElement) => void) => () => void
   onPickCancel: (callback: () => void) => () => void
   // Day 19: capture the current page as a visual baseline + add a snapshot step.

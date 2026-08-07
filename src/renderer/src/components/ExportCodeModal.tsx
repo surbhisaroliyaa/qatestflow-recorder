@@ -13,9 +13,8 @@ export interface ExportCodeModalProps {
   exportCi: boolean
   exportCode: string | null
   exportEnvWarning: string[]
-  exportPage: string | null
-  exportPageFileName: string
-  exportTab: 'spec' | 'page'
+  exportPages: { fileName: string; source: string }[]
+  exportTab: string
   exportXbrowser: boolean
   handleCopyExport: () => void
   handleSaveExport: () => Promise<void>
@@ -26,7 +25,7 @@ export interface ExportCodeModalProps {
   savedPath: string | null
   setExportCi: React.Dispatch<React.SetStateAction<boolean>>
   setExportCode: React.Dispatch<React.SetStateAction<string | null>>
-  setExportTab: React.Dispatch<React.SetStateAction<'spec' | 'page'>>
+  setExportTab: React.Dispatch<React.SetStateAction<string>>
   setExportXbrowser: React.Dispatch<React.SetStateAction<boolean>>
   testName: string
 }
@@ -35,8 +34,7 @@ export function ExportCodeModal({
   exportCi,
   exportCode,
   exportEnvWarning,
-  exportPage,
-  exportPageFileName,
+  exportPages,
   exportTab,
   exportXbrowser,
   handleCopyExport,
@@ -95,12 +93,14 @@ export function ExportCodeModal({
                 type="button"
                 className={`export-mode${poExport ? ' chosen' : ''}`}
                 onClick={() => handleTogglePoExport(true)}
-                title="Full Page Object Model: a page class (locators + methods) + a spec that drives it. Single-page tests only."
+                title="Full Page Object Model: a page class (locators + methods) per page + a spec that drives them. Handles iframes, dialogs, downloads and multiple tabs — a flow that opens a tab gets a class per tab, one per file."
               >
                 Page Object
               </button>
-              {/* In POM mode, two files — tabs to switch between spec and page class */}
-              {exportPage && (
+              {/* In POM mode: the spec, plus one tab per page-object file. A
+                  multi-tab flow has a class per browser tab, each in its own
+                  file, so this is no longer a fixed pair. */}
+              {exportPages.length > 0 && (
                 <div className="export-file-tabs">
                   <button
                     type="button"
@@ -109,18 +109,21 @@ export function ExportCodeModal({
                   >
                     spec.ts
                   </button>
-                  <button
-                    type="button"
-                    className={`export-file-tab${exportTab === 'page' ? ' chosen' : ''}`}
-                    onClick={() => setExportTab('page')}
-                  >
-                    {exportPageFileName}
-                  </button>
+                  {exportPages.map((f) => (
+                    <button
+                      key={f.fileName}
+                      type="button"
+                      className={`export-file-tab${exportTab === f.fileName ? ' chosen' : ''}`}
+                      onClick={() => setExportTab(f.fileName)}
+                    >
+                      {f.fileName}
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
             <pre className="modal-code">
-              <code>{exportTab === 'page' && exportPage ? exportPage : exportCode}</code>
+              <code>{exportPages.find((f) => f.fileName === exportTab)?.source ?? exportCode}</code>
             </pre>
             <div className="modal-footer">
               {savedPath && (
@@ -175,7 +178,7 @@ export function ExportCodeModal({
                 Copy
               </button>
               <button className="modal-btn primary" onClick={handleSaveExport}>
-                {exportPage || exportCi || exportXbrowser ? 'Save files' : 'Save .ts'}
+                {exportPages.length || exportCi || exportXbrowser ? 'Save files' : 'Save .ts'}
               </button>
             </div>
           </div>

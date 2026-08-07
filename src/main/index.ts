@@ -1942,6 +1942,22 @@ function createWindow(): void {
     reinjectAllFrames()
   })
 
+  // Which tab a PAGE-LEVEL check belongs to (URL contains / page title / AI
+  // check). Those carry no element, so they can't inherit a tab the way a picked
+  // element does — and the renderer cannot work it out: `windowId` is
+  // RECORDING-local (0 = the tab the recording started in), while the tab strip
+  // shows the global ordinal. Only main holds that mapping.
+  //
+  // Without this, a URL check added on a popup was built with no windowId, every
+  // consumer read `windowId ?? 0`, and the check asserted against the FIRST tab —
+  // the same bug that hit picked checks, one step removed.
+  //
+  // Allocated on demand exactly like sendStep, and only while recording: reading
+  // it at idle would hand out ordinals to tabs that were never part of a take.
+  ipcMain.handle('recorder:activeWindowId', (): number =>
+    isRecording ? recWindowIdOf(activeTab()) : 0
+  )
+
   ipcMain.on(
     'recorder:picked',
     (
@@ -5802,8 +5818,7 @@ function createWindow(): void {
       code: string,
       fixturePaths?: string[],
       sessionFile?: string,
-      pageObjectCode?: string,
-      pageObjectFileName?: string,
+      pageFiles?: { fileName: string; source: string }[],
       harFile?: string,
       ciWorkflow?: string,
       configFile?: string
@@ -5860,23 +5875,26 @@ function createWindow(): void {
       // The save dialog only ever names the SPEC, so this file lands silently and
       // the user is told about one file when two were written. Both paths are
       // returned now so the confirmation can name them.
-      if (pageObjectCode && pageObjectFileName) {
+      // One class per file, so a multi-tab flow writes several of them.
+      if (pageFiles && pageFiles.length) {
         const pagesDir = join(dirname(result.filePath), 'pages')
-        const pagePath = join(pagesDir, pageObjectFileName)
-        // The class name comes from the TEST name, so two different tests with
-        // the same name write the same file. Exporting the second silently
-        // replaces the first's page class and leaves that spec paired with a
-        // class it no longer matches. Only flag a REAL change — re-exporting the
-        // same test is routine and must not nag.
-        try {
-          const existing = await readFile(pagePath, 'utf-8')
-          if (existing !== pageObjectCode) pageOverwritten = true
-        } catch {
-          // no previous file — nothing to overwrite
-        }
         await mkdir(pagesDir, { recursive: true }).catch(() => {})
-        await writeFile(pagePath, pageObjectCode, 'utf-8').catch(() => {})
-        alsoWrote.push(pagePath)
+        for (const f of pageFiles) {
+          const pagePath = join(pagesDir, f.fileName)
+          // The class name comes from the TEST name, so two different tests with
+          // the same name write the same file. Exporting the second silently
+          // replaces the first's page class and leaves that spec paired with a
+          // class it no longer matches. Only flag a REAL change — re-exporting the
+          // same test is routine and must not nag.
+          try {
+            const existing = await readFile(pagePath, 'utf-8')
+            if (existing !== f.source) pageOverwritten = true
+          } catch {
+            // no previous file — nothing to overwrite
+          }
+          await writeFile(pagePath, f.source, 'utf-8').catch(() => {})
+          alsoWrote.push(pagePath)
+        }
       }
       // F33: a GitHub Actions workflow that runs the tests on every PR. Written to
       // .github/workflows/ RELATIVE TO THE SPEC — the file's header tells the user

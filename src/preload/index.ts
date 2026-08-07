@@ -100,8 +100,7 @@ const api = {
       code: string,
       fixturePaths?: string[],
       sessionFile?: string,
-      pageObjectCode?: string,
-      pageObjectFileName?: string,
+      pageFiles?: { fileName: string; source: string }[],
       harFile?: string,
       ciWorkflow?: string,
       configFile?: string
@@ -111,8 +110,7 @@ const api = {
         code,
         fixturePaths,
         sessionFile,
-        pageObjectCode,
-        pageObjectFileName,
+        pageFiles,
         harFile,
         ciWorkflow,
         configFile
@@ -223,6 +221,11 @@ const api = {
     // Turn pick mode on/off in the embedded page.
     setPicking: (active: boolean): Promise<void> =>
       ipcRenderer.invoke('recorder:setPicking', active),
+
+    // The recording-local windowId of the tab in view — for a PAGE-LEVEL check
+    // (URL / title / AI), which has no element to inherit a tab from. 0 when not
+    // recording. Only main knows this: it isn't the tab strip's ordinal.
+    activeWindowId: (): Promise<number> => ipcRenderer.invoke('recorder:activeWindowId'),
 
     // A picked element arrives with its built selector ladder + live state
     // (text / input value / disabled) for prefitting assertion expectations.

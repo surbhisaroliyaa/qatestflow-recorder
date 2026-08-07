@@ -510,9 +510,37 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
   })
 
   describe('a second tab', () => {
-    it('gets a class of its own', () => {
-      expect(shop().page).toContain('export class ShopTab1Page {')
-      expect(shop().page).toContain('export class ShopPage {')
+    it('gets a class of its own, in a file of its own', () => {
+      // One class per file is the convention every page-object codebase follows;
+      // a generated POM that piles them into one file is something a team has to
+      // tidy up before adopting.
+      const { pages } = shop()
+      expect(pages.map((p) => p.fileName)).toEqual(['ShopPage.ts', 'ShopTab1Page.ts'])
+      expect(pages[0].source).toContain('export class ShopPage {')
+      expect(pages[1].source).toContain('export class ShopTab1Page {')
+      // Each file declares exactly one class.
+      for (const p of pages) expect(p.source.match(/export class /g)).toHaveLength(1)
+    })
+
+    it("tab 0's file imports the class its method returns", () => {
+      const { pages } = shop()
+      expect(pages[0].source).toContain("import { ShopTab1Page } from './ShopTab1Page'")
+      // …and the popup's own file imports nothing of the sort — it returns nothing.
+      expect(pages[1].source).not.toContain('ShopPage')
+    })
+
+    it('`page` and `pageFileName` still mean the MAIN class', () => {
+      // Callers that only ever handled one page file keep working.
+      const pom = shop()
+      expect(pom.page).toBe(pom.pages[0].source)
+      expect(pom.pageFileName).toBe('ShopPage.ts')
+      expect(pom.className).toBe('ShopPage')
+    })
+
+    it('a single-page test still produces exactly one file', () => {
+      const pom = generatePageObjectTest(LOGIN, { name: 'Login' })!
+      expect(pom.pages).toHaveLength(1)
+      expect(pom.pages[0].fileName).toBe('LoginPage.ts')
     })
 
     it('is RETURNED by the method that opens it — the standard popup pattern', () => {
@@ -533,15 +561,14 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
     })
 
     it('routes each step to the page object for the tab it happened in', () => {
-      const { spec, page } = shop()
+      const { spec, pages } = shop()
       expect(spec, 'the check ran on tab 1').toContain('await expect(tab1.helpCentre)')
       expect(spec, 'so did the click').toContain('await tab1.contactUs()')
       expect(spec, 'and the close').toContain('await tab1.page.close()')
       expect(spec, 'the framed steps went back to tab 0').toContain('await app.pay()')
       // Tab 1's locators belong to tab 1's class, not tab 0's.
-      const tab1Class = page.slice(page.indexOf('export class ShopTab1Page'))
-      expect(tab1Class).toContain('this.helpCentre =')
-      expect(page.slice(0, page.indexOf('export class ShopTab1Page'))).not.toContain('helpCentre')
+      expect(pages[1].source).toContain('this.helpCentre =')
+      expect(pages[0].source).not.toContain('helpCentre')
     })
 
     it('only tab 0 gets a goto() — a popup arrives already pointed at its URL', () => {
@@ -626,7 +653,8 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
 
   it('golden — page object with a tab and a frame', async () => {
     await expect(shop().spec).toMatchFileSnapshot('./__snapshots__/shop.pom.spec.ts')
-    await expect(shop().page).toMatchFileSnapshot('./__snapshots__/ShopPage.ts')
+    await expect(shop().pages[0].source).toMatchFileSnapshot('./__snapshots__/ShopPage.ts')
+    await expect(shop().pages[1].source).toMatchFileSnapshot('./__snapshots__/ShopTab1Page.ts')
   })
 })
 

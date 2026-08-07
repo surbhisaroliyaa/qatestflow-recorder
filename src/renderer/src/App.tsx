@@ -181,9 +181,10 @@ function App(): React.JSX.Element {
   // webkit projects) beside the spec.
   const [exportXbrowser, setExportXbrowser] = useState(false)
   // POM mode produces a SECOND file (the page class). Null = inline (one file).
-  const [exportPage, setExportPage] = useState<string | null>(null)
-  const [exportPageFileName, setExportPageFileName] = useState('')
-  const [exportTab, setExportTab] = useState<'spec' | 'page'>('spec')
+  // Every page-object class, one per file (a multi-tab flow has one per tab).
+  const [exportPages, setExportPages] = useState<{ fileName: string; source: string }[]>([])
+  // Which file the modal is showing: 'spec', or one of exportPages' fileNames.
+  const [exportTab, setExportTab] = useState<string>('spec')
   // Replay state: which step is running, which finished, which failed + why.
   const [isReplaying, setIsReplaying] = useState(false)
   const [replayingIndex, setReplayingIndex] = useState<number | null>(null)
@@ -1842,15 +1843,15 @@ function App(): React.JSX.Element {
       const pom = generatePageObjectTest(flat, opts)
       if (pom) {
         setExportCode(pom.spec)
-        setExportPage(pom.page)
-        setExportPageFileName(pom.pageFileName)
+        setExportPages(pom.pages)
         setExportTab('spec')
         return
       }
       // Unsupported for POM — fall back to inline so the user still gets output.
     }
     setExportCode(generatePlaywrightTest(flat, opts))
-    setExportPage(null)
+    setExportPages([])
+    setExportTab('spec')
   }
 
   const handleExport = (): void => {
@@ -1884,7 +1885,7 @@ function App(): React.JSX.Element {
     //
     // Both access forms are matched: `process.env.NAME` and `process.env['NAME']`
     // (the OS-collision guard uses bracket access).
-    const envSources = [exportCode, exportPage ?? ''].join('\n')
+    const envSources = [exportCode, ...exportPages.map((f) => f.source)].join('\n')
     const secretNames = Array.from(
       new Set(
         [...envSources.matchAll(/process\.env(?:\.(\w+)|\[['"](\w+)['"]\])/g)].map(
@@ -1908,8 +1909,7 @@ function App(): React.JSX.Element {
       exportCode,
       fixturePaths,
       storageState,
-      exportPage ?? undefined,
-      exportPage ? exportPageFileName : undefined,
+      exportPages.length ? exportPages : undefined,
       exportHarName(), // F1: copy the .har (saved or fresh) into hars/ beside the spec
       ciWorkflow, // F33: optional .github/workflows/playwright.yml
       configFile // F17: optional cross-browser playwright.config.ts
@@ -1922,7 +1922,9 @@ function App(): React.JSX.Element {
   }
 
   const handleCopyExport = (): void => {
-    const code = exportTab === 'page' && exportPage ? exportPage : exportCode
+    // Whichever FILE is on screen — copying the spec while looking at a page
+    // class would be a quiet lie about what landed on the clipboard.
+    const code = exportPages.find((f) => f.fileName === exportTab)?.source ?? exportCode
     if (code) navigator.clipboard.writeText(code)
   }
 
@@ -4761,6 +4763,15 @@ function App(): React.JSX.Element {
   // Offered as shortcuts inside the picking banner: they end pick mode and
   // insert directly at the position picking was started for.
 
+  // Which tab a PAGE-LEVEL check (URL / title / AI) belongs to. Those carry no
+  // element, so unlike a picked check they have no tab to inherit — and the
+  // renderer can't derive it: `windowId` is RECORDING-local (0 = the tab the
+  // recording started in) while the tab strip shows the global ordinal. Only
+  // main holds that mapping, so ask it. Without this, a URL check added on a
+  // popup was built with no tab, every consumer read `windowId ?? 0`, and the
+  // check asserted against the first tab.
+  const activeTab = (): Promise<number> => window.api.recorder.activeWindowId()
+
   // URL check, prefilled with the current page's PATH — the stable, meaningful
   // part (the full URL would make "contains" behave like "equals").
   const handleAddUrlCheck = async (): Promise<void> => {
@@ -4772,7 +4783,10 @@ function App(): React.JSX.Element {
     } catch {
       // not a parseable URL — keep the raw text, the user can edit it
     }
-    insertStep({ type: 'assert', assertKind: 'url-contains', value: prefill }, insertAt)
+    insertStep(
+      { type: 'assert', assertKind: 'url-contains', value: prefill, windowId: await activeTab() },
+      insertAt
+    )
     setInsertAt(null)
   }
 
@@ -4781,7 +4795,10 @@ function App(): React.JSX.Element {
   const handleAddTitleCheck = async (): Promise<void> => {
     await handleCancelPick()
     const info = await window.api.browser.getPageInfo()
-    insertStep({ type: 'assert', assertKind: 'title', value: info.title }, insertAt)
+    insertStep(
+      { type: 'assert', assertKind: 'title', value: info.title, windowId: await activeTab() },
+      insertAt
+    )
     setInsertAt(null)
   }
 
@@ -4792,7 +4809,10 @@ function App(): React.JSX.Element {
     const claim = nlClaim.trim()
     if (!claim) return
     await handleCancelPick()
-    insertStep({ type: 'assert', assertKind: 'nl', value: claim }, insertAt)
+    insertStep(
+      { type: 'assert', assertKind: 'nl', value: claim, windowId: await activeTab() },
+      insertAt
+    )
     setNlClaim('')
     setInsertAt(null)
   }
@@ -10032,8 +10052,7 @@ function App(): React.JSX.Element {
         exportCi={exportCi}
         exportCode={exportCode}
         exportEnvWarning={exportEnvWarning}
-        exportPage={exportPage}
-        exportPageFileName={exportPageFileName}
+        exportPages={exportPages}
         exportTab={exportTab}
         exportXbrowser={exportXbrowser}
         handleCopyExport={handleCopyExport}
