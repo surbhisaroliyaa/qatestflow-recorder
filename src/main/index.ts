@@ -25,6 +25,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
 import { normalizeUrl, reachError } from './urls'
+import { stepsFromDraft } from './draftSteps'
 import {
   buildActionScript,
   buildFailureMarkScript,
@@ -5543,57 +5544,6 @@ function createWindow(): void {
   // gets a usable URL, but `guessed` marks it in the review list so a
   // plausible-but-wrong address is caught BEFORE Insert instead of failing much
   // later, at replay, with an error that looks nothing like its cause.
-  const isHttpUrl = (u: string): boolean => {
-    try {
-      return /^https?:$/.test(new URL(u).protocol)
-    } catch {
-      return false
-    }
-  }
-  const resolveDraftUrl = (text: string, baseUrl?: string): { url: string; guessed: boolean } => {
-    const t = (text || '').trim()
-    // The model is asked for a bare path/URL, but often wraps it in prose
-    // ("Open the login page at /login"). Extract the real target rather than
-    // storing the sentence — an un-navigable URL would fail at replay.
-    // 1. A full URL anywhere in the text wins (stop at whitespace or a ")").
-    const urlInProse = t.match(/https?:\/\/[^\s)]+/i)
-    if (urlInProse) {
-      const found = urlInProse[0].replace(/[.,]+$/, '') // drop trailing punctuation
-      if (isHttpUrl(found)) return { url: found, guessed: false }
-    }
-    // 2. A path: either the WHOLE string, or one embedded in prose. The whole
-    //    string only counts when it contains no whitespace — "/login page shows
-    //    the form" starts with "/" but is a SENTENCE, and taking it verbatim is
-    //    how prose used to end up in the URL. Requiring a word boundary before
-    //    the "/" also stops us grabbing the slash inside things like "and/or".
-    const path =
-      t.startsWith('/') && !/\s/.test(t) ? t : (t.match(/(?:^|\s)(\/[^\s)]+)/)?.[1] ?? '')
-    if (baseUrl) {
-      try {
-        const base = new URL(baseUrl)
-        if (path.length > 1) {
-          const abs = base.origin + '/' + path.replace(/^\/+|[.,/]+$/g, '')
-          if (isHttpUrl(abs)) return { url: abs, guessed: false }
-        }
-        // 3. A single bare word like "login" -> a path under the current origin;
-        //    prose with no path at all -> the current site's root. Both are
-        //    GUESSES: the story never actually named a target.
-        const fallback =
-          t && !t.includes(' ')
-            ? base.origin + '/' + t.replace(/^\/+|\/+$/g, '')
-            : base.origin + '/'
-        if (isHttpUrl(fallback)) return { url: fallback, guessed: true }
-      } catch {
-        /* unusable base — fall through */
-      }
-    }
-    // 4. No page open to resolve against. A bare path is still the best answer
-    //    we have (the step editor can finish it). Prose is NOT — storing a
-    //    sentence as a URL is the very thing this function exists to prevent, so
-    //    leave it empty and let the flag tell the user to fill it in.
-    return { url: path.length > 1 ? path : '', guessed: true }
-  }
-  const trunc = (s: string, n = 60): string => (s.length > n ? s.slice(0, n - 1) + '…' : s)
   ipcMain.handle(
     'ai:draftFromStory',
     async (
@@ -5604,28 +5554,8 @@ function createWindow(): void {
     ): Promise<{ title: string; steps: unknown[]; note: string; guessed: number[] } | null> => {
       const res = await draftTestFromStory(story, diff, libraryDir())
       if (res == null) return null // Claude unavailable — renderer surfaces it
-      // Indices of navigate steps whose URL we had to guess. Kept OUT of the step
-      // itself so nothing review-only can be saved into the test file.
-      const guessed: number[] = []
-      const steps = res.steps.map((d, i) => {
-        if (d.kind === 'navigate') {
-          const target = resolveDraftUrl(d.text, baseUrl)
-          if (target.guessed) guessed.push(i)
-          return { type: 'navigate', url: target.url, label: `Go to ${trunc(d.text)}` }
-        }
-        if (d.kind === 'check') {
-          return { type: 'assert', assertKind: 'nl', value: d.text, label: `Check: ${trunc(d.text)}` }
-        }
-        // action → a manual pause with the instruction, for the tester to ground.
-        return { type: 'wait', waitKind: 'manual', value: d.text, label: `Do: ${trunc(d.text)}` }
-      })
-      const notes = [res.note]
-      if (guessed.length) {
-        notes.push(
-          `${guessed.length} “Go to” step${guessed.length === 1 ? '' : 's'} had no clear address in the story — marked ⚠ below. Set the URL before you replay.`
-        )
-      }
-      return { title: res.title, steps, note: notes.filter(Boolean).join(' '), guessed }
+      const drafted = stepsFromDraft(res, baseUrl)
+      return { title: res.title, ...drafted }
     }
   )
 
