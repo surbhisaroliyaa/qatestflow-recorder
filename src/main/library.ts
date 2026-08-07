@@ -130,14 +130,14 @@ export function slugify(name: string): string {
 
 // One path segment (a suite folder name or a file name): no separators, no
 // Windows-reserved characters, no ".." — so nothing can escape the library.
-function safeSegment(segment: string): string {
+export function safeSegment(segment: string): string {
   const clean = segment.replace(/[\\/:*?"<>|]/g, '').trim()
   return clean === '..' || clean === '.' ? '' : clean
 }
 
 // A relative path arriving over IPC: at most "suite/file.json". Each segment
 // sanitised independently, then rejoined.
-function safeRel(relPath: string): string {
+export function safeRel(relPath: string): string {
   return relPath.split(/[\\/]/).map(safeSegment).filter(Boolean).slice(0, 2).join('/')
 }
 
@@ -151,7 +151,7 @@ async function ensureDir(): Promise<void> {
 // F5: cheap per-test stats for the trust score — how many CHECKS the test makes
 // (assert / snapshot / a11y / perf), and the average stability of its selectors
 // (the primary candidate's 0–100 score). Disabled steps don't count.
-function stepStats(steps: unknown[]): { assertCount: number; selectorHealth?: number } {
+export function stepStats(steps: unknown[]): { assertCount: number; selectorHealth?: number } {
   const arr = Array.isArray(steps) ? (steps as Record<string, unknown>[]) : []
   const CHECKS = new Set(['assert', 'snapshot', 'a11y', 'perf'])
   let assertCount = 0
@@ -210,7 +210,7 @@ function harsDir(): string {
   return join(libraryDir(), '_hars')
 }
 const SAFE_HAR = /^[a-zA-Z0-9_-]+\.har$/
-function harNameForFile(fileName: string): string {
+export function harNameForFile(fileName: string): string {
   return fileName.replace(/\.json$/, '').replace(/\//g, '__') + '.har'
 }
 // Read a saved HAR (the standard { log: { entries: [...] } } shape). Guards the
