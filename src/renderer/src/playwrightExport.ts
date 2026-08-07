@@ -714,10 +714,42 @@ function pascalName(label: string): string {
 // fallback; nested frames chain).
 function pageBase(pageVar: string, frame?: FrameRef): string {
   if (!frame || !frame.length) return pageVar
-  return frame.reduce((base, f) => {
-    const sel = f.name ? `iframe[name=${quote(f.name)}]` : `iframe[src=${quote(f.url)}]`
-    return `${base}.frameLocator(${quote(sel)})`
-  }, pageVar)
+  return frame.reduce((base, f) => `${base}.frameLocator(${quote(frameSelector(f))})`, pageVar)
+}
+
+/**
+ * The CSS selector that finds one iframe, from what the recorder saved about it.
+ *
+ * `url` is the frame's ABSOLUTE url (Electron's WebFrameMain.url), but the page's
+ * markup usually writes a RELATIVE src — practice.expandtesting.com embeds
+ * `src="/iframe-email-subscribe"`. `[src="https://…/iframe-email-subscribe"]` is
+ * a literal attribute match, so it found nothing and the exported test failed at
+ * the frame, reading as "the app is broken". In-app replay never noticed: it
+ * re-finds frames by comparing urls, not by an attribute selector.
+ *
+ * So match the END of the src instead. `[src$="/iframe-email-subscribe"]` is true
+ * for the relative form AND the absolute one, which is what "this frame" means.
+ * A query string is kept (it can be the only thing telling two frames apart);
+ * only the origin — the part the markup is free to omit — is dropped.
+ */
+function frameSelector(f: FrameRef[number]): string {
+  if (f.name) return `iframe[name=${quote(f.name)}]`
+  let tail = f.url
+  try {
+    const u = new URL(f.url)
+    // http(s) only. `about:blank` parses too, and its "pathname" is `blank` —
+    // suffix-matching that would produce iframe[src$="blank"], which matches any
+    // frame whose src happens to end in those letters.
+    // A frame at the site root has no path to match on; keep the whole url.
+    if (/^https?:$/.test(u.protocol) && u.pathname.startsWith('/') && u.pathname !== '/') {
+      tail = `${u.pathname}${u.search}`
+    }
+  } catch {
+    // Not a url at all (srcdoc, a relative src already) — use it as-is.
+  }
+  return tail === f.url && !tail.startsWith('/')
+    ? `iframe[src=${quote(f.url)}]`
+    : `iframe[src$=${quote(tail)}]`
 }
 
 // Playwright's toHaveURL(string) demands the FULL exact URL — too brittle for
@@ -731,10 +763,38 @@ function regexContains(value: string): string {
 // One readable line describing a step — used both in the live panel and as a
 // comment above each generated line of code. Secret (password) values are
 // shown masked so they never appear on screen or in code comments.
+// What to call a step's element in a human sentence.
+//
+// `label` is the recorded accessible name, and it is NOT always there: an
+// element with no text/aria-label (an icon button, a bare input, an F18/F21
+// AI-picked step) records without one. Every sentence below interpolated it
+// straight, so those steps read "Click undefined" — in the step list, in living
+// docs, in the failure report, and in a `//` comment above every line of every
+// exported spec. It was never a crash, just a word that told the reader nothing.
+//
+// The selector already names the element (that is what a selector IS), so fall
+// back to the useful part of it rather than to a placeholder.
+function elementName(step: RecorderStep): string {
+  const label = (step.label ?? '').trim()
+  if (label) return label
+  const sel = (step.selector ?? '').trim()
+  if (!sel) return 'the element'
+  // getByRole('button', { name: 'Add to cart' }) → the NAME, not the role: it's
+  // what a reader would have called the thing.
+  const named = /name:\s*(['"])([\s\S]*?)\1/.exec(sel)
+  // getByTestId('login-button') / getByText('Products') / locator('#cart') → arg.
+  const firstArg = /^[A-Za-z_$][\w$]*\(\s*(['"])([\s\S]*?)\1/.exec(sel)
+  const pick = named?.[2] ?? firstArg?.[2] ?? sel
+  const flat = pick.replace(/\s+/g, ' ').trim()
+  if (!flat) return 'the element'
+  return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat
+}
+
 export function stepText(step: RecorderStep): string {
+  const name = elementName(step)
   switch (step.type) {
     case 'navigate':
-      return `Go to ${step.url}`
+      return `Go to ${step.url || '(no URL)'}`
     case 'back':
       return 'Go back'
     // === F37: loops + branching ===
@@ -767,53 +827,53 @@ export function stepText(step: RecorderStep): string {
       return `API ${method} ${step.url ?? ''} → expect ${status}${body}`
     }
     case 'click':
-      return `Click ${step.label}`
+      return `Click ${name}`
     case 'type':
-      return `Type "${step.secret ? '••••••••' : step.value}" into ${step.label}`
+      return `Type "${step.secret ? '••••••••' : (step.value ?? '')}" into ${name}`
     case 'select':
-      return `Select "${step.value}" in ${step.label}`
+      return `Select "${step.value ?? ''}" in ${name}`
     case 'press':
-      return `Press ${step.key ?? 'Enter'} in ${step.label}`
+      return `Press ${step.key ?? 'Enter'} in ${name}`
     case 'hover':
-      return `Hover over ${step.label}`
+      return `Hover over ${name}`
     case 'assert':
       switch (step.assertKind) {
         case 'text-equals':
-          return `Check ${step.label} text is "${step.value}"`
+          return `Check ${name} text is "${step.value ?? ''}"`
         case 'text-contains':
-          return `Check ${step.label} contains "${step.value}"`
+          return `Check ${name} contains "${step.value ?? ''}"`
         case 'value':
-          return `Check ${step.label} value is "${step.value}"`
+          return `Check ${name} value is "${step.value ?? ''}"`
         case 'enabled':
-          return `Check ${step.label} is enabled`
+          return `Check ${name} is enabled`
         case 'disabled':
-          return `Check ${step.label} is disabled`
+          return `Check ${name} is disabled`
         case 'checked':
-          return `Check ${step.label} is checked`
+          return `Check ${name} is checked`
         case 'unchecked':
-          return `Check ${step.label} is not checked`
+          return `Check ${name} is not checked`
         case 'hidden':
-          return `Check ${step.label} is hidden`
+          return `Check ${name} is hidden`
         case 'count':
-          return `Check ${step.label} matches ${step.value} element(s)`
+          return `Check ${name} matches ${step.value ?? '0'} element(s)`
         case 'focused':
-          return `Check ${step.label} is focused`
+          return `Check ${name} is focused`
         case 'editable':
-          return `Check ${step.label} is editable`
+          return `Check ${name} is editable`
         case 'empty':
-          return `Check ${step.label} is empty`
+          return `Check ${name} is empty`
         case 'attribute':
-          return `Check ${step.label} attribute ${step.attrName} is "${step.value}"`
+          return `Check ${name} attribute ${step.attrName ?? ''} is "${step.value ?? ''}"`
         case 'class':
-          return `Check ${step.label} has class "${step.value}"`
+          return `Check ${name} has class "${step.value ?? ''}"`
         case 'url-contains':
-          return `Check URL contains "${step.value}"`
+          return `Check URL contains "${step.value ?? ''}"`
         case 'title':
-          return `Check page title is "${step.value}"`
+          return `Check page title is "${step.value ?? ''}"`
         case 'nl':
-          return `AI check: "${step.value}"`
+          return `AI check: "${step.value ?? ''}"`
         default:
-          return `Check ${step.label} is visible`
+          return `Check ${name} is visible`
       }
     case 'wait': {
       const kind = step.waitKind ?? 'time'
@@ -847,6 +907,22 @@ export function stepText(step: RecorderStep): string {
     default:
       return JSON.stringify(step)
   }
+}
+
+// The same description, safe to put after `//` in the generated file.
+//
+// Every emitted line carries a one-line comment describing its step, and that
+// description quotes the RECORDED VALUE. A value with a line break in it (a
+// textarea — an address, a comment box, pasted JSON) ended the comment early and
+// left the rest of the text sitting in the file AS CODE: "Unterminated string
+// literal", and Playwright treats a spec it cannot parse as a fatal LOAD error —
+// it abandons the WHOLE run, not just that test. The action line itself was
+// always fine (quote() escapes it); only the comment broke.
+//
+// Collapsing the whitespace is the whole fix: a description is a one-line label,
+// so a value's internal line breaks were never meaningful here.
+function stepComment(step: RecorderStep): string {
+  return stepText(step).replace(/\s*[\r\n]+\s*/g, ' ')
 }
 
 // Day 16: a dialog is answered by a handler REGISTERED BEFORE the action that
@@ -1369,7 +1445,10 @@ function splitTeardown(
   const claimed = new Set<number>()
   const down: string[] = []
   for (const s of downSteps) {
-    const text = stepText(s)
+    // Matches the COMMENT that was emitted, so it must be sanitized the same
+    // way — a teardown step with a multi-line label would otherwise never be
+    // found here, and would silently stay out of the finally block.
+    const text = stepComment(s)
     const at = lines.findIndex((l, i) => !claimed.has(i) && l.includes(text))
     if (at >= 0) {
       claimed.add(at)
@@ -1533,7 +1612,7 @@ export function generatePlaywrightTest(
         if (step.repeatKind === 'each' && step.selector) {
           const items = `items${depth}`
           lines.push(
-            `  // ${stepText(step)}\n` +
+            `  // ${stepComment(step)}\n` +
               `  const ${items} = ${pageBase(pageVar, step.frame)}.${(idPolicy.portable && portableTestIdSelector(step)) || step.selector}\n` +
               // Count ONCE up front, matching the app: a live count could loop
               // forever if the body adds matching elements.
@@ -1543,7 +1622,7 @@ export function generatePlaywrightTest(
         } else {
           const n = parseInt(step.value ?? '1', 10)
           const times = Number.isFinite(n) && n > 0 ? n : 1
-          lines.push(`  // ${stepText(step)}\n  for (let ${v} = 0; ${v} < ${times}; ${v}++) {`)
+          lines.push(`  // ${stepComment(step)}\n  for (let ${v} = 0; ${v} < ${times}; ${v}++) {`)
         }
         syncDepth()
         depth++
@@ -1558,7 +1637,7 @@ export function generatePlaywrightTest(
       }
       if (step.type === 'if') {
         lines.push(
-          `  // ${stepText(step)}\n  if (${conditionExpr(step, pageVar, idPolicy.portable)}) {`
+          `  // ${stepComment(step)}\n  if (${conditionExpr(step, pageVar, idPolicy.portable)}) {`
         )
         syncDepth()
         depth++
@@ -1590,7 +1669,7 @@ export function generatePlaywrightTest(
     if (step.type === 'download') {
       const want = (step.value ?? step.label ?? 'file').trim()
       lines.push(
-        `  // ${stepText(step)}\n` +
+        `  // ${stepComment(step)}\n` +
           `  const download${i} = await download${i}Promise\n` +
           `  expect(download${i}.suggestedFilename()).toContain(${quote(want)})\n` +
           `  expect(fs.statSync(await download${i}.path()).size).toBeGreaterThan(0)`
@@ -1601,7 +1680,7 @@ export function generatePlaywrightTest(
     // action, because Playwright dialog handlers must be set up in advance.
     const next = enabled[i + 1]
     if (next && next.type === 'dialog') {
-      lines.push(`  // ${stepText(next)}\n  ${dialogHandler(next, pv(next.windowId))}`)
+      lines.push(`  // ${stepComment(next)}\n  ${dialogHandler(next, pv(next.windowId))}`)
     }
     // Day 16(+): if the NEXT step is a download, this action triggers it — start
     // waiting for the download BEFORE clicking (Playwright requires that order).
@@ -1616,7 +1695,7 @@ export function generatePlaywrightTest(
     if (step.opensWindow !== undefined) {
       const inner = action.replace(/^await /, '')
       lines.push(
-        `  // ${stepText(step)}\n` +
+        `  // ${stepComment(step)}\n` +
           `  const [page${step.opensWindow}] = await Promise.all([\n` +
           `    context.waitForEvent('page'),\n` +
           `    ${inner}\n` +
@@ -1634,12 +1713,12 @@ export function generatePlaywrightTest(
     if (step.optional) {
       const indented = action.replace(/\n/g, '\n  ')
       lines.push(
-        `${healNote}  // ${stepText(step)} (optional — skipped if not present)\n` +
+        `${healNote}  // ${stepComment(step)} (optional — skipped if not present)\n` +
           wrapOptional(indented, '  ')
       )
       continue
     }
-    lines.push(`${healNote}  // ${stepText(step)}\n  ${action}`)
+    lines.push(`${healNote}  // ${stepComment(step)}\n  ${action}`)
   }
   // F37: close any block whose end marker is missing. A 🔁 Repeat or 🔀 If with
   // no matching end left the file with an unbalanced `{`, and Playwright treats a
@@ -1868,7 +1947,7 @@ export function generateEdgeSuite(
     for (const step of actionSteps) {
       const action = actionFor(step, baseURL, 'page', undefined, [], idPolicy.portable)
       if (!action) continue
-      actionLines.push(`  // ${stepText(step)}\n  ${action}`)
+      actionLines.push(`  // ${stepComment(step)}\n  ${action}`)
       if (step.teardown && step.type === 'api') edgeTeardownIdx.add(actionLines.length - 1)
     }
     const edgeSplit = splitTeardown(actionSteps, actionLines, edgeTeardownIdx)
@@ -1953,10 +2032,21 @@ export function generateEdgeSuite(
 // that imports it, instantiates it, calls the methods, and keeps the ASSERTIONS
 // (the "what we're checking") in the test — the classic separation.
 //
-// Scope: single-page, no-iframe, no-multi-tab tests, and no dialog/download
-// steps (those need handlers registered around actions, which don't fit a clean
-// auto-POM). Returns null for anything outside that — the caller falls back to
-// the normal inline export.
+// Scope: everything the inline export handles. It used to refuse iframes,
+// multi-tab, dialogs and downloads and fall back to inline — which was the
+// wrong trade: page objects are how real suites are written, so the flows a
+// generator gives up on are exactly the ones a tester then hand-writes. Each of
+// the four has a standard page-object shape, and this now emits it:
+//
+//   iframe    → a FrameLocator field; every locator inside it hangs off that
+//               field, so the frame plumbing lives in ONE place.
+//   dialog    → page.once('dialog', …) inside the method that triggers it.
+//   download  → the method returns the Download; the spec asserts on it (the
+//               assertion stays in the test, like every other check here).
+//   new tab   → a class per tab, and the method that opens one RETURNS the new
+//               page object: `const help = await shop.openHelp()`.
+//
+// All the classes live in the one page file, exported side by side.
 //
 // Day 20: DATA-DRIVEN tests ARE supported. The page class stays data-agnostic
 // (locators + methods); the spec emits a `dataset` array and runs one test per
@@ -1990,10 +2080,6 @@ export function generatePageObjectTest(
   // Same bare-selector repair as the inline export — a POM class field would
   // otherwise compile to `page.getByTestId(username)` just the same.
   const enabled = repairSteps(steps).filter((s) => !s.disabled)
-  const multiWindow = enabled.some((s) => (s.windowId ?? 0) > 0 || s.opensWindow !== undefined)
-  const hasFrames = enabled.some((s) => s.frame?.length)
-  const hasAwkward = enabled.some((s) => s.type === 'dialog' || s.type === 'download')
-  if (multiWindow || hasFrames || hasAwkward) return null
 
   // Day 20: data mode is on only when there are both columns and rows. `columns`
   // drives which {{tokens}} become `data.*` references (vs. quoted literals).
@@ -2008,7 +2094,8 @@ export function generatePageObjectTest(
     )
 
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
-  const className = `${pascalName(options?.name || 'recorded flow')}Page`
+  const baseName = pascalName(options?.name || 'recorded flow')
+  const className = `${baseName}Page`
   const pageFileName = `${className}.ts`
   // Test-id portability — same policy as the inline export (see testIdPolicy).
   const idPolicy = testIdPolicy(enabled)
@@ -2020,6 +2107,16 @@ export function generatePageObjectTest(
   const exprOf = (step: RecorderStep): string =>
     ((idPolicy.portable && portableTestIdSelector(step)) || step.selector) as string
 
+  // === Which tab, which frame ==========================================
+  // An element is only "the same element" if the selector, the FRAME and the
+  // TAB all match — the same `getByTestId('submit')` inside two different
+  // iframes is two different controls, and would otherwise share one field.
+  const tabOf = (step: RecorderStep): number => step.windowId ?? 0
+  const frameKeyOf = (step: RecorderStep): string =>
+    (step.frame ?? []).map((f) => f.name || f.url).join('>')
+  const keyOf = (step: RecorderStep): string =>
+    `${tabOf(step)}|${frameKeyOf(step)}|${exprOf(step)}`
+
   // What IS each element? Decided by every action performed on it across the
   // WHOLE test — not by the one step we happen to name it from.
   //
@@ -2029,37 +2126,116 @@ export function generatePageObjectTest(
   // nonsense a reviewer would flag instantly. A click tells you what the tester
   // DID; it does not tell you what the element IS. Typing into it does.
   type ElKind = 'input' | 'select' | 'button'
-  const kindByExpr = new Map<string, ElKind>()
+  const kindByKey = new Map<string, ElKind>()
   for (const s of enabled) {
     if (!s.selector) continue
-    const e = exprOf(s)
+    const e = keyOf(s)
     // `type` wins unconditionally — you cannot fill a button, so a fill is proof.
-    if (s.type === 'type') kindByExpr.set(e, 'input')
-    else if (s.type === 'select' && kindByExpr.get(e) !== 'input') kindByExpr.set(e, 'select')
-    else if ((s.type === 'click' || s.type === 'press') && !kindByExpr.has(e)) {
-      kindByExpr.set(e, 'button')
+    if (s.type === 'type') kindByKey.set(e, 'input')
+    else if (s.type === 'select' && kindByKey.get(e) !== 'input') kindByKey.set(e, 'select')
+    else if ((s.type === 'click' || s.type === 'press') && !kindByKey.has(e)) {
+      kindByKey.set(e, 'button')
     }
   }
   const SUFFIX: Record<ElKind, string> = { input: 'Input', select: 'Select', button: 'Button' }
 
+  // === One class per tab ===============================================
+  // A page object models ONE page, so a flow that opens a popup needs a second
+  // class. They share this shape; tab 0's is the one the spec instantiates, and
+  // every other is returned by the method that opens its tab.
+  interface TabCtx {
+    windowId: number
+    className: string
+    specVar: string
+    // Member names are per CLASS: a property and a method can't share a name.
+    used: Set<string>
+    frameDefs: { name: string; expr: string }[]
+    frameNameByKey: Map<string, string>
+    locatorDefs: { name: string; base: string; selector: string }[]
+    methods: {
+      name: string
+      body: string[]
+      usesData: boolean
+      returns?: { type: string; expr: string }
+    }[]
+    actionsSeq: number
+    // Set once the spec has a variable holding this tab's page object.
+    declared: boolean
+    // …and set only when the SPEC is the thing that constructs it, which is the
+    // only case where the spec file has to import the class. A tab opened by a
+    // method is constructed inside the page file, beside its own class.
+    specConstructs: boolean
+  }
+  const tabs = new Map<number, TabCtx>()
+  const tabCtx = (windowId: number): TabCtx => {
+    const existing = tabs.get(windowId)
+    if (existing) return existing
+    const ctx: TabCtx = {
+      windowId,
+      className: windowId === 0 ? className : `${baseName}Tab${windowId}Page`,
+      specVar: windowId === 0 ? 'app' : `tab${windowId}`,
+      used: new Set<string>(['page', 'goto', 'constructor']),
+      frameDefs: [],
+      frameNameByKey: new Map(),
+      locatorDefs: [],
+      methods: [],
+      actionsSeq: 0,
+      declared: windowId === 0,
+      specConstructs: windowId === 0
+    }
+    tabs.set(windowId, ctx)
+    return ctx
+  }
+  // Tab 0 always exists, even for a flow that never touches it.
+  tabCtx(0)
+
+  const uniqueName = (ctx: TabCtx, base: string): string => {
+    let name = base
+    let n = 2
+    while (ctx.used.has(name)) name = `${base}${n++}`
+    ctx.used.add(name)
+    return name
+  }
+
+  // The FrameLocator field an element inside an <iframe> hangs off. Declared
+  // once per distinct frame chain, so the frame plumbing lives in one place and
+  // every locator in that frame reads like any other locator.
+  const frameFieldFor = (ctx: TabCtx, step: RecorderStep): string | null => {
+    if (!step.frame?.length) return null
+    const key = frameKeyOf(step)
+    const existing = ctx.frameNameByKey.get(key)
+    if (existing) return existing
+    const last = step.frame[step.frame.length - 1]
+    // Prefer the iframe's name/id; a src URL makes a poor identifier, so fall
+    // back to a numbered frame rather than mangling a URL into a variable.
+    const raw = last.name ? camelName(last.name) : `frame${ctx.frameDefs.length + 1}`
+    const name = uniqueName(ctx, `${raw}Frame`)
+    ctx.frameNameByKey.set(key, name)
+    ctx.frameDefs.push({ name, expr: pageBase('page', step.frame) })
+    return name
+  }
+
   // Member names shared across locators + methods (a class can't have a property
   // and a method with the same name), plus reserved members.
-  const used = new Set<string>(['page', 'goto', 'constructor'])
-  const locatorDefs: { name: string; selector: string }[] = []
-  const nameByExpr = new Map<string, string>()
+  const nameByKey = new Map<string, string>()
   const nameForElement = (step: RecorderStep): string => {
-    const expr = exprOf(step)
-    const existing = nameByExpr.get(expr)
+    const key = keyOf(step)
+    const existing = nameByKey.get(key)
     if (existing) return existing
-    const kind = kindByExpr.get(expr)
+    const ctx = tabCtx(tabOf(step))
+    const kind = kindByKey.get(key)
     // An element only ever ASSERTED on gets no suffix — it isn't a control.
-    const baseName = camelName(step.label || step.type) + (kind ? SUFFIX[kind] : '')
-    let name = baseName
-    let n = 2
-    while (used.has(name)) name = `${baseName}${n++}`
-    used.add(name)
-    nameByExpr.set(expr, name)
-    locatorDefs.push({ name, selector: expr })
+    const name = uniqueName(
+      ctx,
+      camelName(step.label || step.type) + (kind ? SUFFIX[kind] : '')
+    )
+    nameByKey.set(key, name)
+    const frameField = frameFieldFor(ctx, step)
+    ctx.locatorDefs.push({
+      name,
+      base: frameField ? `this.${frameField}` : 'page',
+      selector: exprOf(step)
+    })
     return name
   }
   // A step that targets a single named element (so it gets a locator property).
@@ -2075,14 +2251,15 @@ export function generatePageObjectTest(
 
   // Walk the steps: accumulate consecutive ACTIONS into a method buffer, and
   // flush it (as a method + a call in the spec) at each navigate/assert boundary.
-  const methods: { name: string; body: string[]; usesData: boolean }[] = []
   const specBody: string[] = []
   // F24.4: which specBody lines are 🧹 teardown (hoisted into a `finally` below).
   const specTeardownIdx = new Set<number>()
   let buffer: string[] = []
   let bufferUsesData = false
   let lastActionLabel = ''
-  let actionsSeq = 0
+  // Which tab the buffered actions belong to — a method lives on exactly one
+  // class, so switching tabs mid-buffer has to flush first.
+  let bufferTab = 0
   // F37: how deeply nested in loops / if-blocks the CURRENT spec line is. The
   // control flow lives in the SPEC, wrapping the `await app.method()` calls;
   // page-object methods stay flat, so each method is still one readable intent.
@@ -2090,24 +2267,80 @@ export function generatePageObjectTest(
   // looping test mean the same thing the inline export means.
   let depth = 0
   const ind = (): string => '  '.repeat(depth + 1)
-  const flush = (): void => {
+  // `returns` turns the flushed method into one that hands something back — the
+  // new tab's page object, or a Download — so the spec can name it.
+  const flush = (returns?: { type: string; expr: string; assignTo: string }): void => {
     if (!buffer.length) return
-    const base = lastActionLabel ? camelName(lastActionLabel) : `actions${++actionsSeq}`
-    let name = base
-    let n = 2
-    while (used.has(name)) name = `${base}${n++}`
-    used.add(name)
-    methods.push({ name, body: buffer, usesData: bufferUsesData })
-    // A data-using method receives the row: `await app.login(data)`.
-    specBody.push(`${ind()}await app.${name}(${bufferUsesData ? 'data' : ''})`)
+    const ctx = tabCtx(bufferTab)
+    const base = lastActionLabel ? camelName(lastActionLabel) : `actions${++ctx.actionsSeq}`
+    const name = uniqueName(ctx, base)
+    ctx.methods.push({
+      name,
+      body: buffer,
+      usesData: bufferUsesData,
+      returns: returns ? { type: returns.type, expr: returns.expr } : undefined
+    })
+    // A data-using method receives the row: `await app.login(data)`. tabVar()
+    // rather than ctx.specVar so a tab that no step opened still gets declared
+    // before the first call on it.
+    const call = `${tabVar(bufferTab)}.${name}(${bufferUsesData ? 'data' : ''})`
+    specBody.push(`${ind()}${returns ? `const ${returns.assignTo} = ` : ''}await ${call}`)
     buffer = []
     bufferUsesData = false
     lastActionLabel = ''
   }
+  // Every step that isn't buffered still has to respect the buffer's tab.
+  const flushIfTabChanges = (windowId: number): void => {
+    if (buffer.length && windowId !== bufferTab) flush()
+    if (!buffer.length) bufferTab = windowId
+  }
+  // The spec-side handle for a tab. Tab 0 is `app`, created by the spec itself;
+  // any other tab is created by the method that opened it. If a step names a tab
+  // nothing ever opened (a hand-edited test, or a popup the recorder missed), we
+  // still have to declare SOMETHING or the spec references an undefined name.
+  const tabVar = (windowId: number): string => {
+    const ctx = tabCtx(windowId)
+    if (!ctx.declared) {
+      ctx.declared = true
+      ctx.specConstructs = true
+      specBody.push(
+        `${ind()}// ⚠ no recorded step opened tab ${windowId} — taking it from the context by`,
+        `${ind()}// position. Re-record the click that opens it to get the proper wait.`,
+        `${ind()}const ${ctx.specVar} = new ${ctx.className}(page.context().pages()[${windowId}])`
+      )
+    }
+    return ctx.specVar
+  }
 
   let firstNavSeen = false
   let loopSeq = 0
-  for (const step of enabled) {
+  let downloadSeq = 0
+  for (let stepIdx = 0; stepIdx < enabled.length; stepIdx++) {
+    const step = enabled[stepIdx]
+    const next = enabled[stepIdx + 1]
+    // Which page object this step talks to, and the page behind it.
+    const ctxVar = (): string => tabVar(tabOf(step))
+    const pageOf = (): string => `${ctxVar()}.page`
+    // Day 16: a dialog step ANSWERS the action before it — the handler is
+    // emitted just ahead of its trigger (below), never as a step of its own.
+    if (step.type === 'dialog') continue
+    // Day 16(+): a download step VERIFIES the file the previous action started.
+    // The method returned the Download; the check belongs in the spec, with
+    // every other assertion.
+    if (step.type === 'download') {
+      const want = (step.value ?? step.label ?? 'file').trim()
+      const v = `download${downloadSeq}`
+      specBody.push(`${ind()}expect(${v}.suggestedFilename()).toContain(${quote(want)})`)
+      specBody.push(`${ind()}expect(fs.statSync(await ${v}.path()).size).toBeGreaterThan(0)`)
+      continue
+    }
+    // Day 17: closing a tab is a lifecycle step, not an intent — it reads
+    // better in the spec than hidden inside a method.
+    if (step.type === 'closeTab') {
+      flush()
+      specBody.push(`${ind()}await ${pageOf()}.close()`)
+      continue
+    }
     // === F37: loops + branching, emitted as REAL control flow ===
     // Every control marker flushes the action buffer first, so a method never
     // straddles a block boundary (half its steps inside the loop, half outside).
@@ -2118,8 +2351,8 @@ export function generatePageObjectTest(
         if (step.repeatKind === 'each' && step.selector) {
           const items = `items${loopSeq++}`
           const sel = (idPolicy.portable && portableTestIdSelector(step)) || step.selector
-          specBody.push(`${ind()}// ${stepText(step)}`)
-          specBody.push(`${ind()}const ${items} = app.page.${sel}`)
+          specBody.push(`${ind()}// ${stepComment(step)}`)
+          specBody.push(`${ind()}const ${items} = ${pageBase(pageOf(), step.frame)}.${sel}`)
           // Count ONCE up front, matching the app and the inline export: a live
           // count could loop forever if the body adds matching elements.
           specBody.push(`${ind()}const ${items}Count = await ${items}.count()`)
@@ -2127,7 +2360,7 @@ export function generatePageObjectTest(
         } else {
           const n = parseInt(step.value ?? '1', 10)
           const times = Number.isFinite(n) && n > 0 ? n : 1
-          specBody.push(`${ind()}// ${stepText(step)}`)
+          specBody.push(`${ind()}// ${stepComment(step)}`)
           specBody.push(`${ind()}for (let ${v} = 0; ${v} < ${times}; ${v}++) {`)
         }
         depth++
@@ -2135,8 +2368,10 @@ export function generatePageObjectTest(
       }
       if (step.type === 'if') {
         flush()
-        specBody.push(`${ind()}// ${stepText(step)}`)
-        specBody.push(`${ind()}if (${conditionExpr(step, 'app.page', idPolicy.portable)}) {`)
+        specBody.push(`${ind()}// ${stepComment(step)}`)
+        specBody.push(
+          `${ind()}if (${conditionExpr(step, pageBase(pageOf(), step.frame), idPolicy.portable)}) {`
+        )
         depth++
         continue
       }
@@ -2156,13 +2391,13 @@ export function generatePageObjectTest(
     }
     if (step.type === 'navigate') {
       flush()
-      if (!firstNavSeen) {
+      if (!firstNavSeen && tabOf(step) === 0) {
         firstNavSeen = true
         specBody.push(`${ind()}await app.goto()`)
       } else {
         let url = step.url ?? ''
         if (baseURL && url.startsWith(baseURL)) url = url.slice(baseURL.length) || '/'
-        specBody.push(`${ind()}await app.page.goto(${quote(url)})`)
+        specBody.push(`${ind()}await ${pageOf()}.goto(${quote(url)})`)
       }
       continue
     }
@@ -2171,11 +2406,12 @@ export function generatePageObjectTest(
       const name = usesElement(step) ? nameForElement(step) : ''
       // The assert lives in the spec, where `data` is in scope (inside the
       // per-row loop), so a tokenized expected value can stay a `data.*` ref.
+      // The element locator is already frame- and tab-scoped by its class.
       const line = actionFor(
         step,
         baseURL,
-        'app.page',
-        name ? `app.${name}` : undefined,
+        pageOf(),
+        name ? `${ctxVar()}.${name}` : undefined,
         columns,
         idPolicy.portable
       )
@@ -2193,7 +2429,7 @@ export function generatePageObjectTest(
     // checking at all and reported green. Found by diffing inline vs POM output.
     if (step.type === 'a11y' || step.type === 'perf' || step.type === 'snapshot') {
       flush()
-      const line = actionFor(step, baseURL, 'app.page', undefined, columns, idPolicy.portable)
+      const line = actionFor(step, baseURL, pageOf(), undefined, columns, idPolicy.portable)
       if (line) specBody.push(`${ind()}${line}`)
       continue
     }
@@ -2201,7 +2437,7 @@ export function generatePageObjectTest(
     // not the page object — so it lives in the spec body, like an assert.
     if (step.type === 'api') {
       flush()
-      const line = actionFor(step, baseURL, 'app.page', undefined, columns, idPolicy.portable)
+      const line = actionFor(step, baseURL, pageOf(), undefined, columns, idPolicy.portable)
       if (line) {
         specBody.push(`${ind()}${line}`)
         // F24.4: remember WHICH emitted line this teardown step became, so it can be
@@ -2216,16 +2452,57 @@ export function generatePageObjectTest(
     // element of their own (page-level actions), so handle them before the
     // no-selector skip below.
     if (step.type === 'wait' || step.type === 'back') {
+      flushIfTabChanges(tabOf(step))
       const line = actionFor(step, baseURL, 'this.page', undefined, columns, idPolicy.portable)
       if (line) buffer.push(`    ${line}`)
       if (stepUsesData(step)) bufferUsesData = true
       continue
     }
     if (!step.selector) continue
+    flushIfTabChanges(tabOf(step))
     const name = nameForElement(step)
+    // Day 16: a dialog is answered by a handler REGISTERED BEFORE the action
+    // that raises it, so it goes into the method just above its trigger.
+    if (next && next.type === 'dialog') {
+      buffer.push(`    ${dialogHandler(next, 'this.page')}`)
+    }
+    // Day 16(+): same ordering rule for a download — start waiting before the
+    // click, or the event has already fired by the time you listen.
+    const startsDownload = !!next && next.type === 'download'
+    if (startsDownload) {
+      downloadSeq++
+      buffer.push(`    const downloadPromise = this.page.waitForEvent('download')`)
+    }
     const line = actionFor(step, baseURL, 'this.page', `this.${name}`, columns, idPolicy.portable)
     if (line) buffer.push(step.optional ? wrapOptional(line, '    ') : `    ${line}`)
     if (stepUsesData(step)) bufferUsesData = true
+    // Day 17: this click opens a tab. The method awaits the new page alongside
+    // the click (arming the wait first, as Playwright requires) and hands back
+    // that tab's page object — the classic POM shape for a popup.
+    if (step.opensWindow !== undefined && line) {
+      const opened = tabCtx(step.opensWindow)
+      opened.declared = true
+      // Re-wrap the action we just pushed: it has to sit INSIDE the Promise.all.
+      buffer.pop()
+      buffer.push(
+        `    const [popup] = await Promise.all([`,
+        `      this.page.context().waitForEvent('page'),`,
+        `      ${line.replace(/^await /, '')}`,
+        `    ])`
+      )
+      lastActionLabel = step.label || ''
+      flush({
+        type: opened.className,
+        expr: `new ${opened.className}(popup)`,
+        assignTo: opened.specVar
+      })
+      continue
+    }
+    if (startsDownload) {
+      lastActionLabel = step.label || ''
+      flush({ type: 'Download', expr: 'downloadPromise', assignTo: `download${downloadSeq}` })
+      continue
+    }
     // A method should be ONE intent, named for it. The old rule flushed only at a
     // navigate/assert boundary and named the method after its LAST step — so
     // "fill user, fill password, click Login, click Add to cart" became a single
@@ -2235,7 +2512,7 @@ export function generatePageObjectTest(
     // A click on a real BUTTON is what completes an intent (submit / add / save);
     // a click on an input is just focus, and must not end anything or name it.
     if (step.type === 'click' || step.type === 'press') {
-      if (kindByExpr.get(exprOf(step)) === 'button') {
+      if (kindByKey.get(keyOf(step)) === 'button') {
         lastActionLabel = step.label || ''
         flush()
       }
@@ -2267,31 +2544,55 @@ export function generatePageObjectTest(
   }
 
   // === Build the page class file ===
-  const pageLines: string[] = []
-  pageLines.push(`import { type Page, type Locator } from '@playwright/test'`)
-  pageLines.push('')
-  pageLines.push(`export class ${className} {`)
-  pageLines.push(`  readonly page: Page`)
-  for (const d of locatorDefs) pageLines.push(`  readonly ${d.name}: Locator`)
-  pageLines.push('')
-  pageLines.push(`  constructor(page: Page) {`)
-  pageLines.push(`    this.page = page`)
-  for (const d of locatorDefs) pageLines.push(`    this.${d.name} = page.${d.selector}`)
-  pageLines.push(`  }`)
-  pageLines.push('')
-  pageLines.push(`  async goto(): Promise<void> {`)
-  pageLines.push(`    await this.page.goto(${quote(gotoUrl)})`)
-  pageLines.push(`  }`)
-  for (const m of methods) {
-    pageLines.push('')
-    // A data-using method receives the current row; its body already references
-    // `data.column` (env tokens read process.env directly, so they need no arg).
-    const params = m.usesData ? 'data: Record<string, string>' : ''
-    pageLines.push(`  async ${m.name}(${params}): Promise<void> {`)
-    for (const b of m.body) pageLines.push(b)
-    pageLines.push(`  }`)
+  // One class per tab, side by side in the one file. Tab 0 comes first (it is
+  // what the spec imports and instantiates); the rest follow in tab order.
+  const orderedTabs = [...tabs.values()].sort((a, b) => a.windowId - b.windowId)
+  const usedTabs = orderedTabs.filter(
+    (t) => t.windowId === 0 || t.locatorDefs.length || t.methods.length || t.frameDefs.length
+  )
+  // Only import the types actually used — an unused type import trips a lint
+  // rule in the user's repo, and this file is meant to be committed as-is.
+  const pageTypes = ['Page', 'Locator']
+  if (usedTabs.some((t) => t.frameDefs.length)) pageTypes.push('FrameLocator')
+  if (usedTabs.some((t) => t.methods.some((m) => m.returns?.type === 'Download'))) {
+    pageTypes.push('Download')
   }
-  pageLines.push(`}`)
+  const pageLines: string[] = []
+  pageLines.push(`import { ${pageTypes.map((t) => `type ${t}`).join(', ')} } from '@playwright/test'`)
+  for (const ctx of usedTabs) {
+    pageLines.push('')
+    pageLines.push(`export class ${ctx.className} {`)
+    pageLines.push(`  readonly page: Page`)
+    // Frames first: every locator below is scoped to one of them.
+    for (const f of ctx.frameDefs) pageLines.push(`  readonly ${f.name}: FrameLocator`)
+    for (const d of ctx.locatorDefs) pageLines.push(`  readonly ${d.name}: Locator`)
+    pageLines.push('')
+    pageLines.push(`  constructor(page: Page) {`)
+    pageLines.push(`    this.page = page`)
+    // …and assigned first too, or a locator would read an undefined field.
+    for (const f of ctx.frameDefs) pageLines.push(`    this.${f.name} = ${f.expr}`)
+    for (const d of ctx.locatorDefs) pageLines.push(`    this.${d.name} = ${d.base}.${d.selector}`)
+    pageLines.push(`  }`)
+    // Only the tab the test STARTS in has somewhere to navigate to; a popup
+    // arrives already pointed at its URL.
+    if (ctx.windowId === 0) {
+      pageLines.push('')
+      pageLines.push(`  async goto(): Promise<void> {`)
+      pageLines.push(`    await this.page.goto(${quote(gotoUrl)})`)
+      pageLines.push(`  }`)
+    }
+    for (const m of ctx.methods) {
+      pageLines.push('')
+      // A data-using method receives the current row; its body already references
+      // `data.column` (env tokens read process.env directly, so they need no arg).
+      const params = m.usesData ? 'data: Record<string, string>' : ''
+      pageLines.push(`  async ${m.name}(${params}): Promise<${m.returns?.type ?? 'void'}> {`)
+      for (const b of m.body) pageLines.push(b)
+      if (m.returns) pageLines.push(`    return ${m.returns.expr}`)
+      pageLines.push(`  }`)
+    }
+    pageLines.push(`}`)
+  }
   const page = `${pageLines.join('\n')}\n`
 
   // === Build the spec file ===
@@ -2303,10 +2604,14 @@ export function generatePageObjectTest(
   // still emits `await expect(page).toHaveScreenshot(...)` and so still needs
   // `expect` imported. (It was absent from this list back when the POM export
   // dropped snapshot steps entirely, so the gap never showed.)
+  // Day 16(+): a download check asserts on the returned Download and reads the
+  // file off disk, so it needs `expect` and `fs` exactly like the inline export.
+  const hasDownload = enabled.some((s) => s.type === 'download')
   const hasAssert =
     enabled.some((s) => s.type === 'assert' || s.type === 'snapshot') ||
     hasA11y ||
     hasPerf ||
+    hasDownload ||
     needsRequest
   // F36: keep POM/inline parity — the same device reaches both exports.
   const pomDev = deviceUse(options?.device, options?.viewport)
@@ -2332,9 +2637,15 @@ export function generatePageObjectTest(
     (hasA11y ? '// Accessibility checks need: npm i -D @axe-core/playwright\n' : '') +
     `import ${imports} from '@playwright/test'\n` +
     (hasA11y ? "import AxeBuilder from '@axe-core/playwright'\n" : '') +
+    (hasDownload ? "import fs from 'fs'\n" : '') +
     // F24.1: parity with the inline export — the POM spec runs the same API steps.
     (runtimeTokenUse(enabled).uuid ? "import { randomUUID } from 'node:crypto'\n" : '') +
-    `import { ${className} } from './pages/${className}'\n` +
+    // Every tab's class the spec NAMES — tab 0 to instantiate it, and any other
+    // tab only when the spec has to build one itself (see tabVar).
+    `import { ${usedTabs
+      .filter((t) => t.specConstructs)
+      .map((t) => t.className)
+      .join(', ')} } from './pages/${className}'\n` +
     // F24.2: same shared check engine as the inline export — an api step must mean
     // the same thing whichever export style you picked.
     (anyApiChecks(enabled) ? `\n${API_CHECK_HELPER}` : '')
