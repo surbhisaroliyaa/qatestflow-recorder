@@ -358,7 +358,11 @@ export function anyApiChecks(steps: RecorderStep[]): boolean {
 //
 // So the export now ships the SAME implementation the app runs (mirrors runCheck in
 // src/main/apiChecks.ts). One meaning, two places to run it.
-const API_CHECK_HELPER = `// ── QATestFlow: API response checks (mirrors the in-app engine exactly) ──
+// Exported so a test can run it against the SAME cases as the in-app engine in
+// src/main/apiChecks.ts. "Mirrors the in-app engine exactly" is a promise, and
+// an unverified promise between two copies of the same rules is how a test goes
+// green in the app and red in CI.
+export const API_CHECK_HELPER = `// ── QATestFlow: API response checks (mirrors the in-app engine exactly) ──
 const __MISSING = Symbol('missing')
 function __readField(body: unknown, path: string): unknown {
   let cur: unknown = body
