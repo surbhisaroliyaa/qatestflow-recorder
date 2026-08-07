@@ -123,12 +123,24 @@ export function buildSelectors(facts: ElementFacts): BuiltSelector {
   const dup = facts.dup ?? {}
 
   // 1. test id — the gold standard, added FOR testing, never restyled away.
+  //
+  // …unless a machine wrote it. A test id is only a promise of stability when a
+  // HUMAN chose the name; React/MUI/Angular emit `data-testid="row-8f3a91cc"`
+  // and file lists emit `data-testid="1786087311623_report.txt"`, which change on
+  // the next render or the next upload. Those were scoring 95 — above every hook
+  // that actually survives — so the recorded test broke for a reason that had
+  // nothing to do with the app under test.
+  //
+  // Same judgement, same function as the `id` rung below (which has demoted
+  // generated names since Day 10); it just was never applied here. 45 puts it
+  // under role (80), name (70) and text (50) so any real hook wins, while
+  // staying above a generated id (40) — a test id was at least placed on purpose.
   if (facts.testId) {
     candidates.push(
       disambiguate(
         {
           kind: 'testId',
-          score: 95,
+          score: looksGenerated(facts.testId) ? 45 : 95,
           locator: `getByTestId('${esc(facts.testId)}')`,
           // Match BOTH conventions — the element may carry data-test OR
           // data-testid (we read either as the test id), and getByTestId in
@@ -209,7 +221,19 @@ export function buildSelectors(facts: ElementFacts): BuiltSelector {
   // STRICTLY facts.text (words actually written on the page) — never alt/aria
   // names: getByText searches text content, so a selector built from an
   // invisible alt ("User Avatar") would be a promise replay can never keep.
-  if (facts.text && !isField && facts.text.length <= 40) {
+  //
+  // The cap matches what the observer actually CAPTURES (observerSource.ts:585
+  // keeps text up to 100). It used to be 40, which quietly decided what you were
+  // allowed to assert on: an element with no id/role/name has text as its only
+  // hook, so anything longer than 40 characters got no candidate but the bare tag
+  // and the UI refused the check as unreplayable. Ordinary page furniture blew
+  // past 40 — "Example of a new window page for Automation Testing Practice" is
+  // 59 — so headings, banners, confirmations and validation messages were
+  // uncheckable for no reason the tester could see.
+  //
+  // Widening it only ADDS a fallback where there was none: text scores 50, below
+  // id (90), role (80) and name (70), so it still never displaces a better hook.
+  if (facts.text && !isField && facts.text.length <= 100) {
     candidates.push(
       disambiguate(
         {
