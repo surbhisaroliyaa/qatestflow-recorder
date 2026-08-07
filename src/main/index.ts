@@ -24,6 +24,7 @@ import { existsSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { buildSelectors, labelFrom, type ElementFacts } from './selector'
+import { normalizeUrl, reachError } from './urls'
 import {
   buildActionScript,
   buildFailureMarkScript,
@@ -178,25 +179,6 @@ const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(
  * down precisely nothing, and it breaks the pattern set by the rest of these
  * errors ("Unauthorized — check the email + API token").
  */
-function reachError(e: unknown, url: string): string {
-  const raw = e instanceof Error ? e.message : String(e)
-  const host = (() => {
-    try {
-      return new URL(url).host
-    } catch {
-      return url
-    }
-  })()
-  if (/fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET/i.test(raw)) {
-    // `cause` is where Node hides the actual reason; include it when it's there.
-    const cause = (e as { cause?: { code?: string } })?.cause?.code
-    return `Couldn’t reach ${host} — check the URL and your connection.${cause ? ` (${cause})` : ''}`
-  }
-  if (/certificate|self.signed|CERT_/i.test(raw)) {
-    return `Couldn’t verify the HTTPS certificate for ${host}. (${raw})`
-  }
-  return raw
-}
 
 // F29 (chaos): the latency of Chrome DevTools' "Slow 3G" profile. ONE constant, so
 // the CDP throttle applied to the browser tab and the delay applied to API steps
@@ -5918,18 +5900,6 @@ function createWindow(): void {
   )
 }
 
-// If the user types "google.com" we turn it into "https://google.com"
-function normalizeUrl(input: string): string {
-  const trimmed = input.trim()
-  // Leave ANY explicit scheme alone — http(s)://, file://, chrome://, about:,
-  // data:, etc. Only a bare domain like "example.com" or "localhost:5173" gets
-  // https:// prepended. A `host:port` is NOT a scheme (no `//` after the colon),
-  // so it still gets the prefix. (The old whitelist mangled `chrome://version`
-  // into `https://chrome://version` because chrome wasn't on the list.)
-  if (/^[a-zA-Z][\w+.-]*:\/\//.test(trimmed) || /^(about|data|blob|view-source):/i.test(trimmed))
-    return trimmed
-  return `https://${trimmed}`
-}
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.qatestflow.recorder')
