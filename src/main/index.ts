@@ -1945,7 +1945,7 @@ function createWindow(): void {
   ipcMain.on(
     'recorder:picked',
     (
-      _event,
+      event,
       raw: {
         facts: ElementFacts
         text?: string
@@ -1984,7 +1984,16 @@ function createWindow(): void {
         groupCount,
         // Day 15: if the picked element is inside an iframe, the assertion (or
         // recovery heal) built from it must replay in — and export for — that frame.
-        frame: raw.frame ?? undefined
+        frame: raw.frame ?? undefined,
+        // Day 17 (multiple windows): …and WHICH TAB it was picked in. Recorded
+        // steps have carried this since Day 17 (the observer passes its sender),
+        // but a PICKED element only ever learned about frames — so a check added
+        // on a popup came back with no tab, every consumer read `windowId ?? 0`,
+        // and the check ran against tab 0. It could not pass: the element it
+        // names is on tab 1. Same reasoning as `frame` one line up, one level up.
+        // The sender is authoritative — the tab that fired the pick, not
+        // whichever tab happens to be visible when the panel is submitted.
+        windowId: recWindowIdOfWC(event.sender)
       })
     }
   )

@@ -1044,6 +1044,11 @@ declare global {
     // Day 15: set when the picked element is inside an <iframe>, so the
     // assertion step built from it replays in (and exports for) that frame.
     frame?: FrameRef
+    // Day 17: which TAB it was picked in (recording-local ordinal, 0 = the tab
+    // the recording started in). Same purpose as `frame`, one level up: without
+    // it a check added on a popup is built with no tab, and every consumer
+    // defaults to 0 — so it runs against the wrong page and cannot pass.
+    windowId?: number
     // Day 21 (self-heal ambiguity guard): how many equally-good elements the
     // broken step's label matched during a heal search. >1 means the label is
     // ambiguous (e.g. many "Add to cart" buttons) — the panel warns and asks

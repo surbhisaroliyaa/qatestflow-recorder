@@ -91,6 +91,7 @@ import {
   primaryCandidate,
   stabilityClass
 } from './uiFormat'
+import { textCheckIsCircular } from './checkAdvice'
 
 
 interface LocaleResult {
@@ -4811,7 +4812,12 @@ function App(): React.JSX.Element {
         value: assertNeedsValue(assertKind) ? assertValue : undefined,
         attrName: assertKind === 'attribute' ? assertAttr.trim() : undefined,
         // Day 15: assert in the same frame the element was picked from.
-        frame: pickedElement.frame
+        frame: pickedElement.frame,
+        // Day 17: …and in the same TAB. Without this a check picked on a popup
+        // was built with no windowId, which every consumer reads as tab 0 — the
+        // exported spec asserted on page0 and the in-app replay looked at the
+        // wrong tab, so the check could never pass.
+        windowId: pickedElement.windowId
       },
       insertAt
     )
@@ -8575,6 +8581,24 @@ function App(): React.JSX.Element {
                   with an id).
                 </div>
               )}
+              {/* This element is found BY its text, so a text check re-asserts what
+                  the locator already matched — it can only fail when the element is
+                  missing. Say so while the kind can still be changed. */}
+              {!pickedElement.unreliable &&
+                textCheckIsCircular(pickedElement.candidates, assertKind) && (
+                  <div className="pick-warning">
+                    ⚠ This element is found <em>by</em> its text, so a text check can only fail when
+                    the element is missing — it never really checks the wording.{' '}
+                    <button
+                      type="button"
+                      className="link-btn"
+                      onClick={() => handleChooseKind('visible')}
+                    >
+                      Use “Visible”
+                    </button>{' '}
+                    to say that honestly, or pick an element with an id / role.
+                  </div>
+                )}
               <div className="assert-kinds">
                 {ASSERT_KINDS.filter(
                   (kind) =>
