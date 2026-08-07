@@ -29,7 +29,7 @@ import { generateSuiteDoc, type DocMeta } from './livingDocs'
 import { classifyRuns, type FlakyTag } from './flaky'
 import { trustScore } from './trust'
 import { findWeakAssertions } from './deadAssertions'
-import { DEVICES, deviceById, resolveDevice, deviceSummary } from './devices'
+import { DEVICES, deviceById, resolveDevice } from './devices'
 // F37: loops + branching. Shared with the replay engine so the step list, the
 // export and the run all agree on how markers pair up.
 import { analyzeControlFlow, isControlStep, type ConditionKind } from '../../shared/controlFlow'
@@ -47,17 +47,20 @@ import {
   runFixturePaths,
   runSecretRefs
 } from '../../shared/runInputs'
-import { SUGGESTED_TAGS, parseTags, normalizeTag, allTags, matchesTags } from './tags'
+import { allTags, matchesTags } from './tags'
 import { headlessBlockers, blockerSummary, defaultWorkers, headlessCategory } from './headless'
 
 import {
-  ASSERT_KINDS,
-  ASSERT_LABELS,
   CATEGORY_LABELS,
   EXAMPLE_URLS,
   LOCALE_PRESETS,
-  PERF_METRIC_HELP,
 } from './uiLabels'
+import { PerfPanel } from './components/PerfPanel'
+import { A11yPanel } from './components/A11yPanel'
+import { AssertPanel } from './components/AssertPanel'
+import { SavePanel } from './components/SavePanel'
+import { BlocksPanel } from './components/BlocksPanel'
+import { RecoveryPanel } from './components/RecoveryPanel'
 import { MonitorsModal } from './components/MonitorsModal'
 import { ApiEditorModal } from './components/ApiEditorModal'
 import { DraftModal } from './components/DraftModal'
@@ -84,14 +87,12 @@ import { F40Modals } from './components/F40Modals'
 import { SuiteReport } from './components/SuiteReport'
 import type { HealableFail, HealedSave, SuiteRunEntry, SuiteRunState } from './suiteTypes'
 import {
-  a11yImpactRank,
   assertNeedsValue,
   clip,
   formatBytes,
   primaryCandidate,
   stabilityClass
 } from './uiFormat'
-import { textCheckIsCircular } from './checkAdvice'
 
 
 interface LocaleResult {
@@ -7674,184 +7675,23 @@ function App(): React.JSX.Element {
           {/* === Day 12: recovery panel — the replay is paused on a failed
               step, browser frozen at the scene. Not a modal: the page must
               stay visible (and clickable, for Re-pick). === */}
-          {recovery && (
-            <div className="assert-panel recovery-panel">
-              <div className="assert-target">
-                <span className="assert-title recovery-title">
-                  ✗ Step {recovery.index + 1} failed — paused
-                </span>
-                {steps[recovery.index]?.label && (
-                  <span className="assert-label">{steps[recovery.index].label}</span>
-                )}
-              </div>
-              <code className="assert-selector recovery-error">{recovery.error}</code>
-              {recoveryWarning && <div className="pick-warning">⚠ {recoveryWarning}</div>}
-              {repickPending ? (
-                <>
-                  {/* Day 17: the pick looks different from the original — confirm */}
-                  <div className="pick-warning">⚠ {repickPending.message}</div>
-                  <div className="assert-actions recovery-actions">
-                    <button className="modal-btn" onClick={() => setRepickPending(null)}>
-                      Cancel
-                    </button>
-                    <button
-                      className="modal-btn primary"
-                      onClick={() => applyHeal(repickPending.picked, repickPending.healIndex)}
-                    >
-                      Heal anyway
-                    </button>
-                  </div>
-                </>
-              ) : repickIndex !== null ? (
-                <div className="assert-actions recovery-actions">
-                  <span className="recovery-hint">
-                    Click the correct element in the page (Esc cancels)
-                  </span>
-                  <button className="modal-btn" onClick={handleRecoveryRepickCancel}>
-                    Cancel re-pick
-                  </button>
-                </div>
-              ) : (
-                <>
-                  {/* Day 18 (self-heal): the app auto-found a likely match for
-                      the broken step by its label — one click to accept it.
-                      Day 21 (ambiguity guard): if that label matched SEVERAL
-                      equally-good elements (e.g. many "Add to cart" buttons),
-                      "the best match" is just the first in DOM order and may be
-                      the wrong one — so we DECLINE the one-click fix and ask for
-                      a manual pick instead of silently healing to a guess. */}
-                  {recovery.suggestion &&
-                    ((recovery.suggestion.ambiguousCount ?? 1) > 1 ? (
-                      <div className="self-heal self-heal-ambiguous">
-                        <span className="self-heal-text">
-                          🔧 Self-heal found <strong>{recovery.suggestion.ambiguousCount}</strong>{' '}
-                          elements labelled <strong>“{recovery.suggestion.label}”</strong> — too
-                          ambiguous to fix automatically. Use <strong>🎯 Pick manually</strong>{' '}
-                          below to choose the right one.
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="self-heal">
-                        <span className="self-heal-text">
-                          🔧 Self-heal found <strong>“{recovery.suggestion.label}”</strong> — use it
-                          to fix this step?
-                        </span>
-                        <button
-                          type="button"
-                          className="modal-btn primary self-heal-accept"
-                          onClick={() => applyHeal(recovery.suggestion!, recovery.index)}
-                        >
-                          ✓ Accept fix
-                        </button>
-                      </div>
-                    ))}
-                  <div className="assert-actions recovery-actions">
-                    {recovery.screenshotPath && (
-                      <button
-                        type="button"
-                        className="shot-link"
-                        onClick={() => window.api.library.openScreenshot(recovery.screenshotPath!)}
-                        title="Open the failure screenshot"
-                      >
-                        📷
-                      </button>
-                    )}
-                    {/* Day 18: open the full run recording captured up to here */}
-                    {recovery.traceId && (
-                      <button
-                        type="button"
-                        className="shot-link trace-link"
-                        onClick={() => openTrace(recovery.traceId!)}
-                        title="Open the full run recording (every step's screenshot, console & network)"
-                      >
-                        ⏺
-                      </button>
-                    )}
-                    {/* Day 13: ask for a diagnosis while deciding what to do */}
-                    <button
-                      type="button"
-                      className="shot-link explain-link"
-                      onClick={() =>
-                        handleExplain(
-                          recovery.index,
-                          recovery.error,
-                          recovery.screenshotPath,
-                          recovery.consoleErrors ?? [],
-                          recovery.networkErrors ?? [],
-                          recovery.apiEvidence // F24: the HTTP exchange, mid-pause
-                        )
-                      }
-                      title="Explain this failure: app bug, test bug, or just timing?"
-                    >
-                      💡
-                    </button>
-                    <button
-                      className="modal-btn"
-                      onClick={handleRecoveryRetry}
-                      title={
-                        retryIsUnsafe(recovery.index)
-                          ? 'Re-sends this POST/PATCH — it may create a duplicate record, so it asks first'
-                          : 'Run the same step again (maybe the page was just slow)'
-                      }
-                    >
-                      🔁 Retry{retryIsUnsafe(recovery.index) ? ' ⚠' : ''}
-                    </button>
-                    {/* Day 19: a visual snapshot differs — if the new look is
-                      intended, adopt it as the new baseline, then retry (passes). */}
-                    {recovery.visual?.baselineId && (
-                      <button
-                        className="modal-btn"
-                        onClick={async () => {
-                          const v = recovery.visual!
-                          const ok = await window.api.visual.updateBaseline(
-                            v.baselineId!,
-                            v.currentPath
-                          )
-                          if (ok) answerRecovery('retry')
-                        }}
-                        title="Adopt the current look as the new baseline (the visual change is intended), then retry"
-                      >
-                        📸 Update baseline
-                      </button>
-                    )}
-                    {/* Day 18: manual pick heals a SELECTOR — only offer it when
-                      the selector actually broke (not for assertion/timing
-                      failures, where re-picking wouldn't help). */}
-                    {recovery.selectorBroke && steps[recovery.index]?.selector && (
-                      <button
-                        className="modal-btn"
-                        onClick={handleRecoveryRepick}
-                        title="Point at the right element yourself — heals the selector, then retries"
-                      >
-                        🎯 Pick manually
-                      </button>
-                    )}
-                    <button
-                      className="modal-btn"
-                      onClick={() => answerRecovery('continue')}
-                      title="Ignore this failure and continue, to check the later steps. The run is still marked failed; the test isn't changed."
-                    >
-                      ⤵ Continue
-                    </button>
-                    <button
-                      className="modal-btn"
-                      onClick={handleRecoverySkipStep}
-                      title="Permanently skip this step — disable it now and in future runs. 💾 Save to keep it."
-                    >
-                      ⊘ Skip step
-                    </button>
-                    <button
-                      className="modal-btn danger"
-                      onClick={() => answerRecovery('stop')}
-                      title="End the run as failed"
-                    >
-                      ⏹ Stop
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
+          <RecoveryPanel
+            answerRecovery={answerRecovery}
+            applyHeal={applyHeal}
+            handleExplain={handleExplain}
+            handleRecoveryRepick={handleRecoveryRepick}
+            handleRecoveryRepickCancel={handleRecoveryRepickCancel}
+            handleRecoveryRetry={handleRecoveryRetry}
+            handleRecoverySkipStep={handleRecoverySkipStep}
+            openTrace={openTrace}
+            recovery={recovery}
+            recoveryWarning={recoveryWarning}
+            repickIndex={repickIndex}
+            repickPending={repickPending}
+            retryIsUnsafe={retryIsUnsafe}
+            setRepickPending={setRepickPending}
+            steps={steps}
+          />
 
           {/* Day 12: re-picked selectors live only in the panel until saved */}
           {healedIndices.size > 0 && !isReplaying && (
@@ -7975,493 +7815,59 @@ function App(): React.JSX.Element {
           )}
 
           {/* === Pillar 4: reusable step blocks (reuses the assert-panel look) === */}
-          {blocksPanelOpen && (
-            <div className={`assert-panel blocks-panel${blocksCollapsed ? ' collapsed' : ''}`}>
-              <div className="assert-target">
-                <span className="assert-title">🧩 Reusable step blocks</span>
-                {/* F7: minimise arrow — collapse to give the step list the whole
-                    sidebar (for editing a block with many steps). */}
-                <button
-                  type="button"
-                  className="block-collapse"
-                  onClick={() => setBlocksCollapsed((c) => !c)}
-                  title={
-                    blocksCollapsed
-                      ? 'Expand the blocks panel'
-                      : 'Minimise — give the step list the whole sidebar'
-                  }
-                  aria-label={blocksCollapsed ? 'Expand blocks panel' : 'Minimise blocks panel'}
-                >
-                  {blocksCollapsed ? '▸' : '▾'}
-                </button>
-              </div>
-              {/* Minimised mid-edit: keep Update / Close reachable without expanding. */}
-              {blocksCollapsed && editingBlockRef && (
-                <div className="assert-actions">
-                  <button className="modal-btn" onClick={closeBlocksPanel}>
-                    Close
-                  </button>
-                  <button
-                    className="modal-btn primary"
-                    onClick={handleSaveBlock}
-                    disabled={!blockNameInput.trim() || steps.length === 0}
-                  >
-                    Update block
-                  </button>
-                </div>
-              )}
-
-              <div className="block-body">
-              {/* F7: blast-radius banner — always visible (no hover). Shows the
-                  tests a block feeds the moment it's IN FOCUS: armed for delete
-                  (red — "breaks these") or being edited (amber — "changes these").
-                  Delete takes priority since it's the destructive, timed action. */}
-              {(() => {
-                const focusRef = pendingDeleteBlock ?? editingBlockRef
-                if (!focusRef) return null
-                const deleting = !!pendingDeleteBlock
-                const name = deleting
-                  ? (blocks.find((x) => x.fileName === focusRef)?.name ?? 'this block')
-                  : blockNameInput
-                const links = blockUsage[focusRef] ?? []
-                const cls = deleting
-                  ? 'blast-radius blast-radius-delete'
-                  : links.length === 0
-                    ? 'blast-radius blast-radius-safe'
-                    : 'blast-radius'
-                return (
-                  <div className={cls}>
-                    {links.length === 0 ? (
-                      <span className="blast-radius-head">
-                        {deleting
-                          ? `Deleting “${name}” is safe — no test links it. Click ✕ again to confirm.`
-                          : '✓ No test links this block yet — updating it affects nothing else.'}
-                      </span>
-                    ) : (
-                      <>
-                        <span className="blast-radius-head">
-                          {deleting ? '⚠ Deleting ' : '⚠ Updating '}
-                          <strong>“{name}”</strong>
-                          {deleting ? ' breaks ' : ' changes '}
-                          {links.length} linked test{links.length > 1 ? 's' : ''}
-                          {deleting ? ' — click ✕ again to confirm:' : ':'}
-                        </span>
-                        <ul className="blast-list">
-                          {links.map((l) => (
-                            <li key={l.fileName}>
-                              {l.name}
-                              {l.suite && <span className="blast-suite"> · {l.suite}</span>}
-                              {l.count > 1 && <span className="blast-count"> ×{l.count}</span>}
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </div>
-                )
-              })()}
-
-              {/* F7: while EDITING a block, hide the insert list so the block's
-                  loaded steps sit in view right below the compact panel. */}
-              {!editingBlockRef && (
-                <>
-                  <div className="block-section-label">
-                    Insert a block{' '}
-                    {blockInsertAt !== null ? `at step ${blockInsertAt + 1}` : 'at the end'}
-                  </div>
-              {blocks.length > 0 && (
-                <div className="block-hint">
-                  🔗 linked — stays in sync when you edit the block · ⧉ copy — an independent
-                  snapshot you can edit here
-                </div>
-              )}
-              {blocks.length === 0 ? (
-                <div className="block-empty">
-                  No saved blocks yet — save some steps below to reuse them across tests.
-                </div>
-              ) : (
-                <ul className="block-list">
-                  {blocks.map((b) => {
-                    // F7: which tests link THIS block — drives the usage chip + the
-                    // sharper delete warning ("breaks N tests").
-                    const links = blockUsage[b.fileName] ?? []
-                    const usedBy = links.length
-                    const linkNames = links
-                      .map((l) => `• ${l.name}${l.suite ? ` (${l.suite})` : ''}${l.count > 1 ? ` ×${l.count}` : ''}`)
-                      .join('\n')
-                    return (
-                      <li key={b.fileName} className="block-row">
-                      <button
-                        type="button"
-                        className="block-insert"
-                        onClick={() => handleInsertBlockLinked(b)}
-                        title={`Insert "${b.name}" as a LIVE link (${b.stepCount} steps) — editing the block later updates this test`}
-                      >
-                        🔗 {b.name} <span className="block-count">{b.stepCount} steps</span>
-                      </button>
-                      {/* F7: blast-radius at a glance — how many tests this block
-                          feeds; hover to see which. "unused" = safe to change. */}
-                      <span
-                        className={`block-usage${usedBy === 0 ? ' block-usage-none' : ''}`}
-                        title={
-                          usedBy === 0
-                            ? 'No test links this block — safe to edit or delete'
-                            : `Used by ${usedBy} test${usedBy > 1 ? 's' : ''}:\n${linkNames}`
-                        }
-                      >
-                        {usedBy === 0 ? 'unused' : `used by ${usedBy}`}
-                      </span>
-                      <button
-                        type="button"
-                        className="block-mini"
-                        onClick={() => handleInsertBlock(b.fileName)}
-                        title="Insert a one-time COPY (snapshot, not linked)"
-                      >
-                        ⧉
-                      </button>
-                      <button
-                        type="button"
-                        className="block-mini"
-                        onClick={() => handleEditBlock(b)}
-                        title={`Edit "${b.name}" — updates every test linked to it`}
-                      >
-                        ✎
-                      </button>
-                      <button
-                        type="button"
-                        className={`block-del${
-                          pendingDeleteBlock === b.fileName ? ' confirming' : ''
-                        }`}
-                        onClick={() => armOrDeleteBlock(b.fileName)}
-                        title={
-                          pendingDeleteBlock === b.fileName
-                            ? `Click again to permanently delete "${b.name}"${usedBy ? ` — BREAKS ${usedBy} linked test${usedBy > 1 ? 's' : ''}` : ''}`
-                            : `Delete block "${b.name}"${usedBy ? ` (breaks ${usedBy} linked test${usedBy > 1 ? 's' : ''})` : ''}`
-                        }
-                        aria-label={`Delete block ${b.name}`}
-                      >
-                        {pendingDeleteBlock === b.fileName ? 'Sure?' : '✕'}
-                      </button>
-                    </li>
-                    )
-                  })}
-                </ul>
-              )}
-                </>
-              )}
-
-              {/* F7: a clear "you're editing a block" cue when the insert list is hidden. */}
-              {editingBlockRef && (
-                <div className="block-editing-hint">
-                  ✎ Editing block — its steps are loaded in the list below. Change them, then{' '}
-                  <strong>Update block</strong> to push the fix to every linked test.
-                </div>
-              )}
-
-              <div className="block-section-label">
-                {editingBlockRef ? `Update block "${blockNameInput}"` : 'Save steps as a new block'}
-              </div>
-              <input
-                className="assert-value"
-                value={blockNameInput}
-                onChange={(e) => setBlockNameInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleSaveBlock()
-                  else if (e.key === 'Escape') closeBlocksPanel()
-                }}
-                placeholder="block name (e.g. Login)…"
-                spellCheck={false}
-              />
-              <div className="block-range">
-                <span>Steps</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={steps.length}
-                  value={blockFrom}
-                  onChange={(e) => setBlockFrom(Number(e.target.value))}
-                />
-                <span>to</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={steps.length}
-                  value={blockTo}
-                  onChange={(e) => setBlockTo(Number(e.target.value))}
-                />
-                <span className="block-hint">of {steps.length}</span>
-              </div>
-              <div className="assert-actions">
-                <button className="modal-btn" onClick={closeBlocksPanel}>
-                  Close
-                </button>
-                <button
-                  className="modal-btn primary"
-                  onClick={handleSaveBlock}
-                  disabled={!blockNameInput.trim() || steps.length === 0}
-                >
-                  {editingBlockRef ? 'Update block' : 'Save block'}
-                </button>
-              </div>
-              </div>
-            </div>
-          )}
+          <BlocksPanel
+            armOrDeleteBlock={armOrDeleteBlock}
+            blockFrom={blockFrom}
+            blockInsertAt={blockInsertAt}
+            blockNameInput={blockNameInput}
+            blockTo={blockTo}
+            blockUsage={blockUsage}
+            blocks={blocks}
+            blocksCollapsed={blocksCollapsed}
+            blocksPanelOpen={blocksPanelOpen}
+            closeBlocksPanel={closeBlocksPanel}
+            editingBlockRef={editingBlockRef}
+            handleEditBlock={handleEditBlock}
+            handleInsertBlock={handleInsertBlock}
+            handleInsertBlockLinked={handleInsertBlockLinked}
+            handleSaveBlock={handleSaveBlock}
+            pendingDeleteBlock={pendingDeleteBlock}
+            setBlockFrom={setBlockFrom}
+            setBlockNameInput={setBlockNameInput}
+            setBlockTo={setBlockTo}
+            setBlocksCollapsed={setBlocksCollapsed}
+            steps={steps}
+          />
           {/* === Day 11: save panel (reuses the assert-panel look) === */}
-          {savePanelOpen && (
-            <div className="assert-panel">
-              <div className="assert-target">
-                <span className="assert-title">Save test</span>
-              </div>
-              <input
-                className="assert-value"
-                value={saveNameInput}
-                onChange={(e) => setSaveNameInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleSaveTest()
-                  else if (e.key === 'Escape') setSavePanelOpen(false)
-                }}
-                placeholder="test name…"
-                autoFocus
-                spellCheck={false}
-              />
-              {/* Day 11.5: which section this test belongs to */}
-              <div className="assert-kinds">
-                {suites.map((suite) => (
-                  <button
-                    key={suite}
-                    type="button"
-                    className={`assert-kind${
-                      saveSuite === suite && !newSuiteInput.trim() ? ' chosen' : ''
-                    }`}
-                    onClick={() => {
-                      setSaveSuite(suite)
-                      setNewSuiteInput('')
-                    }}
-                  >
-                    {suite}
-                  </button>
-                ))}
-              </div>
-              <input
-                className="assert-value"
-                value={newSuiteInput}
-                onChange={(e) => setNewSuiteInput(e.target.value)}
-                placeholder="…or type a new section name"
-                spellCheck={false}
-              />
-              <code className="assert-selector">
-                {baseURL || deriveBaseURL(steps)
-                  ? `base URL: ${baseURL || deriveBaseURL(steps)}`
-                  : 'no base URL detected'}
-              </code>
-              {/* Day 17: session reuse — start this test already logged in */}
-              <div className="session-block">
-                <label className="session-label">Start logged in (session):</label>
-                <select
-                  className="session-select"
-                  value={storageState ?? ''}
-                  onChange={(e) => setStorageState(e.target.value || undefined)}
-                >
-                  <option value="">None — fresh login each run</option>
-                  {sessions.map((s) => {
-                    // F39.2: an expired login is the single most misleading thing
-                    // a test can carry, so it's named right in the picker.
-                    const age = sessionAge(s)
-                    return (
-                      <option key={s} value={s}>
-                        {s}
-                        {age ? ` — ⚠ ${age.text}` : ''}
-                      </option>
-                    )
-                  })}
-                </select>
-                {(() => {
-                  const age = sessionAge(storageState)
-                  if (!age) return null
-                  return (
-                    <p className="session-expiry-warn">
-                      ⚠ This session <strong>{age.text}</strong>.
-                      {age.expired
-                        ? ' A run in the app may still pass — the embedded browser is probably still logged in from ordinary use — but the saved file no longer works, so this test will fail headless, in a parallel run, and in CI. Log in again and save over it.'
-                        : ' Save it again before it lapses, or this test starts failing everywhere except in the app.'}
-                    </p>
-                  )
-                })()}
-                <div className="session-save-row">
-                  <input
-                    className="assert-value"
-                    value={sessionNameInput}
-                    onChange={(e) => setSessionNameInput(e.target.value)}
-                    placeholder="name to save the CURRENT logged-in browser as…"
-                    spellCheck={false}
-                  />
-                  <button
-                    type="button"
-                    className="modal-btn"
-                    onClick={handleSaveSession}
-                    disabled={!sessionNameInput.trim()}
-                    title="Capture the embedded browser's current cookies + storage as a reusable session"
-                  >
-                    Save session
-                  </button>
-                </div>
-              </div>
-              {/* F38: tags. Sits BELOW the section chips deliberately — the two
-                  look similar but mean different things, and the note spells the
-                  difference out so they don't get used interchangeably. */}
-              <div className="session-block">
-                <label className="session-label">Tags:</label>
-                <div className="tag-row">
-                  {tags.map((t) => (
-                    <span key={t} className="tag-chip editable">
-                      {t}
-                      <button
-                        type="button"
-                        className="tag-x"
-                        onClick={() => setTags(tags.filter((x) => x !== t))}
-                        title={`Remove ${t}`}
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                  <input
-                    className="tag-input"
-                    value={tagInput}
-                    placeholder="@smoke…"
-                    onChange={(e) => setTagInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      // Enter / comma commits; comma too because typing a list is
-                      // the natural thing to do in a box that shows several.
-                      if (e.key === 'Enter' || e.key === ',') {
-                        e.preventDefault()
-                        const added = parseTags(tagInput).filter((t) => !tags.includes(t))
-                        if (added.length) setTags([...tags, ...added])
-                        setTagInput('')
-                      } else if (e.key === 'Backspace' && !tagInput && tags.length) {
-                        setTags(tags.slice(0, -1))
-                      }
-                    }}
-                    onBlur={() => {
-                      const added = parseTags(tagInput).filter((t) => !tags.includes(t))
-                      if (added.length) setTags([...tags, ...added])
-                      setTagInput('')
-                    }}
-                    spellCheck={false}
-                  />
-                </div>
-                <div className="tag-suggest">
-                  {SUGGESTED_TAGS.filter((t) => !tags.includes(t)).map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      className="tag-add"
-                      onClick={() => setTags([...tags, normalizeTag(t)])}
-                    >
-                      + {t}
-                    </button>
-                  ))}
-                </div>
-                <p className="tag-note">
-                  A test lives in <strong>one section</strong> but can carry{' '}
-                  <strong>many tags</strong> — that&apos;s the difference. The section is where it
-                  files; tags are what it&apos;s <em>for</em>. Tag the fast, critical ones{' '}
-                  <code>@smoke</code> and you can run just those before a merge, then{' '}
-                  <code>npx playwright test --grep @smoke</code> does the same in CI.
-                </p>
-              </div>
-
-              {/* Day 17 viewport → F36 device emulation. Desktop and the two
-                  "size only" presets are Day-17 behaviour, unchanged. The real
-                  devices below them add userAgent + touch + pixel density. */}
-              <div className="session-block">
-                <label className="session-label">Device:</label>
-                <div className="assert-kinds">
-                  <button
-                    type="button"
-                    className={`assert-kind${!viewport && !deviceId ? ' chosen' : ''}`}
-                    onClick={() => applyDevice(undefined)}
-                  >
-                    Desktop
-                  </button>
-                  {DEVICES.filter((d) => d.group === 'Basic').map((d) => {
-                    // A pre-F36 test has no deviceId — match it on SIZE so its
-                    // saved viewport still lights up the right chip.
-                    const active =
-                      deviceId === d.id ||
-                      (!deviceId &&
-                        !!viewport &&
-                        viewport.width === d.viewport.width &&
-                        viewport.height === d.viewport.height)
-                    return (
-                      <button
-                        key={d.id}
-                        type="button"
-                        className={`assert-kind${active ? ' chosen' : ''}`}
-                        onClick={() => applyDevice(d.id)}
-                        title="Resizes the window only — the page still sees a desktop browser, with no touch and a desktop user-agent."
-                      >
-                        {/* "(size only)" used to be stripped here to keep the chip
-                            short. That hid the single most important fact about
-                            these presets: the page is NOT told it's a phone. The
-                            grey note below said so, but a label you read every
-                            time beats a paragraph you read once (Surbhi, Test 10). */}
-                        {d.label}
-                      </button>
-                    )
-                  })}
-                </div>
-                <div className="assert-kinds device-real">
-                  {DEVICES.filter((d) => d.group !== 'Basic').map((d) => (
-                    <button
-                      key={d.id}
-                      type="button"
-                      className={`assert-kind${deviceId === d.id ? ' chosen' : ''}`}
-                      onClick={() => applyDevice(d.id)}
-                      title={deviceSummary(d)}
-                    >
-                      {d.group === 'Tablet' ? '📲' : '📱'} {d.label}
-                    </button>
-                  ))}
-                </div>
-                <p className="device-note">
-                  {deviceId && deviceById(deviceId)?.userAgent ? (
-                    <>
-                      <strong>{deviceSummary(deviceById(deviceId))}</strong>
-                      <br />
-                      The page sees a real phone: mobile user-agent, touch events, and{' '}
-                      {deviceById(deviceId)?.deviceScaleFactor}× pixel density — so layouts that
-                      switch on UA or <code>pointer: coarse</code> switch here too.
-                      {deviceById(deviceId)?.realEngine === 'webkit' && (
-                        // Its own line, not a trailing clause. This is the most
-                        // important sentence in the box — the one place the app
-                        // admits the emulation isn't the real engine — and buried
-                        // at the end of a dense paragraph the eye slid past it.
-                        <span className="device-caveat">
-                          ⚠ In-app this is Chromium wearing an iOS costume — the embedded browser is
-                          Chromium-only. The export and 🧭 cross-browser run it on real WebKit.
-                        </span>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      &ldquo;Size only&rdquo; resizes the window and nothing else — the page still
-                      sees a desktop browser with no touch. Pick a real device below to test the
-                      mobile path properly.
-                    </>
-                  )}
-                </p>
-              </div>
-              <div className="assert-actions">
-                <button className="modal-btn" onClick={() => setSavePanelOpen(false)}>
-                  Cancel
-                </button>
-                <button className="modal-btn primary" onClick={handleSaveTest}>
-                  Save
-                </button>
-              </div>
-            </div>
-          )}
+          <SavePanel
+            applyDevice={applyDevice}
+            baseURL={baseURL}
+            deriveBaseURL={deriveBaseURL}
+            deviceId={deviceId}
+            handleSaveSession={handleSaveSession}
+            handleSaveTest={handleSaveTest}
+            newSuiteInput={newSuiteInput}
+            saveNameInput={saveNameInput}
+            savePanelOpen={savePanelOpen}
+            saveSuite={saveSuite}
+            sessionAge={sessionAge}
+            sessionNameInput={sessionNameInput}
+            sessions={sessions}
+            setNewSuiteInput={setNewSuiteInput}
+            setSaveNameInput={setSaveNameInput}
+            setSavePanelOpen={setSavePanelOpen}
+            setSaveSuite={setSaveSuite}
+            setSessionNameInput={setSessionNameInput}
+            setStorageState={setStorageState}
+            setTagInput={setTagInput}
+            setTags={setTags}
+            steps={steps}
+            storageState={storageState}
+            suites={suites}
+            tagInput={tagInput}
+            tags={tags}
+            viewport={viewport}
+          />
           {/* === Day 20: data-driven table — run the flow once per row === */}
           {dataPanelOpen && (
             <div className="assert-panel data-panel">
@@ -8586,106 +7992,19 @@ function App(): React.JSX.Element {
           )}
 
           {/* === Assertion chooser — opens when an element was picked === */}
-          {pickedElement && (
-            <div className="assert-panel" ref={checkPanelRef}>
-              <div className="assert-target">
-                <span className="assert-title">Add check:</span>
-                <span className="assert-label">{pickedElement.label}</span>
-              </div>
-              <code className="assert-selector">{pickedElement.selector}</code>
-              {/* Day 12: warn NOW about an element replay will refuse later */}
-              {pickedElement.unreliable && (
-                <div className="pick-warning">
-                  ⚠ This element has no stable hooks (no id / role / text) — a check on it cannot
-                  replay reliably. Pick a more specific element instead (its label, or a container
-                  with an id).
-                </div>
-              )}
-              {/* This element is found BY its text, so a text check re-asserts what
-                  the locator already matched — it can only fail when the element is
-                  missing. Say so while the kind can still be changed. */}
-              {!pickedElement.unreliable &&
-                textCheckIsCircular(pickedElement.candidates, assertKind) && (
-                  <div className="pick-warning">
-                    ⚠ This element is found <em>by</em> its text, so a text check can only fail when
-                    the element is missing — it never really checks the wording.{' '}
-                    <button
-                      type="button"
-                      className="link-btn"
-                      onClick={() => handleChooseKind('visible')}
-                    >
-                      Use “Visible”
-                    </button>{' '}
-                    to say that honestly, or pick an element with an id / role.
-                  </div>
-                )}
-              <div className="assert-kinds">
-                {ASSERT_KINDS.filter(
-                  (kind) =>
-                    (kind !== 'checked' && kind !== 'unchecked') ||
-                    pickedElement.checked !== undefined
-                ).map((kind) => (
-                  <button
-                    key={kind}
-                    type="button"
-                    className={`assert-kind${assertKind === kind ? ' chosen' : ''}`}
-                    onClick={() => handleChooseKind(kind)}
-                  >
-                    {ASSERT_LABELS[kind]}
-                  </button>
-                ))}
-              </div>
-              {assertKind === 'attribute' && (
-                <input
-                  className="assert-value"
-                  value={assertAttr}
-                  onChange={(e) => setAssertAttr(e.target.value)}
-                  placeholder="attribute name (e.g. href, src, alt)…"
-                  spellCheck={false}
-                />
-              )}
-              {assertNeedsValue(assertKind) && (
-                <input
-                  className="assert-value"
-                  value={assertValue}
-                  onChange={(e) => setAssertValue(e.target.value)}
-                  placeholder={
-                    assertKind === 'count'
-                      ? 'expected number of matches…'
-                      : assertKind === 'class'
-                        ? 'class name (one token, e.g. error)…'
-                        : assertKind === 'attribute'
-                          ? 'expected attribute value…'
-                          : 'expected value…'
-                  }
-                  spellCheck={false}
-                />
-              )}
-              <div className="assert-actions">
-                <button
-                  className="modal-btn"
-                  onClick={() => {
-                    setPickedElement(null)
-                    setInsertAt(null)
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="modal-btn primary"
-                  onClick={handleAddAssert}
-                  disabled={pickedElement.unreliable}
-                  title={
-                    pickedElement.unreliable
-                      ? 'No reliable selector — this check would always fail on replay'
-                      : undefined
-                  }
-                >
-                  Add check
-                </button>
-              </div>
-            </div>
-          )}
+          <AssertPanel
+            assertAttr={assertAttr}
+            assertKind={assertKind}
+            assertValue={assertValue}
+            checkPanelRef={checkPanelRef}
+            handleAddAssert={handleAddAssert}
+            handleChooseKind={handleChooseKind}
+            pickedElement={pickedElement}
+            setAssertAttr={setAssertAttr}
+            setAssertValue={setAssertValue}
+            setInsertAt={setInsertAt}
+            setPickedElement={setPickedElement}
+          />
           {steps.length === 0 ? (
             <>
               <p className="steps-empty">
@@ -9741,299 +9060,30 @@ function App(): React.JSX.Element {
            current page, grouped by rule, each expandable to the offending
            elements + how to fix. Safe over the native pane: setOverlay hides
            it while this is open. === */}
-      {a11yPanelOpen && (
-        <div
-          className="modal-backdrop"
-          onClick={() => {
-            if (!a11yScanning) setA11yScan(null)
-          }}
-        >
-          <div className="a11y-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">
-                ♿ Accessibility
-                {a11yScan && !a11yScan.error && a11yScan.violations.length > 0 && (
-                  <span className="a11y-title-count">
-                    {a11yScan.violations.length} rule
-                    {a11yScan.violations.length === 1 ? '' : 's'} · {a11yScan.nodeCount} element
-                    {a11yScan.nodeCount === 1 ? '' : 's'}
-                  </span>
-                )}
-              </span>
-              <button
-                className="modal-close"
-                onClick={() => setA11yScan(null)}
-                disabled={a11yScanning}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-
-            {a11yScanning ? (
-              <div className="a11y-body a11y-loading">
-                <span className="a11y-spinner" />
-                <p>Injecting axe-core and checking this page for WCAG A/AA violations…</p>
-              </div>
-            ) : a11yScan?.error ? (
-              <div className="a11y-body">
-                <p className="a11y-error">{a11yScan.error}</p>
-              </div>
-            ) : a11yScan ? (
-              <>
-                <div className="a11y-summary">
-                  <span className="a11y-summary-url" title={a11yScan.url}>
-                    {a11yScan.title || a11yScan.url || 'this page'}
-                  </span>
-                  <span className="a11y-summary-stats">
-                    {a11yScan.passCount} checks passed
-                    {a11yScan.incompleteCount > 0 && ` · ${a11yScan.incompleteCount} need review`}
-                  </span>
-                </div>
-                <div className="a11y-body">
-                  {a11yScan.violations.length === 0 ? (
-                    <p className="a11y-clean">🎉 No WCAG A/AA violations found on this page.</p>
-                  ) : (
-                    [...a11yScan.violations]
-                      .sort((a, b) => a11yImpactRank(a.impact) - a11yImpactRank(b.impact))
-                      .map((v) => (
-                        <details className="a11y-rule" key={v.id}>
-                          <summary>
-                            <span className={`a11y-impact ${v.impact}`}>{v.impact}</span>
-                            <span className="a11y-help">{v.help}</span>
-                            <span className="a11y-node-count">
-                              {v.nodes.length}
-                              {v.nodes.length === 1 ? ' element' : ' elements'}
-                            </span>
-                          </summary>
-                          <div className="a11y-rule-body">
-                            <p className="a11y-desc">{v.description}</p>
-                            {v.nodes.map((n, i) => (
-                              <div className="a11y-node" key={i}>
-                                <code className="a11y-target">{n.target}</code>
-                                <pre className="a11y-html">{n.html}</pre>
-                                {n.summary && <p className="a11y-fix">{n.summary}</p>}
-                              </div>
-                            ))}
-                            <button
-                              className="a11y-learn"
-                              onClick={() => window.api.a11y.openHelp(v.helpUrl)}
-                            >
-                              Learn how to fix ↗
-                            </button>
-                          </div>
-                        </details>
-                      ))
-                  )}
-                  {/* F13: sticky note — what the severities mean + what to edit. */}
-                  <div className="help-note">
-                    <span className="help-note-title">
-                      📌 What the severities mean &amp; what to edit
-                    </span>
-                    <ul>
-                      <li>
-                        <strong>critical</strong> blocks a disabled user entirely ·{' '}
-                        <strong>serious</strong> major barrier · <strong>moderate</strong>{' '}
-                        noticeable · <strong>minor</strong> cosmetic.
-                      </li>
-                      <li>
-                        Each is <strong>axe-core&apos;s</strong> own rating of how much the issue
-                        blocks someone using a screen reader / keyboard.
-                      </li>
-                      <li>
-                        <strong>To edit the gate</strong> (dropdown below, or the ✎ on the step):
-                        it&apos;s the <em>least severe</em> issue that still fails — e.g.{' '}
-                        <em>&ldquo;serious + critical&rdquo;</em> ignores moderate/minor,{' '}
-                        <em>&ldquo;any violation&rdquo;</em> fails on everything.
-                      </li>
-                    </ul>
-                  </div>
-                </div>
-              </>
-            ) : null}
-
-            <div className="modal-footer">
-              {a11yScan && !a11yScan.error && (
-                <span className="a11y-add">
-                  <label htmlFor="a11y-level" className="a11y-add-label">
-                    Fail replay on
-                  </label>
-                  <select
-                    id="a11y-level"
-                    className="a11y-level-select"
-                    value={a11yAddLevel}
-                    onChange={(e) => setA11yAddLevel(e.target.value)}
-                    title="Which severities should fail a replay when added as a test step"
-                  >
-                    <option value="critical">critical only</option>
-                    <option value="serious">serious + critical</option>
-                    <option value="moderate">moderate and up</option>
-                    <option value="minor">any violation</option>
-                  </select>
-                  <button
-                    className="modal-btn"
-                    onClick={handleAddA11yStep}
-                    title="Add this as a test step — replay fails if the page regresses on accessibility"
-                  >
-                    ➕ Add as test step
-                  </button>
-                </span>
-              )}
-              <button
-                className="modal-btn"
-                onClick={() => setA11yScan(null)}
-                disabled={a11yScanning}
-              >
-                Close
-              </button>
-              <button
-                className="modal-btn primary"
-                onClick={handleA11yScan}
-                disabled={a11yScanning}
-              >
-                ↻ Re-scan
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <A11yPanel
+        a11yAddLevel={a11yAddLevel}
+        a11yPanelOpen={a11yPanelOpen}
+        a11yScan={a11yScan}
+        a11yScanning={a11yScanning}
+        handleA11yScan={handleA11yScan}
+        handleAddA11yStep={handleAddA11yStep}
+        setA11yAddLevel={setA11yAddLevel}
+        setA11yScan={setA11yScan}
+      />
 
       {/* === F14: performance panel — Core Web Vitals for the current page,
            each graded good / needs-improvement / poor, with an option to bank
            it as a "Performance check" gate step. === */}
-      {perfPanelOpen && (
-        <div
-          className="modal-backdrop"
-          onClick={() => {
-            if (!perfMeasuring) setPerfResult(null)
-          }}
-        >
-          <div className="a11y-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <span className="modal-title">⚡ Performance — Core Web Vitals</span>
-              <button
-                className="modal-close"
-                onClick={() => setPerfResult(null)}
-                disabled={perfMeasuring}
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-
-            {perfMeasuring ? (
-              <div className="a11y-body a11y-loading">
-                <span className="a11y-spinner" />
-                <p>Measuring load speed and layout stability on this page…</p>
-              </div>
-            ) : perfResult?.error ? (
-              <div className="a11y-body">
-                <p className="a11y-error">{perfResult.error}</p>
-              </div>
-            ) : perfResult ? (
-              <>
-                <div className="a11y-summary">
-                  <span className="a11y-summary-url" title={perfResult.url}>
-                    {perfResult.title || perfResult.url || 'this page'}
-                  </span>
-                  <span className="a11y-summary-stats">measured from this page load</span>
-                </div>
-                <div className="a11y-body">
-                  <div className="perf-grid">
-                    {perfResult.metrics.map((m) => (
-                      <div className={`perf-metric${m.core ? ' core' : ''}`} key={m.key}>
-                        <span className="perf-metric-main">
-                          <span className="perf-metric-label">
-                            {m.label}
-                            {m.core && <span className="perf-core-tag">core</span>}
-                          </span>
-                          {PERF_METRIC_HELP[m.key] && (
-                            <span className="perf-metric-desc">{PERF_METRIC_HELP[m.key]}</span>
-                          )}
-                        </span>
-                        <span className="perf-metric-value">
-                          {m.value == null ? '—' : `${m.value.toLocaleString()}${m.unit}`}
-                        </span>
-                        {m.rating ? (
-                          <span className={`perf-rating ${m.rating}`}>
-                            {m.rating === 'needs-improvement' ? 'needs work' : m.rating}
-                          </span>
-                        ) : (
-                          <span className="perf-rating info">info</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                  {/* F14: sticky note — what the grades mean + what to edit. */}
-                  <div className="help-note">
-                    <span className="help-note-title">📌 How to read this &amp; what to edit</span>
-                    <ul>
-                      <li>
-                        <strong>CORE</strong> (LCP, CLS) = Google&apos;s Core Web Vitals — these are
-                        the <strong>only</strong> two that pass/fail the test. The rest are context.
-                      </li>
-                      <li>
-                        <strong>Grades</strong> use Google&apos;s official limits — LCP: good ≤2.5s,
-                        poor &gt;4s · CLS: good ≤0.1, poor &gt;0.25.
-                      </li>
-                      <li>
-                        <strong>To edit the gate</strong> (dropdown below, or the ✎ on the step):{' '}
-                        <em>&ldquo;a vital is poor&rdquo;</em> = lenient ·{' '}
-                        <em>&ldquo;a vital is not good&rdquo;</em> = strict.
-                      </li>
-                      <li>
-                        <strong>INFO</strong> = shown for context, no official pass/fail line, so
-                        not graded.
-                      </li>
-                    </ul>
-                  </div>
-                </div>
-              </>
-            ) : null}
-
-            <div className="modal-footer">
-              {perfResult && !perfResult.error && (
-                <span className="a11y-add">
-                  <label htmlFor="perf-level" className="a11y-add-label">
-                    Fail replay when
-                  </label>
-                  <select
-                    id="perf-level"
-                    className="a11y-level-select"
-                    value={perfAddLevel}
-                    onChange={(e) => setPerfAddLevel(e.target.value)}
-                    title="How strict the performance gate should be when added as a test step"
-                  >
-                    <option value="needs-improvement">a vital is poor</option>
-                    <option value="good">a vital is not good</option>
-                  </select>
-                  <button
-                    className="modal-btn"
-                    onClick={handleAddPerfStep}
-                    title="Add this as a test step — replay fails if a Core Web Vital regresses"
-                  >
-                    ➕ Add as test step
-                  </button>
-                </span>
-              )}
-              <button
-                className="modal-btn"
-                onClick={() => setPerfResult(null)}
-                disabled={perfMeasuring}
-              >
-                Close
-              </button>
-              <button
-                className="modal-btn primary"
-                onClick={handleMeasurePerf}
-                disabled={perfMeasuring}
-              >
-                ↻ Re-measure
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <PerfPanel
+        handleAddPerfStep={handleAddPerfStep}
+        handleMeasurePerf={handleMeasurePerf}
+        perfAddLevel={perfAddLevel}
+        perfMeasuring={perfMeasuring}
+        perfPanelOpen={perfPanelOpen}
+        perfResult={perfResult}
+        setPerfAddLevel={setPerfAddLevel}
+        setPerfResult={setPerfResult}
+      />
 
       {/* === Day 18: run-trace viewer — filmstrip of every step on the left,
            the selected step's screenshot + console/network on the right. === */}
