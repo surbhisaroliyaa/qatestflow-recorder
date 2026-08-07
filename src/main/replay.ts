@@ -415,7 +415,14 @@ export function buildActionScript(step: ReplayStep): string {
       const want = ${want};
       const countAll = (c) => {
         try {
-          if (c.css) return document.querySelectorAll(c.css).length;
+          // deepQueryAll, NOT document.querySelectorAll: this one call was missed
+          // when shadow-piercing went in (Day 15.5). Everything else in the engine
+          // — findByCandidate, byRoleAll, byTextAll — walks into open shadow roots,
+          // so on a web-component page a group check reported 0 matches while a
+          // click on one of those very elements worked. It failed as "your app is
+          // missing elements" when the app was fine. It was inconsistent with
+          // ITSELF too: the role and text branches below already pierce.
+          if (c.css) return deepQueryAll(c.css, document).length;
           if (c.kind === 'role' && c.role) return byRoleAll(c.role, c.name).length;
           if (c.kind === 'text' && c.text) return byTextAll(c.text).length;
         } catch (e) { /* malformed selector — count as zero */ }
