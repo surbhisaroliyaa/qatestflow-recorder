@@ -1,5 +1,5 @@
 import { type Page, type Locator, type FrameLocator } from '@playwright/test'
-import { ShopTab1Page } from './ShopTab1Page'
+import { ShopPopup1Page } from './ShopPopup1Page'
 
 export class ShopPage {
   readonly page: Page
@@ -20,12 +20,12 @@ export class ShopPage {
     await this.page.goto("/")
   }
 
-  async openHelp(): Promise<ShopTab1Page> {
+  async openHelp(): Promise<ShopPopup1Page> {
     const [popup] = await Promise.all([
       this.page.context().waitForEvent('page'),
       this.openHelpButton.click()
     ])
-    return new ShopTab1Page(popup)
+    return new ShopPopup1Page(popup)
   }
 
   async pay(): Promise<void> {

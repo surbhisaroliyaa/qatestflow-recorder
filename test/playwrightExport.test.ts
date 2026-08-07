@@ -515,16 +515,16 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
       // a generated POM that piles them into one file is something a team has to
       // tidy up before adopting.
       const { pages } = shop()
-      expect(pages.map((p) => p.fileName)).toEqual(['ShopPage.ts', 'ShopTab1Page.ts'])
+      expect(pages.map((p) => p.fileName)).toEqual(['ShopPage.ts', 'ShopPopup1Page.ts'])
       expect(pages[0].source).toContain('export class ShopPage {')
-      expect(pages[1].source).toContain('export class ShopTab1Page {')
+      expect(pages[1].source).toContain('export class ShopPopup1Page {')
       // Each file declares exactly one class.
       for (const p of pages) expect(p.source.match(/export class /g)).toHaveLength(1)
     })
 
     it("tab 0's file imports the class its method returns", () => {
       const { pages } = shop()
-      expect(pages[0].source).toContain("import { ShopTab1Page } from './ShopTab1Page'")
+      expect(pages[0].source).toContain("import { ShopPopup1Page } from './ShopPopup1Page'")
       // …and the popup's own file imports nothing of the sort — it returns nothing.
       expect(pages[1].source).not.toContain('ShopPage')
     })
@@ -545,9 +545,9 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
 
     it('is RETURNED by the method that opens it — the standard popup pattern', () => {
       const { page, spec } = shop()
-      expect(page).toContain('async openHelp(): Promise<ShopTab1Page> {')
-      expect(page).toContain('return new ShopTab1Page(popup)')
-      expect(spec).toContain('const tab1 = await app.openHelp()')
+      expect(page).toContain('async openHelp(): Promise<ShopPopup1Page> {')
+      expect(page).toContain('return new ShopPopup1Page(popup)')
+      expect(spec).toContain('const popup1 = await app.openHelp()')
     })
 
     it('arms the page wait BEFORE the click, inside the method', () => {
@@ -562,9 +562,9 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
 
     it('routes each step to the page object for the tab it happened in', () => {
       const { spec, pages } = shop()
-      expect(spec, 'the check ran on tab 1').toContain('await expect(tab1.helpCentre)')
-      expect(spec, 'so did the click').toContain('await tab1.contactUs()')
-      expect(spec, 'and the close').toContain('await tab1.page.close()')
+      expect(spec, 'the check ran on tab 1').toContain('await expect(popup1.helpCentre)')
+      expect(spec, 'so did the click').toContain('await popup1.contactUs()')
+      expect(spec, 'and the close').toContain('await popup1.page.close()')
       expect(spec, 'the framed steps went back to tab 0').toContain('await app.pay()')
       // Tab 1's locators belong to tab 1's class, not tab 0's.
       expect(pages[1].source).toContain('this.helpCentre =')
@@ -580,7 +580,7 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
       // Tab 1 is built inside the page file by openHelp(), so importing it into
       // the spec would be an unused import — a lint error in the user's repo.
       expect(shop().spec).toContain("import { ShopPage } from './pages/ShopPage'")
-      expect(shop().spec).not.toContain('ShopTab1Page')
+      expect(shop().spec).not.toContain('ShopPopup1Page')
     })
 
     it('a tab nothing opened is still declared, with a warning', () => {
@@ -588,8 +588,8 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
       // this the spec references a name that was never declared.
       const orphan = [s({ type: 'click', selector: "getByTestId('x')", label: 'X', windowId: 1 })]
       const { spec } = generatePageObjectTest(orphan, { name: 'T' })!
-      expect(spec).toContain('no recorded step opened tab 1')
-      expect(spec).toContain('new TTab1Page(page.context().pages()[1])')
+      expect(spec).toContain('no recorded step opened browser tab 1')
+      expect(spec).toContain('new TPopup1Page(page.context().pages()[1])')
       expect(syntaxErrors(spec)).toEqual([])
     })
   })
@@ -654,7 +654,7 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
   it('golden — page object with a tab and a frame', async () => {
     await expect(shop().spec).toMatchFileSnapshot('./__snapshots__/shop.pom.spec.ts')
     await expect(shop().pages[0].source).toMatchFileSnapshot('./__snapshots__/ShopPage.ts')
-    await expect(shop().pages[1].source).toMatchFileSnapshot('./__snapshots__/ShopTab1Page.ts')
+    await expect(shop().pages[1].source).toMatchFileSnapshot('./__snapshots__/ShopPopup1Page.ts')
   })
 })
 

@@ -2180,8 +2180,12 @@ export function generatePageObjectTest(
     if (existing) return existing
     const ctx: TabCtx = {
       windowId,
-      className: windowId === 0 ? className : `${baseName}Tab${windowId}Page`,
-      specVar: windowId === 0 ? 'app' : `tab${windowId}`,
+      // "Popup", not "Tab": it is what Playwright calls a page opened by another
+      // page (context.waitForEvent('page') / page.on('popup')), it matches the
+      // `const [popup]` the opener method already emits, and it doesn't collide
+      // with the other meaning of "tab" — the export dialog's one-per-FILE tabs.
+      className: windowId === 0 ? className : `${baseName}Popup${windowId}Page`,
+      specVar: windowId === 0 ? 'app' : `popup${windowId}`,
       used: new Set<string>(['page', 'goto', 'constructor']),
       frameDefs: [],
       frameNameByKey: new Map(),
@@ -2312,7 +2316,7 @@ export function generatePageObjectTest(
       ctx.declared = true
       ctx.specConstructs = true
       specBody.push(
-        `${ind()}// ⚠ no recorded step opened tab ${windowId} — taking it from the context by`,
+        `${ind()}// ⚠ no recorded step opened browser tab ${windowId} — taking it from the context by`,
         `${ind()}// position. Re-record the click that opens it to get the proper wait.`,
         `${ind()}const ${ctx.specVar} = new ${ctx.className}(page.context().pages()[${windowId}])`
       )

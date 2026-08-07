@@ -1,6 +1,6 @@
 import { type Page, type Locator } from '@playwright/test'
 
-export class ShopTab1Page {
+export class ShopPopup1Page {
   readonly page: Page
   readonly helpCentre: Locator
   readonly contactUsButton: Locator
