@@ -1,26 +1,37 @@
 // =====================================================================
-// THE OBSERVER (page-world, injectable)
+// THE OBSERVER — the code that watches a page while you record
 // =====================================================================
-// This is the watcher that records clicks / typing on a page. Day 15
-// rewrite: instead of shipping it as a PRELOAD (which Electron injects into
-// sub-frames unreliably — iframes would randomly go uncaptured), main INJECTS
-// this function into EVERY frame itself via WebFrameMain.executeJavaScript.
-// That is reliable on any frame, any origin.
+// QF-002, completed 2026-09-18. This used to be injected into each frame's
+// PAGE world and posted its events up to the top window with postMessage,
+// guarded by a per-recording nonce. A page watching a live recording could
+// read that nonce off the very messages it guarded and imitate the recorder.
 //
-// Because it now runs in the page's own world (no Node, no ipcRenderer), it
-// talks to the app a different way: it posts its events UP to the top window
-// via window.top.postMessage, where a tiny preload relay (src/preload/
-// recorder.ts) forwards them to main over IPC. Arming (record/pick on-off) and
-// this frame's identity are handed in by main as globals set right before this
-// runs (see injectObserver in src/main/index.ts):
-//   window.__qaflowFrame       — this frame's FrameRef (or null for the top page)
-//   window.__qaflowInitActive   — was recording already on when injected?
-//   window.__qaflowInitPicking  — was pick mode already on?
+// Now it runs in each frame's ISOLATED world: the recorder preload
+// (src/preload/recorder.ts) loads into every frame (nodeIntegrationInSubFrames)
+// and calls createObserver() there. The page cannot see this code, its state,
+// or its transport — `send` is ipcRenderer, which only exists in this world —
+// and main learns WHICH frame spoke from Electron (event.senderFrame), not
+// from anything the page could write. No nonce is needed any more.
 //
-// The function MUST stay fully self-contained (no module imports at runtime):
-// it is stringified with .toString() and injected, so it can only reference
-// what it defines inside itself plus the page globals above. Types are import-
-// only and erased at compile time.
+// Two things still have to live in the PAGE world, and are kept tiny:
+//   · dialogShimProgram() — overriding window.alert/confirm/prompt only works
+//     in the world the page calls them from. It tells this observer about a
+//     dialog through a DOM event ("qaflow-dialog"). A page can dispatch that
+//     event too — but a page decides which dialogs it shows anyway, so all it
+//     could do is describe a dialog it could equally have opened.
+//   · nothing else. (The old attachShadow patch is replaced by arming shadow
+//     roots from `focusin`, which the isolated world can see.)
+//
+// Script-written iframes (about:blank + document.write — rich-text editors,
+// many widgets) get no preload of their own, so the frame that CONTAINS one
+// adopts it: createObserver() is called again with the child's window and
+// document, and reports the child's frame path in `frame`. See adoptChildren.
+//
+// SELF-CONTAINED ON PURPOSE: createObserver references nothing outside
+// itself, so the DOM tests can stringify it and run it in a plain page with a
+// fake `send`. Inside, `window`, `document` and the DOM classes are rebound to
+// the frame being observed — the body below reads like ordinary page code,
+// but works on an adopted child's realm too.
 //
 // IMPORTANT: the selector/dup logic here MIRRORS the replay resolver in
 // src/main/replay.ts and the selector engine in src/main/selector.ts — change
@@ -28,140 +39,105 @@
 
 import type { DupInfo, ElementFacts } from './selector'
 
-export function observerProgram(): void {
-  // Guard: main may inject more than once (several load events fire per page).
-  // Listeners must be registered exactly once per document.
+/** A frame path element — the same shape main uses for FrameRef. */
+export interface ObserverFrameStep {
+  url: string
+  name: string
+}
+
+export interface ObserverOptions {
+  /** How events reach main. In the app: ipcRenderer.send. In tests: a fake. */
+  send: (channel: string, payload: Record<string, unknown>) => void
+  /** This document's frame path RELATIVE to the preload that owns it: null for
+   *  the preload's own frame, or e.g. [{url:'about:blank', name:'editor'}] for
+   *  an adopted script-written child. Main prepends the sender frame's path. */
+  frame?: ObserverFrameStep[] | null
+  recording?: boolean
+  picking?: boolean
+}
+
+export interface ObserverHandle {
+  setActive: (v: boolean) => void
+  setPicking: (v: boolean) => void
+  findByLabel: (
+    label: string,
+    role?: string,
+    text?: string,
+    rect?: { x: number; y: number; w: number; h: number } | null,
+    action?: string
+  ) => unknown
+}
+
+/**
+ * The PAGE-world half: native dialog capture. Injected by main into every
+ * frame with executeJavaScript, and self-contained for the same reason.
+ *
+ * window.alert/confirm/prompt normally pop a BLOCKING native dialog that no
+ * recorder or replay can get past:
+ *  - RECORDING  → the real dialog shows so you answer it yourself; your answer
+ *    is reported to the observer as a `dialog` step;
+ *  - REPLAY     → answer with what main pre-armed for the next dialog
+ *    (__qaflowNextDialog), or a safe default so an unattended run never blocks;
+ *  - otherwise (just browsing) → the real native dialog.
+ * "Recording" is read from an attribute the observer sets on <html>.
+ */
+export function dialogShimProgram(): void {
   const g = window as unknown as {
-    __qaflowInstalled?: boolean
-    __qaflowFrame?: unknown
-    __qaflowInitActive?: boolean
-    __qaflowInitPicking?: boolean
-    // QF-002: this recording session's relay nonce. Read into a closure local
-    // and deleted immediately — see postToHost.
-    __qaflowNonce?: string
-    __qaflow?: {
-      setActive: (v: boolean) => void
-      setPicking: (v: boolean) => void
-      setNonce: (v: string) => void
-      findByLabel: (
-        label: string,
-        role?: string,
-        text?: string,
-        rect?: { x: number; y: number; w: number; h: number } | null,
-        action?: string
-      ) => unknown
-    }
-  }
-  // QF-002: read the nonce main baked in for this run and REMOVE it from the
-  // page's global object straight away, so it isn't sitting there for a page
-  // script to read. This runs inside main's single executeJavaScript call, so
-  // no page code can interleave between the write and this removal.
-  const takeNonce = (): string => {
-    const n = typeof g.__qaflowNonce === 'string' ? g.__qaflowNonce : ''
-    try {
-      delete g.__qaflowNonce
-    } catch {
-      g.__qaflowNonce = undefined
-    }
-    return n
-  }
-
-  if (g.__qaflowInstalled) {
-    // Re-injected by main to push a fresh record/pick state. Main re-injects
-    // EVERY frame on a record/pick toggle, because that path reliably reaches
-    // deeply-nested frames that a one-off setActive call can silently miss.
-    // The listeners are already installed; just re-assert the armed state
-    // (baked into the init globals for this run) and bail.
-    if (g.__qaflow) {
-      g.__qaflow.setActive(!!g.__qaflowInitActive)
-      g.__qaflow.setPicking(!!g.__qaflowInitPicking)
-      // QF-002: main re-rolls the relay nonce for every recording session, and
-      // an already-installed observer would otherwise keep posting the previous
-      // one — which the relay now drops, silently recording nothing. Re-arming
-      // it here is what keeps the second recording in a session working.
-      g.__qaflow.setNonce(takeNonce())
-    }
-    return
-  }
-  g.__qaflowInstalled = true
-
-  // Identity + initial state handed in by main just before this ran.
-  const FRAME = g.__qaflowFrame ?? null
-  let recording = !!g.__qaflowInitActive
-  let picking = !!g.__qaflowInitPicking
-
-  // Transport: bubble every event up to the TOP window. The top frame's
-  // preload relay forwards it to main. Posting cross-origin to the top is
-  // allowed (we only post, never read), so this works for nested/foreign frames.
-  // QF-002: every message carries the session NONCE main baked in for this run.
-  // The relay drops anything without the current one, so a page cannot post
-  // recorder traffic cold — it would first have to observe a real event from a
-  // recording already in progress. Held in a closure local, never on a global.
-  let nonce = takeNonce()
-
-  const postToHost = (channel: string, payload: Record<string, unknown>): void => {
-    try {
-      const top = window.top
-      if (top) top.postMessage({ __qaflow: true, nonce, channel, payload }, '*')
-    } catch {
-      // detached frame or blocked — nothing we can do
-    }
-  }
-
-  // === Day 16: native dialog capture (alert / confirm / prompt) ========
-  // window.alert/confirm/prompt normally pop a BLOCKING native OS dialog that no
-  // recorder or replay can get past. Intercept them in the page:
-  //  - RECORDING  → record a `dialog` step (kind + message) and auto-respond so
-  //    the take never stalls (confirm→accept, prompt→its default);
-  //  - REPLAY     → answer with what main pre-armed for the next dialog
-  //    (__qaflowNextDialog), or a safe default while replaying so nothing blocks;
-  //  - otherwise (just browsing) → fall through to the real native dialog.
-  const gg = g as typeof g & {
+    __qaflowShim?: boolean
     __qaflowReplaying?: boolean
     __qaflowNextDialog?: { kind: string; accept?: boolean; text?: string } | null
+  }
+  if (g.__qaflowShim) return
+  g.__qaflowShim = true
+
+  const recording = (): boolean =>
+    document.documentElement?.getAttribute('data-qaflow-recording') === '1'
+  const report = (payload: Record<string, unknown>): void => {
+    try {
+      document.dispatchEvent(new CustomEvent('qaflow-dialog', { detail: JSON.stringify(payload) }))
+    } catch {
+      // no document to talk through — nothing to record
+    }
   }
   const origAlert = window.alert
   const origConfirm = window.confirm
   const origPrompt = window.prompt
   const consumePending = (kind: string): { accept?: boolean; text?: string } | null => {
-    const p = gg.__qaflowNextDialog
+    const p = g.__qaflowNextDialog
     if (p && p.kind === kind) {
-      gg.__qaflowNextDialog = null
+      g.__qaflowNextDialog = null
       return p
     }
     return null
   }
-  // While RECORDING we show the REAL dialog so you answer it yourself (type the
-  // prompt, pick Ok/Cancel) and record your actual answer. The "never block"
-  // rule only matters on REPLAY (unattended), where we auto-answer instead.
   window.alert = function (message?: unknown): void {
     const msg = String(message == null ? '' : message)
-    if (recording) {
+    if (recording()) {
       origAlert.call(window, msg)
-      postToHost('recorder:dialog', { kind: 'alert', message: msg })
+      report({ kind: 'alert', message: msg })
       return
     }
-    if (consumePending('alert') || gg.__qaflowReplaying) return
+    if (consumePending('alert') || g.__qaflowReplaying) return
     origAlert.call(window, msg)
   }
   window.confirm = function (message?: unknown): boolean {
     const msg = String(message == null ? '' : message)
-    if (recording) {
+    if (recording()) {
       const ok = origConfirm.call(window, msg)
-      postToHost('recorder:dialog', { kind: 'confirm', message: msg, accept: ok })
+      report({ kind: 'confirm', message: msg, accept: ok })
       return ok
     }
     const pend = consumePending('confirm')
     if (pend) return pend.accept !== false
-    if (gg.__qaflowReplaying) return true
+    if (g.__qaflowReplaying) return true
     return origConfirm.call(window, msg)
   }
   // Day 16(+): Electron's embedded view has NO native prompt() box, so a page's
   // prompt() shows nothing to type into. While RECORDING we draw our OWN in-page
-  // prompt so you type the answer on screen and it's recorded live — no editing
-  // the step afterward. Caveat: prompt() must return its value SYNCHRONOUSLY, but
-  // reading what you type is async — so the PAGE proceeds with the default; the
-  // value you type is what gets recorded and replayed.
+  // prompt so you type the answer on screen and it's recorded live. Caveat:
+  // prompt() must return SYNCHRONOUSLY, but reading what you type is async — so
+  // the PAGE proceeds with the default; the value you type is what gets recorded
+  // and replayed.
   let promptModalOpen = false
   const showPromptModal = (message: string, initial: string): void => {
     if (promptModalOpen) return
@@ -217,12 +193,7 @@ export function observerProgram(): void {
       const recorded = accepted ? input.value : initial
       promptModalOpen = false
       overlay.remove()
-      postToHost('recorder:dialog', {
-        kind: 'prompt',
-        message,
-        value: recorded,
-        accept: accepted
-      })
+      report({ kind: 'prompt', message, value: recorded, accept: accepted })
     }
     okBtn.addEventListener('click', () => finish(true))
     cancelBtn.addEventListener('click', () => finish(false))
@@ -240,18 +211,68 @@ export function observerProgram(): void {
   window.prompt = function (message?: unknown, def?: unknown): string | null {
     const msg = String(message == null ? '' : message)
     const fallback = def == null ? '' : String(def)
-    if (recording && !gg.__qaflowReplaying) {
-      // Show our own prompt so you can type the answer on screen; it's recorded
-      // when you submit. The page proceeds now with the default (we can't block
-      // for async input) — your typed value is what's recorded and replayed.
+    if (recording() && !g.__qaflowReplaying) {
       showPromptModal(msg, fallback)
       return fallback
     }
     const pend = consumePending('prompt')
-    if (pend) return pend.accept === false ? null : pend.text ?? ''
-    if (gg.__qaflowReplaying) return fallback
+    if (pend) return pend.accept === false ? null : (pend.text ?? '')
+    if (g.__qaflowReplaying) return fallback
     return origPrompt.call(window, msg, def as string | undefined)
   }
+}
+
+/**
+ * Install the observer on one document. Returns the handle the preload uses to
+ * switch recording / picking and to run a self-heal lookup.
+ *
+ * Idempotent per document: a second call returns the first call's handle, so
+ * listeners are never registered twice.
+ */
+export function createObserver(
+  win: Window & typeof globalThis,
+  doc: Document,
+  opts: ObserverOptions
+): ObserverHandle {
+  // Per-document guard, kept on a WeakMap that lives in THIS world — the page
+  // can't see it, clear it, or fake it.
+  const registry = ((createObserver as unknown as { registry?: WeakMap<Document, ObserverHandle> })
+    .registry ??= new WeakMap())
+  const existing = registry.get(doc)
+  if (existing) return existing
+
+  // Rebind the page globals to the frame being observed, so the body below —
+  // written as ordinary page code — works on an ADOPTED child's realm as well
+  // as on the preload's own frame. (instanceof must use the child realm's
+  // classes: a child's <input> is not an instance of the parent's
+  // HTMLInputElement.)
+  const window = win
+  const document = doc
+  const Element = win.Element
+  const HTMLInputElement = win.HTMLInputElement
+  const HTMLImageElement = win.HTMLImageElement
+  const MutationObserver = win.MutationObserver
+  const getComputedStyle = (el: Element): CSSStyleDeclaration => win.getComputedStyle(el)
+
+  const FRAME = opts.frame ?? null
+  let recording = !!opts.recording
+  let picking = !!opts.picking
+  const postToHost = (channel: string, payload: Record<string, unknown>): void => {
+    try {
+      opts.send(channel, payload)
+    } catch {
+      // transport gone (frame tearing down) — nothing to do
+    }
+  }
+  // The page-world dialog shim reads this to know whether to record.
+  const markRecording = (): void => {
+    try {
+      document.documentElement?.setAttribute('data-qaflow-recording', recording ? '1' : '0')
+    } catch {
+      // no <html> yet — set again on the next toggle
+    }
+  }
+  markRecording()
 
   // === Day 9: ELEMENT PICKER state ===================================
   let highlightBox: HTMLDivElement | null = null
@@ -276,26 +297,18 @@ export function observerProgram(): void {
     highlightBox = null
   }
 
-  // Arming hooks main calls via executeJavaScript when the user toggles
-  // record / pick AFTER this frame was already injected.
-  g.__qaflow = {
+  const handle: ObserverHandle = {
     setActive: (v: boolean): void => {
       recording = v
+      markRecording()
     },
     setPicking: (v: boolean): void => {
       picking = v
       if (!picking) clearHighlight()
     },
-    // QF-002: re-arm with the nonce for a NEW recording session (main re-rolls
-    // it each time). A page calling this can only break its own recording — it
-    // cannot mint a nonce the relay will accept, which is the property that
-    // matters.
-    setNonce: (v: string): void => {
-      nonce = typeof v === 'string' ? v : ''
-    },
-    // Day 18 (self-heal): main calls this on a replay failure to AUTO-find the
-    // element a broken step meant — by its recorded human label. Returns the
-    // best visible match's facts (same shape a manual pick produces) or null.
+    // Day 18 (self-heal): main asks for this on a replay failure to AUTO-find
+    // the element a broken step meant — by its recorded human label. Returns
+    // the best visible match's facts (same shape a manual pick produces) or null.
     findByLabel: (
       label: string,
       role?: string,
@@ -304,6 +317,20 @@ export function observerProgram(): void {
       action?: string
     ): unknown => findElementByLabel(label, role, text, rect, action)
   }
+  registry.set(doc, handle)
+
+  // A dialog reported by the page-world shim (see dialogShimProgram).
+  document.addEventListener('qaflow-dialog', (event) => {
+    if (!recording) return
+    let d: Record<string, unknown>
+    try {
+      d = JSON.parse(String((event as CustomEvent).detail))
+    } catch {
+      return
+    }
+    if (!d || typeof d !== 'object') return
+    postToHost('recorder:dialog', d)
+  })
 
   // Timestamp until which the next click is ignored (implicit form submission
   // fires a synthetic click after an Enter we already recorded as `press`).
@@ -322,6 +349,8 @@ export function observerProgram(): void {
   document.addEventListener(
     'keydown',
     (event) => {
+      // QF-002: only a real key press may cancel picking (see `click` below).
+      if (!event.isTrusted) return
       if (!picking || event.key !== 'Escape') return
       event.preventDefault()
       event.stopImmediatePropagation()
@@ -903,9 +932,18 @@ export function observerProgram(): void {
   }
 
   // --- Capture CLICKS ---
+  //
+  // QF-002 — ONLY REAL INPUT IS RECORDED. The browser sets `isTrusted` on
+  // events produced by the user's actual mouse and keyboard, and page script
+  // cannot set it: `button.click()` or `dispatchEvent(new MouseEvent(...))`
+  // arrive with isTrusted === false. Before this, the tested page could forge a
+  // step just by calling .click() — no nonce needed, since this listener
+  // recorded every click it saw. (Found by tools/e2e-smoke.mjs.) The same rule
+  // is applied to `change` and the Enter key below.
   document.addEventListener(
     'click',
     (event) => {
+      if (!event.isTrusted) return
       if (picking) {
         event.preventDefault()
         event.stopImmediatePropagation()
@@ -968,6 +1006,8 @@ export function observerProgram(): void {
 
   // --- Capture TYPING / SELECTING ---
   const onChange = (event: Event): void => {
+    // QF-002: a change the PAGE dispatched is not something the user did.
+    if (!event.isTrusted) return
     if (!recording) return
     const el = realTarget(event) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null
     if (!el) return
@@ -1048,27 +1088,23 @@ export function observerProgram(): void {
   // A shadow root created by UPGRADING an existing element (the common case for
   // custom elements) adds no DOM nodes, so the MutationObserver below can't see
   // it, and the one-time scan above may run before the page's scripts create
-  // it. Every open root is born via attachShadow, so hook that to arm roots the
-  // instant they appear, whatever the timing. (Patched once; open roots only —
-  // closed roots are out of scope and we can't reach their contents anyway.)
-  try {
-    const proto = Element.prototype as unknown as {
-      attachShadow: (init: ShadowRootInit) => ShadowRoot
-      __qaflowPatched?: boolean
-    }
-    if (!proto.__qaflowPatched) {
-      const original = proto.attachShadow
-      proto.attachShadow = function (this: Element, init: ShadowRootInit): ShadowRoot {
-        const root = original.call(this, init)
-        if (init && init.mode === 'open') armRoot(root)
-        return root
+  // it. This used to be solved by patching Element.prototype.attachShadow — but
+  // a patch made in THIS isolated world never runs when the page calls it.
+  //
+  // What the isolated world CAN see is `focusin`, which is composed (crosses
+  // shadow boundaries) and fires before any typing: a user has to focus a field
+  // before its `change` can fire. So every shadow root on the focused element's
+  // path is armed at that moment — whenever that root was created.
+  document.addEventListener(
+    'focusin',
+    (event) => {
+      for (const node of event.composedPath()) {
+        const root = node as ShadowRoot
+        if (root && root.nodeType === 11 && (root as { host?: unknown }).host) armRoot(root)
       }
-      proto.__qaflowPatched = true
-    }
-  } catch {
-    // attachShadow not patchable — the scan + MutationObserver still cover roots
-    // that already exist or arrive as inserted, already-upgraded subtrees
-  }
+    },
+    true
+  )
   try {
     new MutationObserver((mutations) => {
       for (const m of mutations) {
@@ -1103,6 +1139,7 @@ export function observerProgram(): void {
   document.addEventListener(
     'keydown',
     (event) => {
+      if (!event.isTrusted) return // QF-002: real key presses only
       if (!recording) return
       if (event.key !== 'Enter' || event.shiftKey) return
 
@@ -1151,4 +1188,6 @@ export function observerProgram(): void {
     },
     true
   )
+
+  return handle
 }

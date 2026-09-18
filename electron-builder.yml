@@ -7,6 +7,9 @@ files:
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{FEATURES.md,CAPABILITIES.md,SECURITY.md,RELEASING.md,QA-Platform-PRD.md}'
+  - '!tools/*'
+  - '!build/icon.svg'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
@@ -19,8 +22,17 @@ asarUnpack:
   - node_modules/@playwright/**
   - node_modules/playwright/**
   - node_modules/playwright-core/**
+# Icons: build/icon.{ico,icns,png} are generated from build/icon.svg by
+# `node tools/make-icons.mjs` — edit the SVG, then regenerate. (QF-010: the
+# audit found Electron's default atom logo shipping here.)
 win:
   executableName: QATestFlow Recorder
+  # Code signing (QF-010): electron-builder signs automatically when these
+  # environment variables are set at build time — nothing to change here:
+  #   CSC_LINK          path or base64 of the .pfx code-signing certificate
+  #   CSC_KEY_PASSWORD  its password
+  # Unsigned builds still work; Windows shows "Unknown publisher" on install.
+  # See RELEASING.md.
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
@@ -41,11 +53,14 @@ linux:
     - AppImage
     - snap
     - deb
-  maintainer: electronjs.org
+  maintainer: Surbhi Saroliya
   category: Utility
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates
+# Auto-update is OFF (QF-010). This used to point at the scaffold's placeholder
+# https://example.com/auto-updates — a real installer would have asked a
+# server nobody controls for updates. The app contains no updater code, so
+# null means no update feed is generated at all. Switch on deliberately, with
+# a real release channel (e.g. GitHub Releases), when there is one.
+publish: null

@@ -17,8 +17,23 @@ interface FakeNode {
   style: { cssText: string }
 }
 
+interface FakeEnv {
+  doc: {
+    body: { appendChild: (n: FakeNode) => void }
+    createElement: () => FakeNode
+    getElementById: (id: string) => FakeNode | null
+  }
+  raf: (cb: () => void) => void
+  setTimeoutStub: (fn: () => void, ms: number) => number
+  clearTimeoutStub: () => void
+  flushFrames: () => void
+  fireTimers: () => void
+  nodes: FakeNode[]
+  timers: { fn: () => void; ms: number }[]
+}
+
 /** Minimal document + rAF, with manual control over when frames fire. */
-function makeEnv(opts: { rafFires?: boolean } = {}) {
+function makeEnv(opts: { rafFires?: boolean } = {}): FakeEnv {
   const { rafFires = true } = opts
   const nodes: FakeNode[] = []
   const pending: (() => void)[] = []
@@ -51,7 +66,7 @@ function makeEnv(opts: { rafFires?: boolean } = {}) {
   return { doc, raf, setTimeoutStub, clearTimeoutStub, flushFrames, fireTimers, nodes, timers }
 }
 
-const run = (script: string, env: ReturnType<typeof makeEnv>): Promise<unknown> =>
+const run = (script: string, env: FakeEnv): Promise<unknown> =>
   new Function(
     'document',
     'requestAnimationFrame',

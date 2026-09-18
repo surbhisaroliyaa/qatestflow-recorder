@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import {
   PAGE_CHANNELS,
   isPageChannel,
-  relayDecision,
   validateElementFacts,
   validatePageMessage
 } from '../src/shared/recorderMessages'
@@ -225,102 +224,39 @@ describe('recorder:pick-cancel', () => {
 })
 
 // =====================================================================
-// The relay's decision — the gate itself, rather than its parts.
+// What main accepts from a tab's recorder — the gate itself.
 //
-// The first test here is the one that matters most to the USER: a genuine
-// recording must still get through. A boundary that blocks everything is not
-// a fix, it is an outage, and this one fails closed by design — so the
-// happy path needs pinning harder than the attacks do.
+// Since the observer moved into each frame's isolated world (2026-09-18)
+// there is no page-world relay and no nonce: a page cannot reach
+// ipcRenderer at all. Main still re-validates every message, and the first
+// test pins the thing that matters most to the USER — a genuine recording
+// must get through.
 // =====================================================================
-describe('the relay gate', () => {
-  const NONCE = 'session-nonce-abc'
-  const REAL_MESSAGE = {
-    __qaflow: true,
-    nonce: NONCE,
-    channel: 'recorder:event',
-    payload: { type: 'click', facts: FACTS }
-  }
-  const gate = (over: Record<string, unknown> = {}, nonce: string | null = NONCE) =>
-    relayDecision({ sessionNonce: nonce, sameTab: true, data: { ...REAL_MESSAGE, ...over } })
-
+describe('the gate main applies to every recorder message', () => {
   it('LETS A REAL RECORDED CLICK THROUGH', () => {
-    const out = gate()
+    const out = validatePageMessage('recorder:event', { type: 'click', facts: FACTS })
     expect(out, 'a genuine recorder event was dropped — recording is broken').not.toBe(null)
-    expect(out!.channel).toBe('recorder:event')
-    expect(out!.payload).toMatchObject({ type: 'click', facts: { tag: 'button' } })
+    expect(out).toMatchObject({ type: 'click', facts: { tag: 'button' } })
   })
 
-  it('lets every legitimate channel through', () => {
-    expect(gate({ channel: 'recorder:dialog', payload: { kind: 'alert', message: 'hi' } })).not.toBe(
-      null
-    )
-    expect(gate({ channel: 'recorder:picked', payload: { facts: FACTS } })).not.toBe(null)
-    expect(gate({ channel: 'recorder:pick-cancel', payload: undefined })).not.toBe(null)
+  it('never accepts an upload on the generic channels', () => {
+    // recorder:upload carries file paths; it has its own validation in main
+    // and is not one of these channels.
+    expect(isPageChannel('recorder:upload')).toBe(false)
+    expect(validatePageMessage('recorder:upload', { facts: FACTS, paths: ['/etc/passwd'] })).toBe(null)
   })
 
-  it('drops everything when no session is armed', () => {
-    // The state the app is in whenever the user is just browsing.
-    expect(gate({}, null)).toBe(null)
-    expect(gate({}, '')).toBe(null)
-  })
-
-  it('drops a message carrying the wrong nonce, or none', () => {
-    expect(gate({ nonce: 'guessed' })).toBe(null)
-    expect(gate({ nonce: undefined })).toBe(null)
-    expect(gate({ nonce: null })).toBe(null)
-  })
-
-  it('drops a nonce from a PREVIOUS session', () => {
-    // Main re-rolls per recording, so a value a page scraped off an earlier
-    // recording is dead by the time it could be replayed.
-    expect(relayDecision({ sessionNonce: 'new-nonce', sameTab: true, data: REAL_MESSAGE })).toBe(
-      null
-    )
-  })
-
-  it('drops a message from another tab or an opener', () => {
-    expect(relayDecision({ sessionNonce: NONCE, sameTab: false, data: REAL_MESSAGE })).toBe(null)
-  })
-
-  it('drops untagged traffic, so ordinary page postMessage is ignored', () => {
-    // Plenty of real sites postMessage to their top frame constantly.
-    expect(gate({ __qaflow: undefined })).toBe(null)
-    expect(gate({ __qaflow: 'true' })).toBe(null)
-    expect(relayDecision({ sessionNonce: NONCE, sameTab: true, data: 'hello' })).toBe(null)
-    expect(relayDecision({ sessionNonce: NONCE, sameTab: true, data: null })).toBe(null)
-  })
-
-  it('drops the forged step from the audit', () => {
-    // The audit posted a __qaflow-tagged recorder:event and the app added a
-    // step for an element that never existed. With no nonce to present, the
-    // same message now goes nowhere.
-    const forged = {
-      __qaflow: true,
-      channel: 'recorder:event',
-      payload: { type: 'click', facts: { tag: 'button', text: 'Forged by page' } }
-    }
-    expect(relayDecision({ sessionNonce: NONCE, sameTab: true, data: forged })).toBe(null)
-  })
-
-  it('refuses to carry an upload even WITH a valid nonce', () => {
-    // The escalation path, closed at the channel level rather than by the
-    // nonce — so it stays closed even against a page that scraped one.
-    expect(
-      gate({ channel: 'recorder:upload', payload: { facts: FACTS, paths: ['/etc/passwd'] } })
-    ).toBe(null)
-  })
-
-  it('refuses any other IPC channel even WITH a valid nonce', () => {
+  it('refuses any other IPC channel', () => {
     for (const channel of ['recorder:recovery', 'recorder:toggle', 'library:save']) {
-      expect(gate({ channel, payload: {} }), channel).toBe(null)
+      expect(validatePageMessage(channel, {}), channel).toBe(null)
     }
   })
 
-  it('forwards a rebuilt payload, never the object the page sent', () => {
+  it('returns a rebuilt payload, never the object it received', () => {
     const payload = { type: 'click', facts: FACTS, secretRef: 'stolen' }
-    const out = gate({ payload })
-    expect(out!.payload).not.toBe(payload)
-    expect(out!.payload).not.toHaveProperty('secretRef')
+    const out = validatePageMessage('recorder:event', payload)
+    expect(out).not.toBe(payload)
+    expect(out).not.toHaveProperty('secretRef')
   })
 })
 

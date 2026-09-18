@@ -18,7 +18,9 @@ yarn-error.log*
 dist/
 dist-electron/
 out/
-build/
+# NOT build/: that's electron-builder's buildResources — the app icon (and its
+# icon.svg source) plus mac entitlements. Ignoring it meant a fresh clone or a
+# CI release built with Electron's default icon.
 release/
 *.exe
 *.dmg

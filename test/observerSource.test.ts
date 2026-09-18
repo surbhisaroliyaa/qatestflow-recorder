@@ -1,76 +1,78 @@
 import { describe, it, expect } from 'vitest'
 import ts from 'typescript'
-import { observerProgram } from '../src/main/observerSource'
+import { createObserver, dialogShimProgram } from '../src/main/observerSource'
 
 // =====================================================================
-// The observer is not called — it is STRINGIFIED and injected into every
-// frame of the page under test. That makes one property load-bearing in a
-// way the compiler cannot see:
+// Both halves of the recorder are STRINGIFIED somewhere:
 //
-//   it must be completely self-contained.
+//   · dialogShimProgram — injected into each frame's PAGE world (by the
+//     recorder preload, and into adopted frames as an inline <script>);
+//   · createObserver    — bundled into the preload, but also stringified by
+//     the DOM tests to run it in a plain page.
 //
-// The moment it references anything outside itself — a helper from another
-// module, a bundler shim, a const from the top of its own file — the
-// injected copy throws `X is not defined` in the page, and recording stops
-// working on every site at once. Types are fine: they are erased.
-//
-// tsc is happy either way, because in the SOURCE those references resolve
-// perfectly. Only stringifying it and looking at what comes out can tell.
-// Behaviour lives in test-dom/observer.spec.ts, which runs it in a real DOM.
+// That makes one property load-bearing in a way the compiler cannot see: each
+// must be completely self-contained. The moment one references anything
+// outside itself, the stringified copy throws `X is not defined` in the page,
+// and recording (or dialog capture) stops on every site at once. tsc is happy
+// either way, because in the SOURCE those references resolve. Only
+// stringifying and looking at what comes out can tell.
+// Behaviour lives in test-dom/observer.spec.ts and tools/e2e-smoke.mjs.
 // =====================================================================
 
-const source = observerProgram.toString()
+const parses = (code: string): string[] => {
+  const sf = ts.createSourceFile('inject.js', code, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
+  const diags = (sf as unknown as { parseDiagnostics?: ts.Diagnostic[] }).parseDiagnostics ?? []
+  return diags.map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '))
+}
+const FORBIDDEN = ['require(', 'import(', 'exports.', '__importDefault', 'module.']
 
-describe('the injected observer is self-contained', () => {
-  it('stringifies to a callable function expression', () => {
-    expect(source).toMatch(/^function observerProgram\(\)/)
-    expect(source.length).toBeGreaterThan(1000)
-  })
+describe('the page-world dialog shim', () => {
+  const source = dialogShimProgram.toString()
 
-  it('parses as JavaScript once wrapped the way main injects it', () => {
-    // main runs `(${observerProgram.toString()})()`. If that does not parse,
-    // every frame on every site fails to arm, silently.
-    const injected = `(${source})()`
-    const sf = ts.createSourceFile('inject.js', injected, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
-    const diags = (sf as unknown as { parseDiagnostics?: ts.Diagnostic[] }).parseDiagnostics ?? []
-    expect(diags.map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '))).toEqual([])
+  it('parses once wrapped the way it is injected', () => {
+    expect(source).toMatch(/^function dialogShimProgram\(\)/)
+    expect(parses(`(${source})();`)).toEqual([])
   })
 
   it('carries no import, require or module reference into the page', () => {
-    // A bundler shim (`__importDefault`, `exports.`) or a stray `require(` means
-    // the build inlined something that does not exist in a page world.
-    for (const forbidden of ['require(', 'import(', 'exports.', '__importDefault', 'module.']) {
-      expect(source, forbidden).not.toContain(forbidden)
+    for (const f of FORBIDDEN) expect(source, f).not.toContain(f)
+  })
+
+  it('is the ONLY part of the recorder in the page world, and it holds no secret', () => {
+    // QF-002: nothing the page can read may let it imitate the recorder. The
+    // shim reports dialogs by DOM event — the page controls its own dialogs
+    // anyway — and never touches a nonce, ipc or the recorder's state.
+    for (const s of ['nonce', 'ipcRenderer', 'postMessage', 'recorder:event']) {
+      expect(source, s).not.toContain(s)
     }
   })
+})
 
-  it('reads its state only from the globals main hands it', () => {
-    // Arming and identity arrive as page globals set immediately before
-    // injection. If the names drift apart from main's, the observer comes up
-    // disarmed and the recording is silently empty.
-    for (const global of [
-      '__qaflowInstalled',
-      '__qaflowFrame',
-      '__qaflowInitActive',
-      '__qaflowInitPicking'
-    ]) {
-      expect(source, global).toContain(global)
-    }
+describe('the isolated-world observer', () => {
+  const source = createObserver.toString()
+
+  it('is a self-contained function', () => {
+    expect(source).toMatch(/^function createObserver\(/)
+    expect(source.length).toBeGreaterThan(1000)
+    expect(parses(`(${source})`)).toEqual([])
   })
 
-  it('re-injection re-asserts the armed state instead of installing twice', () => {
-    // main re-injects EVERY frame on a record/pick toggle, because that reaches
-    // deeply-nested frames a one-off call can miss. Without the guard, one click
-    // would be recorded once per injection.
-    expect(source).toContain('__qaflowInstalled')
-    expect(source).toMatch(/setActive\(!!/)
+  it('carries no import, require or module reference', () => {
+    for (const f of FORBIDDEN) expect(source, f).not.toContain(f)
   })
 
-  it('talks to the host only by posting to the top window', () => {
-    // It runs in the page world: no Node, no ipcRenderer. The single channel out
-    // is window.top.postMessage, picked up by the preload relay.
-    expect(source).toContain('postMessage')
-    expect(source).not.toContain('ipcRenderer')
-    expect(source).not.toContain('electron')
+  it('sends only through the transport it is given — never postMessage, never a nonce', () => {
+    // The whole point of QF-002's completion: its channel out is `send`
+    // (ipcRenderer, in the preload), which the page world has no access to.
+    expect(source).toContain('opts.send')
+    expect(source).not.toContain('postMessage')
+    expect(source).not.toContain('nonce')
+  })
+
+  it('publishes nothing on the page’s window', () => {
+    // The old observer hung its API off window.__qaflow for main to call. In
+    // an isolated world that would be invisible anyway — but a leftover
+    // assignment is a sign code still assumes the page world.
+    expect(source).not.toMatch(/window\.__qaflow\w*\s*=/)
   })
 })

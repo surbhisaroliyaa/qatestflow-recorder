@@ -117,7 +117,8 @@ body {
 }
 
 .examples-label {
-  color: #777;
+  /* QF-004 (app-shell axe scan): #777 was 3.72:1 on #1e1e1e. */
+  color: #9a9a9a;
 }
 
 .example-chip {
@@ -198,20 +199,24 @@ body {
 }
 
 /* Two-row toolbar: row 1 is the browser (nav + URL + Record), row 2 is the QA
-   tool belt grouped by job. The TOTAL height is fixed and MUST equal
-   CHROME_HEIGHT in src/main/index.ts — the native browser view is painted just
-   below it, so the two numbers have to stay in lock-step (like .tab-strip). */
+   tool belt grouped by job.
+   QF-007: the height is no longer fixed. At 800 px wide the tool row ran off
+   the right edge (overflow: hidden) and Coverage / Net / Mock were simply
+   unreachable. The row now WRAPS onto another line instead, and the page view
+   moves down with it — the renderer measures `.browser-area` and main places
+   the native view there (browser:setArea), so nothing has to be kept in
+   lock-step by hand any more. 104 px stays the minimum: one row of each. */
 .chrome {
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 8px;
-  height: 104px;
+  min-height: 104px;
   flex: none;
-  padding: 0 12px;
+  padding: 10px 12px;
+  box-sizing: border-box;
   background: #2c2c2c;
   border-bottom: 1px solid #444;
-  overflow: hidden;
 }
 
 /* One horizontal row inside the toolbar. */
@@ -222,14 +227,19 @@ body {
 }
 .chrome-row.tools {
   gap: 6px;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 /* A cluster of related tools; clusters are separated by a subtle divider so the
-   eye can group them (Author · Analyze · Network). */
+   eye can group them (Author · Analyze · Network). A cluster wraps as a unit
+   first, and only splits internally if it alone is wider than the window. */
 .tool-group {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 .tool-group + .tool-group {
   margin-left: 4px;
@@ -266,9 +276,9 @@ body {
   margin-top: 4px;
 }
 
-/* Day 17 (multiple windows): the tab strip. Height (34px) MUST match
-   TAB_STRIP_HEIGHT in src/main/index.ts so the native browser view, which
-   starts just below it, lines up with no gap or overlap. */
+/* Day 17 (multiple windows): the tab strip. The native page view starts just
+   below it because main places the view over the MEASURED .browser-area
+   (QF-007) — its height no longer has to match a constant in main. */
 .tab-strip {
   display: flex;
   align-items: stretch;
@@ -490,7 +500,9 @@ body {
 .go-btn {
   height: 36px;
   padding: 0 18px;
-  background: #4a6cf7;
+  /* QF-004, found by the app-shell axe scan: this toolbar Go button kept the
+     old #4a6cf7 (4.39:1 with white) when the welcome-screen one was fixed. */
+  background: #4364ee;
   border: none;
   border-radius: 6px;
   color: white;
@@ -502,7 +514,8 @@ body {
 }
 
 .go-btn:hover {
-  background: #5b7cff;
+  /* Hover darkens (lighter would drop below 4.5:1) — as .welcome-go-btn. */
+  background: #3a58e0;
 }
 
 /* === Record button (lives in the chrome bar) === */
@@ -1101,16 +1114,160 @@ body {
   min-height: 0;
 }
 
+/* Read by screen readers, not drawn (QF-004 headings). The standard pattern:
+   display:none would hide it from assistive tech too. */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The page column: an optional load-error bar, then the page itself. */
+.browser-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .browser-area {
   flex: 1;
+  min-height: 0;
   /* Only ever seen when a modal hides the native browser view. */
   background: #232323;
 }
 
-/* Width MUST match PANEL_WIDTH in src/main/index.ts (340) so the native
-   browser view ends exactly where this panel begins. */
+/* QF-012: a page that failed to load. Sits ABOVE the page — the native view
+   is painted over .browser-area, so a bar inside it would be invisible. */
+.load-error-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #3a1d1f;
+  border-bottom: 1px solid #7a2e33;
+  color: #f3d6d8;
+  font-size: 13px;
+}
+.load-error-icon {
+  font-size: 18px;
+  color: #ff8a8f;
+}
+.load-error-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+}
+.load-error-meta {
+  display: block;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  color: #d9aeb1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.load-error-btn {
+  flex: none;
+  min-height: 28px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid #8a4046;
+  background: transparent;
+  color: #f3d6d8;
+  font: inherit;
+  cursor: pointer;
+}
+.load-error-btn.primary {
+  background: #c9383f;
+  border-color: #c9383f;
+  color: #fff;
+}
+.load-error-btn:hover {
+  filter: brightness(1.1);
+}
+.load-error-close {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: #d9aeb1;
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.load-error-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* QF-007/008: the edge between page and steps — drag to resize, » to hide. */
+.pane-edge {
+  flex: none;
+  width: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  background: #1f1f1f;
+  border-left: 1px solid #444;
+}
+.pane-collapse {
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: #aaa;
+  font-size: 13px;
+  padding: 0;
+  cursor: pointer;
+}
+.pane-collapse:hover {
+  background: #333;
+  color: #fff;
+}
+.pane-divider {
+  flex: 1;
+  cursor: col-resize;
+  outline-offset: -2px;
+}
+.pane-divider:hover,
+.pane-divider:focus {
+  background: #4364ee;
+}
+/* Collapsed: a slim rail that brings the panel back. */
+.pane-rail {
+  flex: none;
+  width: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border: none;
+  border-left: 1px solid #444;
+  background: #252525;
+  color: #ccc;
+  cursor: pointer;
+  font: inherit;
+}
+.pane-rail:hover {
+  background: #2f2f2f;
+  color: #fff;
+}
+.pane-rail-label {
+  writing-mode: vertical-rl;
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+
+/* Width comes from React (resizable — QF-008); main learns where the page
+   ends by measuring .browser-area, not from a shared constant. */
 .steps-panel {
-  width: 340px;
   flex: none;
   background: #252525;
   border-left: 1px solid #444;
@@ -1132,6 +1289,9 @@ body {
 }
 
 .steps-title {
+  /* An <h2> since QF-004 — the heading's default margins would push it out
+     of the header row. */
+  margin: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1216,7 +1376,8 @@ body {
 }
 
 .steps-count {
-  background: #4a6cf7;
+  /* White on #4a6cf7 was 4.39:1 (QF-004); #4364ee is 4.89:1. */
+  background: #4364ee;
   color: white;
   font-size: 11px;
   font-weight: 700;
@@ -1229,7 +1390,8 @@ body {
   padding: 18px 16px;
   font-size: 13px;
   line-height: 1.5;
-  color: #777;
+  /* QF-004 (app-shell axe scan): #777 was 3.42:1 on the panel's #252525. */
+  color: #9a9a9a;
 }
 
 .steps-list {
@@ -2404,8 +2566,7 @@ body {
 
 /* F36 — device picker in the browser toolbar. Sits between the URL bar and
    Record because that is the order you use them in: choose the device, then
-   record. Narrow so it doesn't crowd row 1 (whose height is locked to
-   CHROME_HEIGHT). */
+   record. Narrow so it doesn't crowd row 1. */
 .device-select {
   flex: none;
   max-width: 150px;
@@ -2430,6 +2591,9 @@ body {
 
 /* === F40: shareable bundles === */
 .bundle-bar {
+  /* Own full-width row. Inside the wrapping .library-toolbar, the bundle and
+     parallel strips otherwise sat side by side, each with a short divider. */
+  flex-basis: 100%;
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid #333;
@@ -2584,6 +2748,7 @@ body {
    Deliberately understated. Parallel is a trade (speed for fidelity), not an
    upgrade, so it must not look like the recommended button. */
 .parallel-bar {
+  flex-basis: 100%;
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid #333;
@@ -3059,7 +3224,8 @@ body {
   border: 1px dashed #3a3a3a;
   border-radius: 6px;
   background: transparent;
-  color: #8a8a8a;
+  /* QF-004 (app-shell axe scan): #8a8a8a was 4.44:1 on #252525. */
+  color: #9a9a9a;
   font-size: 12.5px;
   text-align: left;
   cursor: pointer;
@@ -3094,7 +3260,7 @@ body {
   flex: none;
   padding: 0;
   /* QF-004: the pointer target must be at least 24x24, but this row of icons
-     lives in a fixed 340px panel that is ALREADY too tight (QF-008) — growing
+     lives in a panel that opens at 340px (resizable since QF-008) — growing
      the boxes would push actions out of the row. So the box stays 20px and the
      HIT AREA is widened to 24px with the overlay below: same layout, same
      look, a target a finger or a shaky hand can actually land on. */
@@ -3554,14 +3720,15 @@ body {
   background: #4a4a4a;
 }
 
+/* QF-004 (app-shell axe scan): #4a6cf7 was 4.39:1 with white; hover darkens. */
 .modal-btn.primary {
-  background: #4a6cf7;
-  border-color: #4a6cf7;
+  background: #4364ee;
+  border-color: #4364ee;
   color: white;
 }
 
 .modal-btn.primary:hover {
-  background: #5b7cff;
+  background: #3a58e0;
 }
 
 /* ===================================================
@@ -4809,7 +4976,6 @@ body {
 }
 
 .env-bar-manage {
-  margin-left: auto;
   flex: none;
   height: 28px;
   padding: 0 12px;
@@ -4823,10 +4989,23 @@ body {
   cursor: pointer;
 }
 
-/* Once the auto-margin has pushed the first manage button to the right, the
-   rest of the group should sit flush beside it, not each grab new free space. */
-.env-bar-manage ~ .env-bar-manage {
-  margin-left: 0;
+/* Second row: the library-wide tools, together, under a divider. */
+.env-bar-tools {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #2a3542;
+}
+/* Both rows fill the box edge to edge: the dropdown takes the spare width of
+   row 1, and the tools share row 2 equally — no ragged empty gap on the right. */
+.env-bar > .env-bar-select {
+  flex: 1;
+  min-width: 180px;
+}
+.env-bar-tools > .env-bar-manage {
+  flex: 1;
 }
 
 .env-bar-manage:hover {

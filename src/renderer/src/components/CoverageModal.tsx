@@ -47,7 +47,7 @@ export function CoverageModal({
             <p className="api-hint">
               ⏳ Crawling from your current page… found <strong>{coverageRun.found}</strong> page
               {coverageRun.found === 1 ? '' : 's'} so far. The browser is walking the links — it
-              returns to where you were when it's done.
+              returns to where you were when it’s done.
             </p>
           ) : !coverageRun?.result || coverageRun.result.pages.length === 0 ? (
             <p className="api-hint">

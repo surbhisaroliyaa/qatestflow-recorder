@@ -82,7 +82,7 @@ export function MonitorsModal({
           <p className="api-hint">
             A monitor re-runs a saved test on a schedule (headless) and pops a desktop alert when it
             fails — catching regressions between your manual runs.{' '}
-            <strong>It only runs while this app is open</strong> (there's no background service), and
+            <strong>It only runs while this app is open</strong> (there’s no background service), and
             it needs Playwright installed (same as cross-browser).
           </p>
           {monRunningId && (

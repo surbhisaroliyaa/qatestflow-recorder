@@ -370,7 +370,12 @@ test.describe('the exported spec passes when Playwright actually runs it', () =>
   // a real run EACH ROW still gets ITS OWN password. `expected` is an ordinary
   // column carrying what that row's password should be, so a spec that handed
   // every row the same PASSWORD would fail on the second row.
-  const matrix = (env: Record<string, string>) => ({
+  const matrix = (
+    env: Record<string, string>
+  ): {
+    flows: { name: string; steps: unknown[]; data: { columns: string[]; rows: Record<string, string>[] } }[]
+    env: Record<string, string>
+  } => ({
     flows: [
       {
         name: 'protected-matrix',

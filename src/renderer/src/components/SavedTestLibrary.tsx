@@ -185,6 +185,9 @@ export function SavedTestLibrary({
                 >
                   Manage…
                 </button>
+                {/* Library-wide tools on their own row, so the four buttons never
+                    split unevenly across the environment row when it wraps. */}
+                <div className="env-bar-tools">
                 {/* F31: one plain-English coverage doc for the whole library. */}
                 {savedTests.length > 0 && (
                   <button
@@ -218,6 +221,7 @@ export function SavedTestLibrary({
                 >
                   📡 Monitors{monitors.length ? ` (${monitors.length})` : ''}
                 </button>
+                </div>
               </div>
 
               {/* A1 (scalable library): search + status filters, so a big library

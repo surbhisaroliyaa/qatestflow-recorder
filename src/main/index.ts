@@ -5,7 +5,6 @@ import {
   ipcMain,
   WebContentsView,
   dialog,
-  webFrameMain,
   nativeImage,
   Notification
 } from 'electron'
@@ -18,7 +17,6 @@ import {
   type MonitorRun
 } from './monitors'
 import { join, basename, dirname } from 'path'
-import { randomUUID } from 'crypto'
 import { execFile } from 'child_process'
 import { writeFile, mkdir, copyFile, readFile, readdir, rm } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -45,7 +43,6 @@ import { portableBasename } from '../shared/portablePath'
 // QF-002: the page → Electron trust boundary. Main re-validates rather than
 // trusting the relay preload to have done it.
 import { validateElementFacts, validatePageMessage } from '../shared/recorderMessages'
-import { createRelaySession } from '../shared/relaySession'
 import { maskPasswordInputs, secretCellRef } from '../shared/secretCells'
 // QF-006: Electron 43+ opens a dialog with no defaultPath in Downloads.
 import { lastFolder, rememberFolder } from './lastFolders'
@@ -110,7 +107,6 @@ import {
   type Baseline as DomBaseline,
   type ElementFingerprint
 } from './baselines'
-import { observerProgram } from './observerSource'
 import {
   saveBaseline,
   loadBaseline,
@@ -416,19 +412,12 @@ const AI_CAPTURE_JS = `(() => {
   return out;
 })()`
 
-// Height in pixels reserved at the top of the window for our React chrome
-// (URL bar + back/forward/reload buttons). Everything below this is the
-// embedded browser showing the website under test.
-// NOTE: two-row toolbar — this MUST equal the `.chrome` height in main.css
-// (row 1 = browser bar, row 2 = QA tool belt), or the native browser view
-// won't line up with the empty browser area beneath the toolbar.
+// FIRST-PAINT FALLBACK ONLY (QF-007/008/012). The page view is placed where the
+// renderer MEASURES `.browser-area` (see measuredArea / browser:setArea): the
+// toolbar wraps, the pane resizes, and a load-error bar can appear, so no fixed
+// numbers can describe the layout any more. These three describe the default
+// layout and are used for the instant before the renderer's first report.
 const CHROME_HEIGHT = 104
-
-// Day 17 (multiple windows): height reserved for the tab strip, shown ONLY when
-// more than one tab is open. When visible, the embedded browser starts this
-// much further down. The renderer renders the same-height strip under the same
-// condition, so the React strip and the native view line up exactly. MUST match
-// the .tab-strip height in main.css.
 const TAB_STRIP_HEIGHT = 34
 
 // F15: default absolute changed-pixel floor for a visual snapshot. A % threshold
@@ -438,22 +427,32 @@ const TAB_STRIP_HEIGHT = 34
 // filters anti-aliasing) — so it catches real changes without flaky failures.
 const DEFAULT_MAX_DIFF_PIXELS = 200
 
-// Width in pixels reserved on the RIGHT for our React "steps" panel (the live
-// recording list). Once the user has navigated, the embedded browser shrinks
-// by this much so the panel showing through underneath stays uncovered.
+// The steps panel's DEFAULT width (it's resizable now) — first-paint fallback,
+// like CHROME_HEIGHT above. Matches PANE_DEFAULT in renderer/src/paneLayout.ts.
 const PANEL_WIDTH = 340
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    // QF-007: at 800×600 the toolbar ran off the right edge with no way to
+    // reach Coverage / Net / Mock. The toolbar now wraps instead of clipping;
+    // below this size the page itself would be too small to record on.
+    minWidth: 1024,
+    minHeight: 680,
     show: false,
     autoHideMenuBar: true,
     title: 'QATestFlow Recorder',
-    ...(process.platform === 'linux' ? { icon } : {}),
+    // Every platform, not just Linux: an installed Windows build takes its icon
+    // from the .exe, but a dev run (`npm start`) showed Electron's atom logo in
+    // the title bar and taskbar.
+    icon,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      // QF-002: the audit found the sandbox off for both the app window and
+      // the embedded browser. The preloads use only `electron` and are built
+      // self-contained (electron.vite.config.ts), which is what sandboxing needs.
+      sandbox: true
     }
   })
 
@@ -473,10 +472,13 @@ function createWindow(): void {
     // reproducible). Mirrors Playwright handing you pages in creation order.
     ordinal: number
     view: WebContentsView
+    // QF-012: why this tab's last page load failed, until the next one starts.
+    loadError?: { url: string; code: number; description: string; attempt?: number } | null
   }
   const tabs: Tab[] = []
   let activeTabId = ''
   let tabOrdinalSeq = 0 // next ordinal to hand out
+  let loadErrorAttempts = 0 // numbers each failed load (QF-012 dismiss is per failure)
   // Day 17 (Phase 4): a one-shot hook so replay can capture the next popup tab
   // (the replay-time window-open handler still creates the tab via openTabWith;
   // this lets replay await it and bind it to the step's `opensWindow` ordinal).
@@ -528,7 +530,8 @@ function createWindow(): void {
             ordinal: t.ordinal,
             title: w.getTitle() || w.getURL() || 'New Tab',
             url: w.getURL(),
-            active: t.id === activeTabId
+            active: t.id === activeTabId,
+            loadError: t.loadError ?? null
           }
         ]
       } catch {
@@ -667,116 +670,115 @@ function createWindow(): void {
   // the right state, and so toggling pick updates frames that are already live.
   let isPicking = false
 
-  // === Observer injection (Day 15) ===================================
-  // We inject the observer into every frame ourselves (executeJavaScript is
-  // reliable on any frame, any origin — unlike preload-into-sub-frames). The
-  // observer runs in the page world and posts its events up to the top frame,
-  // where the relay preload forwards them to main. Arming + this frame's
-  // identity are handed in as globals set right before the program runs.
+  // === The recorder (QF-002, completed 2026-09-18) =====================
+  // The observer runs in EVERY frame's isolated world, inside the recorder
+  // preload (src/preload/recorder.ts), and talks to main over ipcRenderer.
+  // The page cannot see it or its transport, and main learns WHICH frame sent
+  // an event from Electron (event.senderFrame). There is no nonce any more:
+  // nothing crosses the page world, so there is nothing to sniff.
   //
-  // Frames are tracked by frameTreeNodeId so we inject each one once; a frame
-  // that navigates (fresh document) is dropped from the set and re-injected.
-  const injectedFrames = new Set<number>()
+  // Main's jobs here: tell every frame's recorder the record/pick state, answer
+  // a newly loaded frame's "what state are we in?", and inject the one thing
+  // that must live in the page world — the small native-dialog shim.
 
-  // QF-002: the relay nonce for the CURRENT recording session.
-  //
-  // Main mints it, bakes it into each injected observer, and hands the same
-  // value to every tab's relay preload over IPC — into that preload's isolated
-  // world, which the page's own scripts cannot read. The relay forwards nothing
-  // that doesn't carry it, so while no recording is armed the page→IPC path is
-  // closed outright.
-  //
-  // Re-rolled per session so a nonce a page scraped off a live recording is
-  // dead the moment that recording ends.
-  // The arming rule itself is a pure state machine in src/shared/relaySession —
-  // getting it wrong looks like "the recorder captured nothing", so it is unit
-  // tested rather than only observable by running the app.
-  const relaySession = createRelaySession(randomUUID)
+  /** The state every recorder should be in right now. */
+  const recorderState = (): { recording: boolean; picking: boolean } => ({
+    recording: isRecording,
+    picking: isPicking
+  })
 
-  // A newly created tab needs the current nonce, or everything captured in a
-  // popup is silently dropped by that tab's relay.
-  const armRelay = (wc: Electron.WebContents): void => {
-    try {
-      wc.send('recorder:arm', relaySession.current())
-    } catch {
-      // view gone before it was armed — nothing to do
+  // Frames whose recorder preload has said hello, by their process+routing id.
+  // A frame NOT in this set (a script-written about:blank iframe) has no
+  // preload — its CONTAINING frame's recorder adopted it.
+  const recorderFrames = new Set<string>()
+  const frameKey = (f: Electron.WebFrameMain): string => `${f.processId}:${f.routingId}`
+
+  // Push the record/pick state to every frame of every tab. WebFrameMain.send
+  // reaches each frame's own renderer directly — including cross-origin frames
+  // in other processes — and a frame that loads LATER asks for the state
+  // itself (recorder:hello), so none can come up in the wrong state.
+  const broadcastRecorderState = (): void => {
+    const s = recorderState()
+    for (const t of tabs) {
+      for (const frame of subtreeFrames(t.view.webContents.mainFrame)) {
+        try {
+          frame.send('recorder:state', s)
+        } catch {
+          // frame mid-teardown — it will ask again when (if) it loads
+        }
+      }
     }
   }
 
-  /**
-   * Bring every tab's relay in line with what the app is currently doing.
-   *
-   * The relay must be armed for RECORDING *or* PICKING — picking an element to
-   * assert on is its own session and comes back through the very same relay, so
-   * gating purely on `isRecording` would have quietly broken the picker.
-   *
-   * `fresh` mints a new nonce (a new session begins). Otherwise an existing one
-   * is kept, so turning pick mode on mid-recording doesn't invalidate the
-   * observers already running with the session's value.
-   *
-   * MUST be called BEFORE re-injecting observers: they bake in the nonce their
-   * relay is about to start expecting.
-   */
-  const syncRelayArming = (fresh = false): void => {
-    relaySession.sync({ recording: isRecording, picking: isPicking, fresh })
-    for (const t of tabs) armRelay(t.view.webContents)
-  }
+  ipcMain.handle('recorder:hello', (event) => {
+    // Only a frame of one of OUR tabs gets an answer.
+    if (!isTabSender(event.sender) || !event.senderFrame) return null
+    recorderFrames.add(frameKey(event.senderFrame))
+    return recorderState()
+  })
 
-  const injectObserver = (frame: Electron.WebFrameMain | null): void => {
-    if (!frame) return
-    let id: number
-    try {
-      id = frame.frameTreeNodeId
-    } catch {
-      return // frame already gone
+  // Self-heal (Day 18): ask the recorder in `frame` to find the element a
+  // broken step meant. A frame with no preload of its own is answered by the
+  // ancestor whose recorder adopted it, told which child by its relative path.
+  let findSeq = 0
+  const pendingFinds = new Map<number, (result: unknown) => void>()
+  ipcMain.on('recorder:found', (event, reqId: unknown, result: unknown) => {
+    if (!isTabSender(event.sender) || typeof reqId !== 'number') return
+    const done = pendingFinds.get(reqId)
+    if (done) {
+      pendingFinds.delete(reqId)
+      done(result)
     }
-    if (injectedFrames.has(id)) return
-    // Bake in this frame's identity + the CURRENT record/pick state, so a frame
-    // that loads mid-recording comes up already armed (no race).
-    const ref = frameRefOf(frame)
-    // Don't commit an identity until EVERY frame in the chain has a real url.
-    // A first injection that wins while a url is still uncommitted ('') would
-    // bake an empty-url FrameRef that replay could never re-find. Leaving it
-    // out of the injected set lets the next load event re-inject once the urls
-    // are in place. (Top frame has no ref — nothing to guard.)
-    if (ref && ref.some((r) => r.url === '')) return
-    injectedFrames.add(id)
-    const boot =
-      `window.__qaflowFrame=${JSON.stringify(ref ?? null)};` +
-      `window.__qaflowInitActive=${isRecording};` +
-      `window.__qaflowInitPicking=${isPicking};` +
-      // QF-002: the observer reads this and deletes it from `window` on its
-      // first statement, inside this same executeJavaScript call — so no page
-      // script ever gets a turn while it is sitting on the global object.
-      `window.__qaflowNonce=${JSON.stringify(relaySession.current())};` +
-      `(${observerProgram.toString()})();`
-    frame.executeJavaScript(boot).catch(() => {
-      // injection can fail on a frame that's navigating — allow a retry later
-      injectedFrames.delete(id)
+  })
+  const findByLabelIn = (frame: Electron.WebFrameMain, args: unknown[]): Promise<unknown> => {
+    const path: { url: string; name: string }[] = []
+    let owner: Electron.WebFrameMain | null = frame
+    while (owner && !recorderFrames.has(frameKey(owner))) {
+      // Same identity the adopting recorder used: about:blank for a
+      // script-written frame, the real URL for an adopted frame with a src.
+      path.unshift({ url: owner.url || 'about:blank', name: owner.name || '' })
+      owner = owner.parent
+    }
+    if (!owner) return Promise.resolve(null)
+    const reqId = ++findSeq
+    const target = owner
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingFinds.delete(reqId)
+        resolve(null)
+      }, 4000)
+      pendingFinds.set(reqId, (result) => {
+        clearTimeout(timer)
+        resolve(result)
+      })
+      try {
+        target.send('recorder:find', reqId, args, path)
+      } catch {
+        clearTimeout(timer)
+        pendingFinds.delete(reqId)
+        resolve(null)
+      }
     })
   }
 
-  // (Re)inject every frame currently in the tree. Cheap to call often: already-
-  // injected frames are skipped by the set.
-  const injectAllFrames = (wc: Electron.WebContents): void => {
-    for (const frame of subtreeFrames(wc.mainFrame)) {
-      injectObserver(frame)
-    }
+  // The frame an event came from, as a FrameRef: Electron's own record of the
+  // sending frame, plus the relative path of an adopted child if the event
+  // came from one. Never taken from the page.
+  const frameOfEvent = (
+    senderFrame: Electron.WebFrameMain | null | undefined,
+    relative: unknown
+  ): { url: string; name?: string }[] | undefined => {
+    const base = frameRefOf(senderFrame ?? null) ?? []
+    const rel = Array.isArray(relative)
+      ? (relative as { url?: unknown; name?: unknown }[]).map((r) => ({
+          url: typeof r?.url === 'string' ? r.url : 'about:blank',
+          name: typeof r?.name === 'string' && r.name ? r.name : undefined
+        }))
+      : []
+    const chain = [...base, ...rel]
+    return chain.length ? chain : undefined
   }
 
-  // Push a record/pick state change into EVERY live frame's observer by
-  // re-injecting from scratch. Re-injection is the one channel that reliably
-  // reaches deeply-nested frames (a one-off setActive call via executeJavaScript
-  // silently missed grandchild frames). Each boot bakes in the current
-  // isRecording/isPicking, and the observer re-asserts that state when it sees
-  // it's already installed — so listeners are never registered twice.
-  // Re-inject EVERY tab's frames from scratch — used when a global state change
-  // (record on/off, pick on/off) must reach every live tab, not just the active
-  // one. With one tab this is the old single-view behavior.
-  const reinjectAllFrames = (): void => {
-    injectedFrames.clear()
-    for (const t of tabs) injectAllFrames(t.view.webContents)
-  }
 
   // Until the user navigates to a real URL, we keep the embedded browser
   // hidden (zero size) so the React welcome page is visible across the
@@ -890,29 +892,43 @@ function createWindow(): void {
     for (const t of tabs) applyDeviceTo(t.view.webContents)
   }
 
+  // QF-007/008/012: where the page goes, as MEASURED by the renderer. The
+  // toolbar now wraps (its height varies), the step pane is resizable and
+  // collapsible, and a load-error bar can appear above the page — three things
+  // a set of fixed constants can't track. The DOM is the one place that knows
+  // where `.browser-area` actually is, so it reports that rectangle. The
+  // constants below stay only as the layout for the first paint, before the
+  // renderer's first report arrives.
+  let measuredArea: { x: number; y: number; width: number; height: number } | null = null
+
   const resizeEmbedded = (): void => {
     if (mainWindow.isDestroyed()) return
-    // getContentBounds = the drawable area inside the window frame, so the
-    // native browser view and the CSS panel measure from the same ruler and
-    // meet exactly at width - PANEL_WIDTH (no overlap, no gap at the seam).
-    const { width, height } = mainWindow.getContentBounds()
-    // The tab strip is shown only with 2+ tabs; when shown, the browser view
-    // starts that much lower (the renderer reserves the same band).
-    const top = CHROME_HEIGHT + (tabs.length > 1 ? TAB_STRIP_HEIGHT : 0)
-    const areaWidth = Math.max(0, width - PANEL_WIDTH)
-    const areaHeight = Math.max(0, height - top)
+    let x = 0
+    let top: number
+    let areaWidth: number
+    let areaHeight: number
+    if (measuredArea) {
+      ;({ x, y: top, width: areaWidth, height: areaHeight } = measuredArea)
+    } else {
+      // getContentBounds = the drawable area inside the window frame, so the
+      // native browser view and the CSS panel measure from the same ruler.
+      const { width, height } = mainWindow.getContentBounds()
+      top = CHROME_HEIGHT + (tabs.length > 1 ? TAB_STRIP_HEIGHT : 0)
+      areaWidth = Math.max(0, width - PANEL_WIDTH)
+      areaHeight = Math.max(0, height - top)
+    }
     const hidden = { x: 0, y: 0, width: 0, height: 0 }
     // With a viewport override, clamp it to the available area so it never spills
     // under the panel/chrome; the leftover area shows the dark React backdrop
     // (like a browser's device-emulation mode).
     const shown = viewportOverride
       ? {
-          x: 0,
+          x,
           y: top,
           width: Math.min(viewportOverride.width, areaWidth),
           height: Math.min(viewportOverride.height, areaHeight)
         }
-      : { x: 0, y: top, width: areaWidth, height: areaHeight }
+      : { x, y: top, width: areaWidth, height: areaHeight }
     // Only the ACTIVE tab is sized to fill the browser area; every other tab is
     // zero-bound (hidden). Before first navigation, or while a React overlay is
     // open, even the active tab is hidden so the welcome/modal shows through.
@@ -927,6 +943,24 @@ function createWindow(): void {
   }
 
   mainWindow.on('resize', resizeEmbedded)
+
+  // The renderer's measurement of `.browser-area` (see measuredArea). Only the
+  // app's own window may set it — a tested page moving the browser view around
+  // would be a way to hide what it's doing.
+  ipcMain.handle('browser:setArea', (event, r: unknown) => {
+    if (event.sender !== mainWindow.webContents) return
+    const a = r as Record<string, unknown> | null
+    const n = (v: unknown): number | null =>
+      typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 100_000 ? Math.round(v) : null
+    const x = n(a?.x)
+    const y = n(a?.y)
+    const width = n(a?.width)
+    const height = n(a?.height)
+    if (x === null || y === null || width === null || height === null) return
+    measuredArea = { x, y, width, height }
+    resizeEmbedded()
+  })
+
   mainWindow.on('ready-to-show', () => {
     resizeEmbedded()
     mainWindow.show()
@@ -1123,7 +1157,7 @@ function createWindow(): void {
     // A replay paused for recovery (Day 12) can't continue once we've left —
     // answer it with a silent abort so its loop doesn't hang forever.
     resolveRecovery({ action: 'abort' })
-    reinjectAllFrames() // disarm every frame (isRecording is now false)
+    broadcastRecorderState() // disarm every frame (isRecording is now false)
     resizeEmbedded() // hide the embedded browser
     try {
       activeWC().navigationHistory.clear()
@@ -1147,10 +1181,8 @@ function createWindow(): void {
     const tab: Tab = { id: `tab-${++tabIdSeq}`, ordinal, view }
     tabs.push(tab)
     const wc = view.webContents
-    // QF-002: hand this tab's relay the current session nonce. A popup opened
-    // mid-recording is part of that recording, and an unarmed relay would drop
-    // everything captured in it without a word.
-    armRelay(wc)
+    // (A popup opened mid-recording needs no arming: each of its frames'
+    // recorders asks main for the current state as it loads — recorder:hello.)
 
     // The active tab drives the URL bar; any tab's navigation refreshes the
     // strip (titles / urls change).
@@ -1160,6 +1192,26 @@ function createWindow(): void {
     }
     wc.on('did-navigate', onNav)
     wc.on('did-navigate-in-page', onNav)
+
+    // QF-012: a page that fails to load showed only Chromium's generic
+    // chrome-error page — nothing in the app said what happened or offered a
+    // retry, so "the server is down" looked the same as "my test broke". The
+    // renderer shows an error bar from `loadError` on the tab list.
+    //   · main frame only — a failed ad iframe isn't the page failing
+    //   · -3 is ERR_ABORTED: a navigation that was cancelled or superseded
+    //     (you clicked away, or pressed stop). That is not a failure.
+    wc.on('did-fail-load', (_e, code, description, url, isMainFrame) => {
+      if (!isMainFrame || code === -3) return
+      tab.loadError = { url, code, description, attempt: ++loadErrorAttempts }
+      emitTabs()
+    })
+    // A new top-level navigation starting clears the previous failure — including
+    // the Retry that follows it, so the bar goes away as the page comes back.
+    wc.on('did-start-navigation', (details) => {
+      if (!details.isMainFrame || details.isSameDocument || !tab.loadError) return
+      tab.loadError = null
+      emitTabs()
+    })
     // Titles arrive a beat after navigation — keep the strip label current.
     wc.on('page-title-updated', () => emitTabs())
 
@@ -1179,32 +1231,11 @@ function createWindow(): void {
       if (!mainWindow.isDestroyed()) closeTab(tab)
     })
 
-    // QF-002: the relay preload is re-executed for EVERY new document, so its
-    // nonce resets to null on every navigation. Re-arm as each document becomes
-    // ready — which is before did-finish-load, so the relay is always listening
-    // by the time the observer is injected and starts posting. Without this,
-    // recording stopped the moment the page navigated.
-    wc.on('dom-ready', () => armRelay(wc))
-
-    // Inject the observer into every frame as pages/iframes load.
-    wc.on('did-finish-load', () => injectAllFrames(wc))
-    wc.on('did-frame-finish-load', () => injectAllFrames(wc))
-    wc.on(
-      'did-frame-navigate',
-      (_e, _url, _code, _status, _isMain, frameProcessId, frameRoutingId) => {
-        // A frame navigated to a fresh document — its old observer is gone. Drop
-        // it from the injected set so it gets the observer again, then inject now.
-        const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
-        if (frame) {
-          try {
-            injectedFrames.delete(frame.frameTreeNodeId)
-          } catch {
-            // frame gone — nothing to drop
-          }
-        }
-        injectAllFrames(wc)
-      }
-    )
+    // Nothing is injected into the page from here any more. The recorder AND
+    // its dialog shim are installed by the recorder preload, in every frame, as
+    // each document starts (src/preload/recorder.ts). Injecting from main as
+    // frames loaded is what used to stop that preload from running in real
+    // iframes — see the note there.
 
     return tab
   }
@@ -1215,7 +1246,17 @@ function createWindow(): void {
     const view = new WebContentsView({
       webPreferences: {
         preload: join(__dirname, '../preload/recorder.js'),
-        sandbox: false,
+        // QF-002: the website under test runs sandboxed — the renderer process
+        // it lives in gets no Node and the OS sandbox's restrictions. The
+        // recorder preload needs only ipcRenderer + webUtils, both sandbox-safe.
+        sandbox: true,
+        // QF-002: the recorder preload loads into EVERY frame, in that frame's
+        // isolated world, so the observer never runs where the page can see it.
+        // (Despite the name, with sandbox on this grants sub-frames no Node —
+        // only the preload.) Frames Chromium gives no preload — script-written
+        // about:blank iframes — are adopted by their parent's recorder.
+        nodeIntegrationInSubFrames: true,
+        contextIsolation: true,
         // Own session bucket, separate from the app UI (localhost:5173, on the
         // default session). Per-run test isolation calls clearStorageData() on this
         // session with no origin filter; without a partition that wipe also erased
@@ -1398,11 +1439,8 @@ function createWindow(): void {
   // step (the existing list already begins with one), we just append more.
   ipcMain.handle('recorder:toggle', (_event, resume?: boolean): boolean => {
     isRecording = !isRecording
-    // QF-002: a fresh nonce for each recording session, so one scraped off a
-    // live recording is dead as soon as that recording ends.
-    syncRelayArming(isRecording)
-    // Arm or disarm the observer in every live frame (top page + all iframes).
-    reinjectAllFrames()
+    // Arm or disarm the recorder in every live frame (top page + all iframes).
+    broadcastRecorderState()
     // When a FRESH recording begins, start from a clean SINGLE tab (like a fresh
     // browser context — and symmetric with replay, which also resets to one
     // tab). Close any leftover popup tabs so old tabs can't pollute the
@@ -1482,9 +1520,9 @@ function createWindow(): void {
         value?: string
         secret?: boolean
         key?: string
-        // Day 15: which frame this fired in, baked in by the injected observer
-        // (every event is relayed through the top frame, so we can't read it
-        // from the IPC sender — it travels in the payload).
+        // QF-002: the frame path RELATIVE to the sending frame — empty for the
+        // frame itself, or an adopted script-written child's path. The sending
+        // frame itself comes from Electron (event.senderFrame), never the page.
         frame?: { url: string; name?: string }[] | null
       }
     ) => {
@@ -1504,7 +1542,7 @@ function createWindow(): void {
           key: raw.key,
           selector: primary,
           candidates,
-          frame: raw.frame ?? undefined
+          frame: frameOfEvent(event.senderFrame, raw.frame)
         },
         recWindowIdOfWC(event.sender)
       )
@@ -1575,7 +1613,10 @@ function createWindow(): void {
   // — replay sets them via CDP DOM.setFileInputFiles; export → .setInputFiles().
   ipcMain.on(
     'recorder:upload',
-    async (event, raw: { facts: ElementFacts; paths: string[]; names?: string[] }) => {
+    async (
+      event,
+      raw: { facts: ElementFacts; paths: string[]; names?: string[]; frame?: unknown }
+    ) => {
       if (!isRecording) return
       // === QF-002b: uploads come from a trusted picker event, or not at all ===
       //
@@ -1607,6 +1648,9 @@ function createWindow(): void {
       const names = (Array.isArray(raw.names) ? raw.names : [])
         .filter((n): n is string => typeof n === 'string' && n.length <= 500)
         .slice(0, 50)
+      // Every frame has a recorder now, so an upload can come from inside an
+      // iframe too — filed under the frame Electron says sent it.
+      const frame = frameOfEvent(event.senderFrame, raw.frame)
       raw = { facts, paths, names }
 
       const ordinal = recWindowIdOfWC(event.sender)
@@ -1619,7 +1663,8 @@ function createWindow(): void {
           label: (raw.names ?? []).join(', ') || 'file',
           value: stored.join('\n'),
           selector: primary,
-          candidates
+          candidates,
+          ...(frame ? { frame } : {})
         },
         ordinal
       )
@@ -1939,9 +1984,7 @@ function createWindow(): void {
   // selector engine (same as recorded steps) before handing to the UI.
   ipcMain.handle('recorder:setPicking', (_event, active: boolean) => {
     isPicking = active
-    // QF-002: picking is a relay session of its own — arm before re-injecting.
-    syncRelayArming(active && !isRecording)
-    reinjectAllFrames()
+    broadcastRecorderState()
   })
 
   // Which tab a PAGE-LEVEL check belongs to (URL contains / page title / AI
@@ -1970,7 +2013,7 @@ function createWindow(): void {
         inputValue?: string
         disabled?: boolean
         checked?: boolean
-        // Day 15: baked-in frame of the picked element (see recorder:event).
+        // Relative frame path — see recorder:event.
         frame?: { url: string; name?: string }[] | null
       }
     ) => {
@@ -1979,12 +2022,12 @@ function createWindow(): void {
       const cleanPick = validatePageMessage('recorder:picked', raw) as typeof raw | null
       if (!cleanPick) return
       raw = cleanPick
-      // A completed pick ENDS pick mode. The page's own observer already flips
-      // its local `picking` off when it captures the click, but main must reset
-      // its flag too — otherwise the next observer re-injection (e.g. the
-      // navigate at the start of a replay) bakes in a stale picking=true and the
-      // page comes back up in pick mode, painting the blue highlight mid-replay.
+      // A completed pick ENDS pick mode — in EVERY frame. The frame that caught
+      // the click already stopped; the others would otherwise keep painting the
+      // blue hover highlight, and a frame that loads later would ask main and
+      // come back up in pick mode mid-replay.
       isPicking = false
+      broadcastRecorderState()
       const { primary, candidates } = buildSelectors(raw.facts)
       // For 'count' checks: how many elements the primary strategy matched.
       // The observer already counted duplicates at pick time (Day 10b) — dup
@@ -2007,7 +2050,7 @@ function createWindow(): void {
         groupCount,
         // Day 15: if the picked element is inside an iframe, the assertion (or
         // recovery heal) built from it must replay in — and export for — that frame.
-        frame: raw.frame ?? undefined,
+        frame: frameOfEvent(event.senderFrame, raw.frame),
         // Day 17 (multiple windows): …and WHICH TAB it was picked in. Recorded
         // steps have carried this since Day 17 (the observer passes its sender),
         // but a PICKED element only ever learned about frames — so a check added
@@ -2021,7 +2064,11 @@ function createWindow(): void {
     }
   )
 
-  ipcMain.on('recorder:pick-cancel', () => {
+  ipcMain.on('recorder:pick-cancel', (event) => {
+    // Only from one of our tabs' recorders (Esc pressed in a picking frame).
+    if (!isTabSender(event.sender)) return
+    isPicking = false
+    broadcastRecorderState()
     mainWindow.webContents.send('recorder:pick-cancel')
   })
 
@@ -3265,10 +3312,15 @@ function createWindow(): void {
           if (baselineKey && !greenBaseline) greenBaseline = await loadDomBaseline(baselineKey)
           const fingerprint = topFrame ? greenBaseline?.elements?.[idx] : undefined
           const wantRect = fingerprint?.rect ?? null
-          const found = (await frame.executeJavaScript(
-            `window.__qaflow && window.__qaflow.findByLabel(${JSON.stringify(label)}, ${JSON.stringify(role)}, ${JSON.stringify(recordedText)}, ${JSON.stringify(wantRect)}, ${JSON.stringify(step.type)})`,
-            true
-          )) as {
+          // Asked of the frame's recorder (isolated world) over IPC — it no
+          // longer exposes anything on the page's `window` to call.
+          const found = (await findByLabelIn(frame, [
+            label,
+            role,
+            recordedText,
+            wantRect,
+            step.type
+          ])) as {
             matches: {
               facts: ElementFacts
               rect: { x: number; y: number; w: number; h: number }
@@ -4611,7 +4663,7 @@ function createWindow(): void {
   // library.ts where it's testable without Electron wiring.
   ipcMain.handle(
     'library:save',
-    (
+    async (
       _event,
       input: {
         name: string
@@ -4627,7 +4679,21 @@ function createWindow(): void {
         // supplies the actual HAR log (it lives here, not in the renderer).
         captureHar?: boolean
       }
-    ) => saveTest({ ...input, harLog: input.captureHar ? har.captured() : undefined })
+    ) => {
+      const saved = await saveTest({ ...input, harLog: input.captureHar ? har.captured() : undefined })
+      // QF-003: the audit asked for secrets to be collected when tests AND
+      // STEPS are deleted. Deleting a step and saving can orphan a password —
+      // not at once (the previous version, kept for rollback, still holds its
+      // ref) but when that version ages out of the capped history. Sweeping
+      // after every save catches both. Not awaited: the save has succeeded,
+      // and a slow or failed sweep must never make it look as if it hadn't.
+      allSecretRefs()
+        .then((refs) => collectOrphanedSecrets(refs))
+        .catch(() => {
+          // the next save or delete sweeps again
+        })
+      return saved
+    }
   )
 
   // === Data-driven (Day 20) + Environments (F25) =====================

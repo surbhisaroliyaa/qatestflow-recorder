@@ -41,7 +41,14 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
+      # QF-011: the test counts in README/FEATURES are generated; a stale doc fails.
+      - name: Docs state the real test counts
+        run: node tools/doc-counts.mjs --check
       - run: npm run build
+      # QF-002: both windows are sandboxed; a preload that requires anything but
+      # `electron` would crash at startup.
+      - name: Preloads are sandbox-safe
+        run: node tools/check-preload-sandbox.mjs
 
   # ── THE EXPORT CONTRACT (QF-001) ───────────────────────────────────
   # Generates a spec for every HTML form control with the REAL exporters,
@@ -75,6 +82,8 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npx playwright install --with-deps chromium
+      # The app-shell accessibility scan (QF-004) loads the BUILT renderer.
+      - run: npm run build
       - run: npm run test:dom
 
   # ── Dependency audit — BLOCKING (QF-006 closed 2026-09-18) ─────────
@@ -95,15 +104,11 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high
 
-  # ── Known-red gate, reported but not yet blocking ──────────────────
-  #   QF-009  lint — 8 errors and 3,329 warnings in the tree
-  #
-  # Runs so the numbers stay visible on every commit, and doesn't block so
-  # that a pipeline which is red for a known, tracked reason can't teach
-  # everyone to ignore a red pipeline. The `continue-on-error` line comes
-  # out the moment QF-009 is closed — that removal is part of fixing it.
-  known-issues:
-    name: Known-red gate (lint) — reported, not blocking
+  # QF-009: lint is a real gate now — zero errors, zero warnings, and any new
+  # warning fails the build (--max-warnings 0). Formatting is checked on its
+  # own by prettier, so style noise can never bury a real finding again.
+  lint:
+    name: Lint + format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -112,6 +117,5 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
-      - name: Lint (QF-009 — currently red)
-        continue-on-error: true
-        run: npm run lint
+      - run: npm run lint -- --max-warnings 0
+      - run: npm run format:check

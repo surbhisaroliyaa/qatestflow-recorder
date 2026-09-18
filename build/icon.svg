@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- QATestFlow Recorder app icon - the SOURCE for build/icon.{png,ico,icns} and
+     resources/icon.png. Edit here, then run: node tools/make-icons.mjs
+     Name on top; four tiles below, one per job: record, replay / test, export. -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="#1b2030"/>
+  <!-- Name on top. Every text line is centred on x=256; RECORDER's letter
+       spacing also trails its last letter, so it is shifted right by half of
+       it (letter-spacing 7 → +3.5) to sit truly centred. -->
+  <text x="256" y="128" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-weight="800" font-size="60" fill="#ffffff">QA<tspan fill="#9fb4ff">TestFlow</tspan></text>
+  <text x="259.5" y="174" text-anchor="middle" font-family="'Segoe UI', Arial, sans-serif" font-weight="600" font-size="32" letter-spacing="7" fill="#aab4cc">RECORDER</text>
+  <!-- Tiles below: 368×368 design units scaled to 248 → x = (512 − 248) / 2 = 132 -->
+  <g transform="translate(132 206) scale(0.674)">
+    <rect x="0" y="0" width="170" height="170" rx="40" fill="#2a3150"/>
+    <rect x="198" y="0" width="170" height="170" rx="40" fill="#2a3150"/>
+    <rect x="0" y="198" width="170" height="170" rx="40" fill="#2a3150"/>
+    <rect x="198" y="198" width="170" height="170" rx="40" fill="#4364ee"/>
+    <circle cx="85" cy="85" r="46" fill="#e5484d"/>
+    <path d="M258 44 L322 85 L258 126 Z" fill="#9fb4ff" stroke="#9fb4ff" stroke-width="14" stroke-linejoin="round"/>
+    <path d="M44 284 L74 314 L128 254" fill="none" stroke="#3ddc84" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M254 246 L228 283 L254 320 M312 246 L338 283 L312 320" fill="none" stroke="#ffffff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

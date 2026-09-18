@@ -22,6 +22,11 @@ const api = {
     // Hide/show the embedded browser so React overlays (modals) aren't covered.
     setOverlay: (open: boolean): Promise<void> => ipcRenderer.invoke('browser:setOverlay', open),
 
+    // QF-007/008/012: where `.browser-area` really is on screen, so main can
+    // place the native page view exactly over it.
+    setArea: (r: { x: number; y: number; width: number; height: number }): Promise<void> =>
+      ipcRenderer.invoke('browser:setArea', r),
+
     // The embedded page's live URL + title, for prefilling page-level checks.
     getPageInfo: (): Promise<{ url: string; title: string }> =>
       ipcRenderer.invoke('browser:getPageInfo'),

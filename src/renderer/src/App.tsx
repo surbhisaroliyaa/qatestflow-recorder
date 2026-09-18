@@ -1,6 +1,19 @@
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent
+} from 'react'
 // QF-004: keyboard focus containment for every modal — see modalA11y.ts.
 import { trapFocus } from './modalA11y'
+// QF-007/008: resizable step pane.
+import { clampPaneWidth, readStoredPaneWidth, PANE_DEFAULT, PANE_KEY_STEP } from './paneLayout'
+// QF-012: plain-language page-load errors.
+import { explainLoadError, loadErrorDetails } from '../../shared/loadErrors'
+// QF-011: one place that knows "1 step" vs "2 steps".
+import { plural } from '../../shared/plural'
 import {
   generatePlaywrightTest,
   generatePageObjectTest,
@@ -1135,7 +1148,10 @@ function App(): React.JSX.Element {
     return () => {
       if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current)
     }
-  }, [steps, testFileName, testName, baseURL, testSuite, storageState, viewport, deviceId, dataRows])
+    // `tags` was missing: the draft SAVES them, but tagging an unsaved recording
+    // didn't trigger a save, so the tag was lost if nothing else changed after
+    // it (found by react-hooks/exhaustive-deps — QF-009).
+  }, [steps, testFileName, testName, baseURL, testSuite, storageState, viewport, deviceId, tags, dataRows])
 
   // Sync the URL bar whenever the embedded browser navigates.
   // Mark hasNavigated true so we switch from welcome -> chrome view.
@@ -1158,6 +1174,103 @@ function App(): React.JSX.Element {
     const unsubscribe = window.api.browser.onTabsChanged((t) => setTabs(t))
     return unsubscribe
   }, [])
+
+  // === QF-007/008: the step pane is resizable and collapsible ==========
+  // Remembered per user (a convenience, so localStorage — wrapped, because it
+  // can throw or come back empty and the pane must still open sensibly).
+  const [paneWidth, setPaneWidth] = useState<number>(() => {
+    try {
+      return clampPaneWidth(readStoredPaneWidth(localStorage.getItem('qaflow.paneWidth')), window.innerWidth)
+    } catch {
+      return PANE_DEFAULT
+    }
+  })
+  const [paneCollapsed, setPaneCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('qaflow.paneCollapsed') === '1'
+    } catch {
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('qaflow.paneWidth', String(paneWidth))
+      localStorage.setItem('qaflow.paneCollapsed', paneCollapsed ? '1' : '0')
+    } catch {
+      // not remembered next time — the pane still works
+    }
+  }, [paneWidth, paneCollapsed])
+  // A window made narrower must not leave the pane wider than it now allows.
+  useEffect(() => {
+    const onResize = (): void => setPaneWidth((w) => clampPaneWidth(w, window.innerWidth))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // Dragging the divider. The page is a NATIVE view painted over the app, so
+  // once the pointer crosses onto it the app stops receiving pointer events and
+  // the drag would freeze mid-way. The page is hidden for the length of the
+  // drag (the same mechanism modals use) so the divider can follow the pointer
+  // anywhere; it reappears the moment the drag ends.
+  const startPaneDrag = (e: React.PointerEvent<HTMLElement>): void => {
+    e.preventDefault()
+    // preventDefault above also stops the click from focusing the divider, so
+    // focus it by hand: a click, then the arrow keys, is the natural sequence.
+    e.currentTarget.focus()
+    window.api.browser.setOverlay(true)
+    const move = (ev: PointerEvent): void =>
+      setPaneWidth(clampPaneWidth(window.innerWidth - ev.clientX, window.innerWidth))
+    const up = (): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.api.browser.setOverlay(false)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  // === QF-007/008/012: tell main exactly where the page belongs ========
+  // Main paints the native page view over `.browser-area`. Its position now
+  // depends on the wrapping toolbar, the tab strip, the load-error bar and the
+  // pane width — so it's measured here and reported, rather than computed in
+  // main from constants that could drift from the CSS.
+  const browserAreaRef = useRef<HTMLDivElement | null>(null)
+  useLayoutEffect(() => {
+    const el = browserAreaRef.current
+    if (!el) return
+    let last = ''
+    const report = (): void => {
+      const r = el.getBoundingClientRect()
+      const rect = { x: r.left, y: r.top, width: r.width, height: r.height }
+      const key = JSON.stringify(rect)
+      if (key === last) return
+      last = key
+      window.api.browser.setArea(rect)
+    }
+    report()
+    // Size changes are caught by the observer; POSITION changes (the toolbar
+    // wrapping to a second line pushes the area down without resizing it
+    // first) are caught by also observing the page root.
+    const ro = new ResizeObserver(report)
+    ro.observe(el)
+    ro.observe(document.body)
+    window.addEventListener('resize', report)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', report)
+    }
+  }, [hasNavigated])
+
+  // === QF-012: the active tab's failed page load, if any ===============
+  const activeLoadError = tabs.find((t) => t.active)?.loadError ?? null
+  const [dismissedLoadError, setDismissedLoadError] = useState<string | null>(null)
+  // Per failure, not per address: after ✕, trying the same bad address again
+  // (typing it, or Retry) must show the bar again.
+  const loadErrorKey = activeLoadError
+    ? `${activeLoadError.attempt ?? 0}|${activeLoadError.url}|${activeLoadError.code}`
+    : null
+  const showLoadError = !!activeLoadError && loadErrorKey !== dismissedLoadError
+  const [loadErrorCopied, setLoadErrorCopied] = useState(false)
 
   // Day 17 (session reuse): load the saved-session list once.
   const refreshSessions = (): void => {
@@ -1266,6 +1379,36 @@ function App(): React.JSX.Element {
   // chooser prefilled with the element's live text.
   // Day 12: unless this pick is a RE-PICK for a paused replay — then it heals
   // the failed step's selector ladder and retries it, no chooser involved.
+  // === No-code step editor ==========================================
+  // (Declared here, ABOVE the effects that call it, rather than beside the
+  // other step-editor handlers: the pick listener below is registered once and
+  // keeps the copy it closed over. editSteps only calls state setters, so that
+  // copy is always right — but declaring it after its first use is the shape a
+  // stale-closure bug takes, and the React compiler lint rightly refuses it.)
+  // Every edit changes the single source of truth — the `steps` array. It also
+  // clears the last replay's pass/fail marks (they no longer describe the new
+  // list) and closes any open inline edit.
+  const editSteps = (next: RecorderStep[]): void => {
+    setSteps(next)
+    setEditingIndex(null)
+    setExpandedIndex(null) // rows may have shifted — an open ladder would lie
+    setInsertMenuIndex(null) // same for an open insert-here menu
+    setDoneIndices(new Set())
+    setFailedIndex(null)
+    setReplayError(null)
+    setReplayingIndex(null)
+    setSkippedIndices(new Set()) // skip marks describe the old order too
+    setHealedIndices(new Set()) // healed indices may have shifted — drop the hint
+    setAiHealedIndices(new Set()) // AI-heal badges describe the old order too
+    setDataRun(null) // Day 20: a past data-run summary describes the old steps
+    setFailDetail(null)
+    // F24: the recorded HTTP responses describe the OLD list. Insert a step above
+    // an API step and every index shifts, so a "↩ 200 · 322 ms" chip would sit on
+    // a step that never ran — the exact kind of lie this app exists to prevent.
+    setApiResponses({})
+    setApiPanelIndex(null)
+  }
+
   useEffect(() => {
     const unsubscribe = window.api.recorder.onPicked((picked) => {
       setIsPicking(false)
@@ -1558,44 +1701,15 @@ function App(): React.JSX.Element {
     return trapFocus()
   }, [anyOverlayOpen])
 
+  // Hide the native page while anything overlays it. This used to list every
+  // modal's state AGAIN as its dependencies — a second copy of the list above
+  // that each new modal had to be added to by hand, or it rendered UNDER the
+  // page and the app looked frozen (a recurring bug). It depends on the one
+  // value it actually uses now, so the list above is the only list.
+  // (react-hooks/exhaustive-deps pointed at it — QF-009.)
   useEffect(() => {
     window.api.browser.setOverlay(anyOverlayOpen)
-  }, [
-    exportCode,
-    suiteSummaryOpen,
-    dataPopupOpen,
-    analysisOpen,
-    traceView,
-    a11yPanelOpen,
-    perfPanelOpen,
-    historyOpen,
-    envManagerOpen,
-    edgeModalOpen,
-    edgeRun,
-    edgeReportOpen,
-    localeOpen,
-    localeRun,
-    localeReportOpen,
-    xbOpen,
-    docOpen,
-    envWarn,
-    apiDraft,
-    snapDraft,
-    aiPromptOpen,
-    bugPromptOpen,
-    createsDataIndex,
-    acOpen,
-    monitorsOpen,
-    coverageOpen,
-    draftOpen,
-    mockOpen,
-    jiraOpen,
-    secretMigration, // F40
-    bundleResult, // F40
-    importPlan, // F40
-    parallelRunning, // F39.1
-    apiPanelIndex
-  ])
+  }, [anyOverlayOpen])
 
   // Day 18: remember the trace policy across sessions.
   useEffect(() => {
@@ -1718,7 +1832,7 @@ function App(): React.JSX.Element {
   // it can't be undone). Only offered when not recording / replaying.
   const handleClearSteps = (): void => {
     if (steps.length === 0) return
-    if (!window.confirm(`Clear all ${steps.length} steps and start over?`)) return
+    if (!window.confirm(`Clear ${steps.length === 1 ? 'the 1 step' : `all ${steps.length} steps`} and start over?`)) return
     editSteps([])
     // Day 20: clearing the steps drops the data table with them.
     setDataRows([])
@@ -2495,7 +2609,10 @@ function App(): React.JSX.Element {
     setLocaleReportOpen(false)
     setLocaleRun({ total: locales.length, current: 0, currentLabel: '', running: true, results: [] })
     let baseTexts: Set<string> | null = null // the first locale's visible strings
-    const results: LocaleResult[] = []
+    // Rebuilt, never mutated: the state updater below runs when React gets to
+    // it, and a list still being pushed to could by then hold a LATER locale
+    // too (the React compiler lint caught this — QF-009).
+    let results: LocaleResult[] = []
     for (let i = 0; i < locales.length; i++) {
       const loc = locales[i]
       setLocaleRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: loc } : prev))
@@ -2507,20 +2624,24 @@ function App(): React.JSX.Element {
       const insp = await window.api.i18n.inspect()
       if (baseTexts === null) baseTexts = new Set(insp.texts) // base = the first run
       const unchanged = insp.texts.filter((t) => baseTexts!.has(t)).length
-      results.push({
-        locale: loc,
-        ok: res.ok,
-        error: res.error,
-        failedAt: res.failedAt,
-        screenshotPath: res.screenshotPath,
-        traceId: res.traceId,
-        dir: insp.dir,
-        overflowCount: insp.overflowCount,
-        overflow: insp.overflow,
-        unchanged,
-        totalTexts: insp.texts.length
-      })
-      setLocaleRun((prev) => (prev ? { ...prev, results: [...results] } : prev))
+      results = [
+        ...results,
+        {
+          locale: loc,
+          ok: res.ok,
+          error: res.error,
+          failedAt: res.failedAt,
+          screenshotPath: res.screenshotPath,
+          traceId: res.traceId,
+          dir: insp.dir,
+          overflowCount: insp.overflowCount,
+          overflow: insp.overflow,
+          unchanged,
+          totalTexts: insp.texts.length
+        }
+      ]
+      const soFar = results
+      setLocaleRun((prev) => (prev ? { ...prev, results: soFar } : prev))
     }
     setLocaleRun((prev) => (prev ? { ...prev, running: false } : prev))
     setLocaleReportOpen(true)
@@ -4060,31 +4181,6 @@ function App(): React.JSX.Element {
     setBaseURL(next)
   }
 
-  // === No-code step editor ==========================================
-  // Every edit changes the single source of truth — the `steps` array. It also
-  // clears the last replay's pass/fail marks (they no longer describe the new
-  // list) and closes any open inline edit.
-  const editSteps = (next: RecorderStep[]): void => {
-    setSteps(next)
-    setEditingIndex(null)
-    setExpandedIndex(null) // rows may have shifted — an open ladder would lie
-    setInsertMenuIndex(null) // same for an open insert-here menu
-    setDoneIndices(new Set())
-    setFailedIndex(null)
-    setReplayError(null)
-    setReplayingIndex(null)
-    setSkippedIndices(new Set()) // skip marks describe the old order too
-    setHealedIndices(new Set()) // healed indices may have shifted — drop the hint
-    setAiHealedIndices(new Set()) // AI-heal badges describe the old order too
-    setDataRun(null) // Day 20: a past data-run summary describes the old steps
-    setFailDetail(null)
-    // F24: the recorded HTTP responses describe the OLD list. Insert a step above
-    // an API step and every index shifts, so a "↩ 200 · 322 ms" chip would sit on
-    // a step that never ran — the exact kind of lie this app exists to prevent.
-    setApiResponses({})
-    setApiPanelIndex(null)
-  }
-
   // Day 10(c): hand-pick a selector candidate as the step's primary. The pick
   // is recorded as `pinned` — replay tries the pinned candidate FIRST (before
   // higher-scored ones), and export emits its locator. Picking again later
@@ -4647,6 +4743,9 @@ function App(): React.JSX.Element {
   // slow headless run from overlapping the next tick. HONEST LIMIT: this only
   // fires while the app is open. Skips while the user is mid-record/replay/pick so
   // a background run can't fight their foreground work.
+  // `runMonitorNow` is a fresh function every render. As an Effect Event it is
+  // always the latest one, without re-creating the 30-second interval each time.
+  const runDueMonitor = useEffectEvent((m: (typeof monitors)[number]) => runMonitorNow(m))
   useEffect(() => {
     const tick = async (): Promise<void> => {
       // `isReplaying` is only true DURING each individual runOnce(), and a batch
@@ -4679,11 +4778,10 @@ function App(): React.JSX.Element {
           m.enabled &&
           (!m.lastRunAt || now - new Date(m.lastRunAt).getTime() >= m.intervalMin * 60000)
       )
-      if (due) await runMonitorNow(due) // self-guards + drives the spinner
+      if (due) await runDueMonitor(due) // self-guards + drives the spinner
     }
     const id = window.setInterval(tick, 30000)
     return () => window.clearInterval(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     // Every guarded flag belongs here too, or the effect keeps a stale closure
     // and the tick reads the value from when it was last created.
   }, [
@@ -5124,7 +5222,7 @@ function App(): React.JSX.Element {
           guessed: res.guessed ?? []
         })
         setDraftNote(
-          res.note ? `⚠ ${res.note}` : `✓ Drafted ${res.steps.length} steps — review, then Insert.`
+          res.note ? `⚠ ${res.note}` : `✓ Drafted ${plural(res.steps.length, 'step')} — review, then Insert.`
         )
       } else {
         setDraftNote(`⚠ ${res.note || 'The AI produced no draft for that story.'}`)
@@ -5323,7 +5421,11 @@ function App(): React.JSX.Element {
             tone: 'passed',
             text: `✓ Finished: ${doneIndices.size} passed, ${skippedIndices.size} skipped`
           }
-        : { tone: 'passed', text: `✓ All ${enabledCount} steps passed` }
+        : {
+            tone: 'passed',
+            // QF-011: this said "All 1 steps passed" for a one-step run.
+            text: enabledCount === 1 ? '✓ The step passed' : `✓ All ${enabledCount} steps passed`
+          }
     }
     return null
   })()
@@ -5966,6 +6068,11 @@ function App(): React.JSX.Element {
   // === Chrome view — shown once user has navigated ===
   return (
     <div className="app">
+      {/* QF-004: the workspace had no heading structure at all, so a screen
+          reader user had nothing to jump between. An h1 for the app (hidden —
+          the toolbar already says where you are visually), then an h2 per
+          region: the page under test and the steps. */}
+      <h1 className="visually-hidden">QATestFlow Recorder</h1>
       {/* Day 16(+): download confirmation toast — auto-clears after a few sec.
           Three states: ok (has content), empty (downloaded but 0 bytes), and
           failed (transfer didn't finish). */}
@@ -6233,16 +6340,14 @@ function App(): React.JSX.Element {
       </div>
 
       {/* F1: the HAR status chips used to sit HERE, between the toolbar and the
-          browser area — where the native WebContentsView paints over them. main
-          positions that view at CHROME_HEIGHT (+ the tab strip) and knows nothing
-          about any other band, so this bar was invisible the entire time a page
-          was loaded, which is every moment it had something to say. Moved into
-          the steps panel, which the native view never covers (it stops at
-          width - PANEL_WIDTH). See the har-status block below. */}
+          browser area — where the native WebContentsView paints over them.
+          Moved into the steps panel, which the native view never covers. (Since
+          QF-007, main places the view over the MEASURED `.browser-area`, so a
+          band above it would now be respected — the load-error bar relies on
+          that — but the chips read naturally beside the steps.) */}
 
       {/* Day 17: the tab strip — shown only with 2+ tabs (a popup opened one).
-          Its height must match TAB_STRIP_HEIGHT in main so the native browser
-          view, which starts just below it, lines up exactly. */}
+          The page view starts below it because `.browser-area` is measured. */}
       {tabs.length > 1 && (
         <div className="tab-strip">
           {tabs.map((t) => (
@@ -6281,8 +6386,105 @@ function App(): React.JSX.Element {
           covered. The open dialog over a dimmed window already says why the
           page is gone, and the page returns the moment the dialog closes. */}
       <div className="workspace">
-        <div className="browser-area" />
-        <aside className="steps-panel">
+        <div className="browser-column">
+          <h2 className="visually-hidden">Page under test</h2>
+          {/* QF-012: the page failed to load. Above the page (never under the
+              native view, which would hide it) and announced to screen readers. */}
+          {showLoadError && activeLoadError && (
+            <div className="load-error-bar" role="alert">
+              <span className="load-error-icon" aria-hidden="true">
+                ⚠
+              </span>
+              <div className="load-error-text">
+                <strong>This page didn’t load.</strong> {explainLoadError(activeLoadError)}
+                <span className="load-error-meta">
+                  {activeLoadError.url} · {activeLoadError.description} ({activeLoadError.code})
+                </span>
+              </div>
+              <button
+                type="button"
+                className="load-error-btn primary"
+                onClick={() => window.api.browser.reload()}
+              >
+                ↻ Retry
+              </button>
+              <button
+                type="button"
+                className="load-error-btn"
+                onClick={() => {
+                  navigator.clipboard
+                    .writeText(loadErrorDetails(activeLoadError))
+                    .then(() => {
+                      setLoadErrorCopied(true)
+                      setTimeout(() => setLoadErrorCopied(false), 2000)
+                    })
+                    .catch(() => {})
+                }}
+              >
+                {loadErrorCopied ? '✓ Copied' : 'Copy details'}
+              </button>
+              <button
+                type="button"
+                className="load-error-close"
+                aria-label="Dismiss this message"
+                title="Dismiss"
+                onClick={() => setDismissedLoadError(loadErrorKey)}
+              >
+                ✕
+              </button>
+            </div>
+          )}
+          <div className="browser-area" ref={browserAreaRef} />
+        </div>
+        {/* QF-007/008: drag (or arrow keys) to resize the step pane; the
+            button collapses it to a thin rail so the page gets the width. */}
+        {!paneCollapsed && (
+          <div className="pane-edge">
+            <button
+              type="button"
+              className="pane-collapse"
+              onClick={() => setPaneCollapsed(true)}
+              aria-label="Hide the steps panel"
+              title="Hide the steps panel (the page gets the full width)"
+            >
+              »
+            </button>
+            <div
+              className="pane-divider"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize the steps panel (left and right arrow keys)"
+              aria-valuenow={paneWidth}
+              tabIndex={0}
+              onPointerDown={startPaneDrag}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowLeft') {
+                  e.preventDefault()
+                  setPaneWidth((w) => clampPaneWidth(w + PANE_KEY_STEP, window.innerWidth))
+                } else if (e.key === 'ArrowRight') {
+                  e.preventDefault()
+                  setPaneWidth((w) => clampPaneWidth(w - PANE_KEY_STEP, window.innerWidth))
+                }
+              }}
+            />
+          </div>
+        )}
+        {paneCollapsed && (
+          <button
+            type="button"
+            className="pane-rail"
+            onClick={() => setPaneCollapsed(false)}
+            aria-label={`Show the steps panel (${steps.length} step${steps.length === 1 ? '' : 's'})`}
+            title="Show the steps panel"
+          >
+            <span aria-hidden="true">«</span>
+            <span className="pane-rail-label">STEPS · {steps.length}</span>
+          </button>
+        )}
+        <aside
+          className="steps-panel"
+          style={{ width: paneWidth, display: paneCollapsed ? 'none' : undefined }}
+        >
           {/* === Day 11: current test identity (name + editable base URL) ===
               Show for an UNSAVED recording too (any steps) — otherwise the env
               switcher / base URL below are unreachable until you save, which is the
@@ -6393,7 +6595,7 @@ function App(): React.JSX.Element {
             </div>
           )}
           <div className="steps-header">
-            <span className="steps-title">
+            <h2 className="steps-title">
               Steps
               {steps.length > 0 && <span className="steps-count">{steps.length}</span>}
               {/* F6: how many assertions verify little/nothing — a nudge to strengthen them. */}
@@ -6405,7 +6607,7 @@ function App(): React.JSX.Element {
                   ⚠ {weakByIndex.size} weak check{weakByIndex.size === 1 ? '' : 's'}
                 </span>
               )}
-            </span>
+            </h2>
             {/* Empty test: still offer Blocks, so you can START a test by
                 inserting a saved block (e.g. "Add to Cart") as the first steps. */}
             {steps.length === 0 && !isRecording && (

@@ -1,15 +1,19 @@
 import { test, expect, type Page } from '@playwright/test'
-import { observerProgram } from '../src/main/observerSource'
+import { createObserver, dialogShimProgram } from '../src/main/observerSource'
 import { buildSelectors, labelFrom, type ElementFacts } from '../src/main/selector'
 import { buildActionScript, type ReplayCandidate } from '../src/main/replay'
-// QF-002: the real gate, so a real recorded event can be run through it.
-import { relayDecision } from '../src/shared/recorderMessages'
+// QF-002: the gate main applies to every recorder message.
+import { validatePageMessage } from '../src/shared/recorderMessages'
 
 // =====================================================================
 // THE OBSERVER — what actually watches the page while you record.
 //
-// It is stringified and injected into every frame, so like the replay
-// engine it can only be judged by running it in a real DOM.
+// In the app it runs in each frame's ISOLATED world, inside the recorder
+// preload, and sends with ipcRenderer. Here it is stringified and run in a
+// plain page with a fake `send`, because like the replay engine it can only
+// be judged by running it in a real DOM. (The isolated-world plumbing itself
+// — preload in every frame, adoption of script-written iframes, sandboxing —
+// is exercised end to end by tools/e2e-smoke.mjs against the built app.)
 //
 // The last section is the one that matters most in this whole repo: a
 // full ROUND TRIP. Click a real element, let the observer record it, run
@@ -25,17 +29,23 @@ interface Recorded {
   payload: { type?: string; facts?: ElementFacts; value?: string; secret?: boolean }
 }
 
-/** Install the observer, armed for recording, collecting what it posts. */
-async function record(page: Page, html: string): Promise<void> {
-  await page.setContent(html)
+/** The observer factory, defined ONCE per page (so its per-document guard is
+ *  shared by every call, as in the preload), plus an event log. */
+async function installFactory(page: Page): Promise<void> {
   await page.evaluate(`
     window.__qaflowEvents = []
-    window.addEventListener('message', (e) => {
-      if (e.data && e.data.__qaflow) window.__qaflowEvents.push({ channel: e.data.channel, payload: e.data.payload })
-    })
-    window.__qaflowInitActive = true
-    ;(${observerProgram.toString()})()
+    window.__qaCreate = (${createObserver.toString()})
+    window.__qaSend = (channel, payload) => window.__qaflowEvents.push({ channel, payload })
   `)
+}
+
+/** Install the observer, armed for recording, collecting what it sends. */
+async function record(page: Page, html: string, recording = true): Promise<void> {
+  await page.setContent(html)
+  await installFactory(page)
+  await page.evaluate(
+    `window.__qaObserver = window.__qaCreate(window, document, { send: window.__qaSend, recording: ${recording} })`
+  )
 }
 
 // postMessage delivery is ASYNCHRONOUS: the observer posts, and the listener
@@ -105,9 +115,41 @@ test.describe('what the observer notices', () => {
 
   test('records a select by its chosen option', async ({ page }) => {
     await record(page, '<select id="s"><option>One</option><option>Two</option></select>')
-    await page.selectOption('#s', 'Two')
+    // With the keyboard, as a user would. Playwright's selectOption() sets the
+    // value by SCRIPT and dispatches an untrusted change — which the observer
+    // now rightly ignores (QF-002; see the forgery tests below).
+    await page.focus('#s')
+    await page.keyboard.press('ArrowDown')
     const sel = (await steps(page)).find((s) => s.type === 'select')
     expect(sel?.value).toBe('Two')
+  })
+
+  // === QF-002: only REAL input becomes a step ========================
+  // The tested page can call button.click() or dispatch events itself. Those
+  // arrive with isTrusted === false, and must never be recorded — before this
+  // rule, a page could forge a step with one line of script, no nonce needed.
+  test('a click the PAGE performs is not recorded', async ({ page }) => {
+    await record(page, '<button id="b">Buy</button>')
+    await page.evaluate(() => {
+      document.getElementById('b')!.click()
+      document.getElementById('b')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(await steps(page, 0)).toHaveLength(0)
+    // …while a real one still is.
+    await page.click('#b')
+    expect((await steps(page)).map((s) => s.type)).toEqual(['click'])
+  })
+
+  test('a change or Enter the PAGE dispatches is not recorded', async ({ page }) => {
+    await record(page, '<form><input id="q"></form>')
+    await page.evaluate(() => {
+      const q = document.getElementById('q') as HTMLInputElement
+      q.value = 'forged'
+      q.dispatchEvent(new Event('change', { bubbles: true }))
+      q.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    await page.waitForTimeout(300)
+    expect(await steps(page, 0)).toHaveLength(0)
   })
 
   // === QF-001: the checkbox contract =================================
@@ -191,7 +233,9 @@ test.describe('what the observer notices', () => {
       page,
       '<label>Country <select id="c"><option>India</option><option>Peru</option></select></label>'
     )
-    await page.selectOption('#c', 'Peru')
+    // Keyboard, not selectOption() — see "records a select by its chosen option".
+    await page.focus('#c')
+    await page.keyboard.press('ArrowDown')
     const sel = (await steps(page)).find((s) => s.type === 'select')
     expect(sel?.facts?.labelText).toBe('Country')
   })
@@ -254,137 +298,46 @@ test.describe('what the observer notices', () => {
     expect(step?.facts?.testId).toBe('deep-btn')
   })
 
-  test('installs only once even if injected repeatedly', async ({ page }) => {
-    // main injects on every load event, and several fire per page. Duplicate
-    // listeners would record every click twice.
+  test('installs only once even if created repeatedly for the same document', async ({ page }) => {
+    // Duplicate listeners would record every click twice.
     await record(page, '<button id="b">Go</button>')
-    await page.evaluate(`(${observerProgram.toString()})()`)
-    await page.evaluate(`(${observerProgram.toString()})()`)
+    await page.evaluate(`window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`)
+    await page.evaluate(`window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`)
     await page.click('#b')
     expect(await steps(page)).toHaveLength(1)
   })
 
-  test('records nothing at all when recording is off', async ({ page }) => {
-    await page.setContent('<button id="b">Go</button>')
-    await page.evaluate(`
-      window.__qaflowEvents = []
-      window.addEventListener('message', (e) => { if (e.data && e.data.__qaflow) window.__qaflowEvents.push(e.data) })
-      window.__qaflowInitActive = false
-      ;(${observerProgram.toString()})()
-    `)
+  test('records nothing at all when recording is off, and resumes when switched on', async ({ page }) => {
+    await record(page, '<button id="b">Go</button>', false)
     await page.click('#b')
-    await page.waitForTimeout(300)
+    await page.waitForTimeout(200)
     expect(await steps(page, 0)).toHaveLength(0)
+    await page.evaluate('window.__qaObserver.setActive(true)')
+    await page.click('#b')
+    expect(await steps(page)).toHaveLength(1)
   })
 })
 
 // =====================================================================
-// QF-002 — the nonce, in a real browser.
+// QF-002 — the observer and main's gate, in a real browser.
 //
-// The unit tests prove the arming RULE. These prove the other half: that the
-// observer actually stamps the nonce onto what it posts, and that the value
-// is not left lying on `window` for a page script to read. Both only exist
-// once the program has really run in a document.
+// There is no nonce any more: in the app the observer runs in an isolated
+// world and sends with ipcRenderer, which the page cannot reach. What these
+// pin down is the half that still lives in the DOM — that a genuine recording
+// gets through main's gate intact, that the observer leaves nothing on the
+// page's window, and that the one page-world piece (the dialog shim) talks to
+// it correctly.
 // =====================================================================
-test.describe('the recorder nonce', () => {
-  /** Install the observer the way main does, with a nonce baked in. */
-  async function recordWithNonce(page: Page, html: string, nonce: string): Promise<void> {
-    await page.setContent(html)
-    await page.evaluate(`
-      window.__qaflowEvents = []
-      window.addEventListener('message', (e) => {
-        if (e.data && e.data.__qaflow) window.__qaflowEvents.push(e.data)
-      })
-      window.__qaflowInitActive = true
-      window.__qaflowNonce = ${JSON.stringify(nonce)}
-      ;(${observerProgram.toString()})()
-    `)
-  }
+test.describe('the observer and the gate', () => {
+  const sent = async (page: Page, atLeast = 1): Promise<Recorded[]> => events(page, atLeast)
 
-  const raw = async (page: Page, atLeast = 1): Promise<{ nonce?: string; channel?: string }[]> => {
-    await events(page, atLeast)
-    return (await page.evaluate('window.__qaflowEvents')) as { nonce?: string; channel?: string }[]
-  }
-
-  test('stamps the session nonce onto every message it posts', async ({ page }) => {
-    await recordWithNonce(page, '<button id="pay">Pay</button>', 'session-abc')
+  test('a real recorded click passes main’s gate', async ({ page }) => {
+    await record(page, '<button id="pay" data-test="pay-now">Pay now</button>')
     await page.click('#pay')
-    const posted = await raw(page)
-    expect(posted[0].nonce).toBe('session-abc')
-  })
-
-  test('removes the nonce from window, so page script cannot read it off the global', async ({
-    page
-  }) => {
-    // Main writes it to `window` and the observer takes it on its first
-    // statement, inside the same executeJavaScript call — no page code gets a
-    // turn in between. What must NOT happen is it being left there afterwards.
-    await recordWithNonce(page, '<button id="pay">Pay</button>', 'session-abc')
-    expect(await page.evaluate('window.__qaflowNonce')).toBeUndefined()
-    expect(await page.evaluate('"__qaflowNonce" in window')).toBe(false)
-  })
-
-  test('re-injection re-arms with the NEW session nonce', async ({ page }) => {
-    // Recording a second time rotates the nonce. Main re-injects, and the
-    // already-installed observer takes the early-return path — which must still
-    // pick up the new value or the second recording captures nothing.
-    await recordWithNonce(page, '<button id="pay">Pay</button>', 'session-1')
-    await page.click('#pay')
-    // WAIT for that first message to actually arrive before clearing the log.
-    // postMessage delivery is asynchronous, so clearing straight after the
-    // click lets the session-1 message land AFTER the reset, where it poses as
-    // the first message of session 2 — and the test then reports a nonce
-    // rotation failure that isn't happening. (Same race the helper at the top
-    // of this file exists to avoid.)
-    await events(page, 1)
-
-    await page.evaluate(`
-      window.__qaflowEvents = []
-      window.__qaflowInitActive = true
-      window.__qaflowNonce = 'session-2'
-      ;(${observerProgram.toString()})()
-    `)
-    await page.click('#pay')
-
-    const posted = await raw(page)
-    expect(posted[0].nonce, 'the observer kept posting the old session nonce').toBe('session-2')
-    expect(await page.evaluate('window.__qaflowNonce')).toBeUndefined()
-  })
-
-  test('an un-armed observer posts an empty nonce, which the relay refuses', async ({ page }) => {
-    await page.setContent('<button id="pay">Pay</button>')
-    await page.evaluate(`
-      window.__qaflowEvents = []
-      window.addEventListener('message', (e) => {
-        if (e.data && e.data.__qaflow) window.__qaflowEvents.push(e.data)
-      })
-      window.__qaflowInitActive = true
-      ;(${observerProgram.toString()})()
-    `)
-    await page.click('#pay')
-    const posted = await raw(page)
-    expect(posted[0].nonce).toBe('')
-    expect(relayDecision({ sessionNonce: 'live-session', sameTab: true, data: posted[0] })).toBe(
-      null
-    )
-  })
-
-  // ── the round trip ────────────────────────────────────────────────
-  // A real click, captured by the real observer in a real browser, run
-  // through the real gate. This is the closest these tests get to the
-  // product: only Electron's IPC delivery is left out.
-  test('a real recorded click passes the real gate', async ({ page }) => {
-    await recordWithNonce(page, '<button id="pay" data-test="pay-now">Pay now</button>', 'live')
-    await page.click('#pay')
-    const [posted] = await raw(page)
-
-    const decision = relayDecision({ sessionNonce: 'live', sameTab: true, data: posted })
-    expect(decision, 'a genuine recording was blocked by its own security fix').not.toBe(null)
-    expect(decision!.channel).toBe('recorder:event')
-    expect(decision!.payload).toMatchObject({
-      type: 'click',
-      facts: { testId: 'pay-now', id: 'pay' }
-    })
+    const [msg] = await sent(page)
+    const clean = validatePageMessage(msg.channel, msg.payload)
+    expect(clean, 'a genuine recording was blocked by its own security fix').not.toBe(null)
+    expect(clean).toMatchObject({ type: 'click', facts: { testId: 'pay-now', id: 'pay' } })
   })
 
   // The gate keeps only fields it knows. So a NEW fact the observer starts
@@ -392,59 +345,47 @@ test.describe('the recorder nonce', () => {
   // exactly how "Sports" got lost (labelText passed every observer test, and
   // never reached the app). Compare the WHOLE facts object, not chosen fields.
   test('the gate passes through every fact the observer captured', async ({ page }) => {
-    await recordWithNonce(
+    await record(
       page,
       `<form id="f"><input id="hobbies-checkbox-1" type="checkbox">
        <label for="hobbies-checkbox-1">Sports</label>
-       <input type="checkbox"><input type="checkbox"></form>`,
-      'live'
+       <input type="checkbox"><input type="checkbox"></form>`
     )
     await page.click('label')
     await page.click('#f input:not([id]) >> nth=1')
-    const posted = await raw(page, 2)
-    expect(posted.length).toBeGreaterThanOrEqual(2)
-    for (const data of posted) {
-      const sent = (data as { payload: { facts: ElementFacts } }).payload.facts
-      const decision = relayDecision({ sessionNonce: 'live', sameTab: true, data })
-      expect(decision!.payload.facts, 'the gate dropped a fact the observer sent').toEqual(sent)
+    const msgs = await sent(page, 2)
+    expect(msgs.length).toBeGreaterThanOrEqual(2)
+    for (const m of msgs) {
+      const clean = validatePageMessage(m.channel, m.payload) as { facts: ElementFacts }
+      expect(clean.facts, 'the gate dropped a fact the observer sent').toEqual(m.payload.facts)
     }
   })
 
-  test('a step forged by page script does NOT pass the real gate', async ({ page }) => {
-    // The audit's attack, verbatim, in a real document.
-    await recordWithNonce(page, '<button id="pay">Pay</button>', 'live')
-    await page.evaluate(`
-      window.top.postMessage({
-        __qaflow: true,
-        channel: 'recorder:event',
-        payload: { type: 'click', facts: { tag: 'button', text: 'Forged by page' } }
-      }, '*')
-    `)
-    const posted = await raw(page)
-    const forged = posted.find(
-      (m) =>
-        (m as { payload?: { facts?: { text?: string } } }).payload?.facts?.text === 'Forged by page'
-    )
-    expect(forged, 'the forged message should still have been POSTED — the page can do that').toBeTruthy()
-    // …it just must not survive the gate.
-    expect(relayDecision({ sessionNonce: 'live', sameTab: true, data: forged })).toBe(null)
+  test('the observer puts nothing on the page’s window', async ({ page }) => {
+    // The old page-world observer hung its API and its nonce off window.__qaflow*.
+    await page.setContent('<button id="b">Go</button>')
+    await installFactory(page)
+    const before = (await page.evaluate('Object.keys(window)')) as string[]
+    await page.evaluate(`window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`)
+    const after = (await page.evaluate('Object.keys(window)')) as string[]
+    expect(after.filter((k) => !before.includes(k))).toEqual([])
   })
 
-  test('a forged step cannot get in by guessing the nonce field', async ({ page }) => {
-    await recordWithNonce(page, '<button id="pay">Pay</button>', 'live')
-    await page.evaluate(`
-      window.top.postMessage({
-        __qaflow: true,
-        nonce: 'guess',
-        channel: 'recorder:event',
-        payload: { type: 'click', facts: { tag: 'button', text: 'Guessed' } }
-      }, '*')
-    `)
-    const posted = await raw(page)
-    const forged = posted.find(
-      (m) => (m as { payload?: { facts?: { text?: string } } }).payload?.facts?.text === 'Guessed'
-    )
-    expect(relayDecision({ sessionNonce: 'live', sameTab: true, data: forged })).toBe(null)
+  test('a dialog reaches the observer through the page-world shim — only while recording', async ({
+    page
+  }) => {
+    page.on('dialog', (d) => d.accept())
+    await record(page, '<p>dialogs</p>', false)
+    await page.evaluate(`(${dialogShimProgram.toString()})()`)
+    await page.evaluate("alert('not recording')")
+    await page.waitForTimeout(200)
+    expect((await events(page, 0)).filter((e) => e.channel === 'recorder:dialog')).toHaveLength(0)
+
+    await page.evaluate('window.__qaObserver.setActive(true)')
+    await page.evaluate("alert('hello')")
+    const dialogs = (await events(page, 1)).filter((e) => e.channel === 'recorder:dialog')
+    expect(dialogs.map((d) => d.payload)).toEqual([{ kind: 'alert', message: 'hello' }])
+    expect(validatePageMessage('recorder:dialog', dialogs[0].payload)).not.toBe(null)
   })
 })
 

@@ -9,6 +9,7 @@ interface BrowserAPI {
   clearData: () => Promise<void>
   home: () => Promise<void>
   setOverlay: (open: boolean) => Promise<void>
+  setArea: (r: { x: number; y: number; width: number; height: number }) => Promise<void>
   onUrlChange: (callback: (url: string) => void) => () => void
   // Live URL + title of the embedded page — prefills page-level checks (Day 11).
   getPageInfo: () => Promise<{ url: string; title: string }>
@@ -1274,6 +1275,8 @@ declare global {
     title: string
     url: string
     active: boolean
+    // QF-012: why the last page load in this tab failed (null once a new one starts)
+    loadError?: { url: string; code: number; description: string; attempt?: number } | null
   }
 
   // Day 17: main tells the renderer a click opened a new tab — patch the

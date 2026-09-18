@@ -13,6 +13,7 @@
 // =====================================================================
 
 import { stepText } from './playwrightExport'
+import { plural } from '../../shared/plural'
 import { envVarNames } from './dataDriven'
 import { findWeakAssertions, type WeakAssertion } from './deadAssertions'
 import { resolveDevice, deviceSummary } from './devices'
@@ -31,7 +32,6 @@ export interface DocMeta {
   dataRows?: Record<string, string>[]
 }
 
-const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
 
 function hostOf(url?: string): string {
   if (!url) return ''
@@ -67,7 +67,7 @@ function preconditions(steps: RecorderStep[], meta: DocMeta): string[] {
     )
   }
   if (meta.dataRows && meta.dataRows.length) {
-    out.push(`Data-driven: runs once per row of a data table (${meta.dataRows.length} rows).`)
+    out.push(`Data-driven: runs once per row of a data table (${plural(meta.dataRows.length, 'row')}).`)
   }
   const envs = envVarNames(steps, meta.dataRows ?? [])
   if (envs.length) {

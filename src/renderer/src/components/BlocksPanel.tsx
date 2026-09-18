@@ -1,4 +1,5 @@
 import React from 'react'
+import { plural } from '../../../shared/plural'
 
 // =====================================================================
 // BlocksPanel — lifted out of App.tsx verbatim.
@@ -177,9 +178,9 @@ export function BlocksPanel({
                         type="button"
                         className="block-insert"
                         onClick={() => handleInsertBlockLinked(b)}
-                        title={`Insert "${b.name}" as a LIVE link (${b.stepCount} steps) — editing the block later updates this test`}
+                        title={`Insert "${b.name}" as a LIVE link (${plural(b.stepCount, 'step')}) — editing the block later updates this test`}
                       >
-                        🔗 {b.name} <span className="block-count">{b.stepCount} steps</span>
+                        🔗 {b.name} <span className="block-count">{plural(b.stepCount, 'step')}</span>
                       </button>
                       {/* F7: blast-radius at a glance — how many tests this block
                           feeds; hover to see which. "unused" = safe to change. */}
