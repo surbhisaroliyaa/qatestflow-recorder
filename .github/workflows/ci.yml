@@ -77,20 +77,33 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:dom
 
-  # ── Known-red gates, reported but not yet blocking ─────────────────
-  # The audit found both of these red, and neither is fixed yet:
-  #
+  # ── Dependency audit — BLOCKING (QF-006 closed 2026-09-18) ─────────
+  # ALL dependencies, not `--omit=dev`. In an Electron app, `electron` is a
+  # devDependency yet it is the runtime that ships inside the installer —
+  # so `--omit=dev` (what this gate used to run) could never see the very
+  # advisories QF-006 was about. High and critical fail the build; the one
+  # remaining LOW (esbuild inside vite, dev server on Windows only) doesn't.
+  audit:
+    name: Dependency audit (high and above)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high
+
+  # ── Known-red gate, reported but not yet blocking ──────────────────
   #   QF-009  lint — 8 errors and 3,329 warnings in the tree
-  #   QF-006  npm audit — 2 high advisories via Electron's extract-zip,
-  #           whose resolution needs an Electron major upgrade
   #
-  # They run so the numbers stay visible on every commit, and they do not
-  # block so that a pipeline which is red for known, tracked reasons
-  # can't teach everyone to ignore a red pipeline. BOTH `continue-on-error`
-  # lines come out the moment their finding is closed — that removal is
-  # part of fixing them, not a follow-up.
+  # Runs so the numbers stay visible on every commit, and doesn't block so
+  # that a pipeline which is red for a known, tracked reason can't teach
+  # everyone to ignore a red pipeline. The `continue-on-error` line comes
+  # out the moment QF-009 is closed — that removal is part of fixing it.
   known-issues:
-    name: Known-red gates (lint, audit) — reported, not blocking
+    name: Known-red gate (lint) — reported, not blocking
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +115,3 @@ jobs:
       - name: Lint (QF-009 — currently red)
         continue-on-error: true
         run: npm run lint
-      - name: Dependency audit (QF-006 — currently red)
-        continue-on-error: true
-        run: npm audit --omit=dev

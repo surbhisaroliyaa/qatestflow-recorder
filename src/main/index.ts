@@ -47,6 +47,8 @@ import { portableBasename } from '../shared/portablePath'
 import { validateElementFacts, validatePageMessage } from '../shared/recorderMessages'
 import { createRelaySession } from '../shared/relaySession'
 import { maskPasswordInputs, secretCellRef } from '../shared/secretCells'
+// QF-006: Electron 43+ opens a dialog with no defaultPath in Downloads.
+import { lastFolder, rememberFolder } from './lastFolders'
 // F40: passwords live in userData, not in the shared test files.
 import {
   resolveSecrets,
@@ -1630,9 +1632,11 @@ function createWindow(): void {
   ipcMain.handle('recorder:pickUploadFile', async (): Promise<string | null> => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: 'Choose a file to upload',
+      defaultPath: await lastFolder('upload-file'),
       properties: ['openFile']
     })
     if (result.canceled || !result.filePaths.length) return null
+    await rememberFolder('upload-file', result.filePaths[0], 'file')
     return copyIntoUploads(result.filePaths[0])
   })
 
@@ -5048,10 +5052,12 @@ function createWindow(): void {
     async (_event, tests: string[], includeAcs: boolean) => {
       const picked = await dialog.showOpenDialog(mainWindow, {
         title: 'Choose a folder for the bundle',
+        defaultPath: await lastFolder('bundle-export'),
         properties: ['openDirectory', 'createDirectory'],
         buttonLabel: 'Export here'
       })
       if (picked.canceled || !picked.filePaths[0]) return { ok: false, error: 'cancelled' }
+      await rememberFolder('bundle-export', picked.filePaths[0], 'folder')
       // A named subfolder, so exporting into an existing repo folder can't
       // scatter bundle files among the user's own.
       const stamp = new Date().toISOString().slice(0, 10)
@@ -5066,10 +5072,12 @@ function createWindow(): void {
   ipcMain.handle('bundle:inspect', async () => {
     const picked = await dialog.showOpenDialog(mainWindow, {
       title: 'Choose a bundle folder to import',
+      defaultPath: await lastFolder('bundle-import'),
       properties: ['openDirectory'],
       buttonLabel: 'Inspect'
     })
     if (picked.canceled || !picked.filePaths[0]) return { ok: false, tests: [], error: 'cancelled' }
+    await rememberFolder('bundle-import', picked.filePaths[0], 'folder')
     const inspection = await inspectBundle(picked.filePaths[0], libraryDir())
     return { ...inspection, bundleDir: picked.filePaths[0] }
   })
@@ -5672,10 +5680,12 @@ function createWindow(): void {
     async (): Promise<{ ok: boolean; path: string; diff: string; summary: string; note: string } | null> => {
       const picked = await dialog.showOpenDialog(mainWindow, {
         title: 'Choose the app’s local git repo to draft from',
+        defaultPath: await lastFolder('git-repo'),
         properties: ['openDirectory']
       })
       if (picked.canceled || !picked.filePaths.length) return null
       const dir = picked.filePaths[0]
+      await rememberFolder('git-repo', dir, 'folder')
       try {
         await gitText(dir, ['rev-parse', '--is-inside-work-tree'])
       } catch {
