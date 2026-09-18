@@ -1096,6 +1096,13 @@ declare global {
       | 'closeTab'
       | 'click'
       | 'type'
+      // QF-001: the canonical checkbox/radio action. Ticking a box used to
+      // record BOTH a `click` and a `type` whose value was the HTML default
+      // "on" — never the ticked state. In-app replay went green (typing into a
+      // checkbox sets .value and silently leaves .checked alone) while the
+      // exported spec did `.fill('on')`, which Playwright rejects outright.
+      // One step now carries the STATE: `value` is 'true' | 'false'.
+      | 'check'
       | 'select'
       | 'press'
       | 'hover'

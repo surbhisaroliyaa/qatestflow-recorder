@@ -482,6 +482,33 @@ export function buildActionScript(step: ReplayStep): string {
       break
     }
 
+    // QF-001: tick/untick a checkbox or radio. The state is what matters, so
+    // this is idempotent — toggle only when the box isn't already where the
+    // recording left it, exactly like Playwright's .check()/.uncheck().
+    //
+    // el.click() (rather than setting .checked) is deliberate: it runs the real
+    // activation behaviour, so framework listeners, form validation and the
+    // page's own change handlers all fire as they did while recording.
+    //
+    // The verify at the end is the part that was missing before. The old
+    // `type` step set .value on a checkbox — which never touches .checked —
+    // and reported success regardless, so a tick that silently failed still
+    // went green in-app. Now a checkbox that refuses to move fails the step.
+    case 'check': {
+      const want = JSON.stringify(step.value !== 'false')
+      action = `
+        if (el.disabled) return { ok: false, error: 'Cannot tick a disabled control' };
+        if (el.checked !== ${want}) {
+          el.scrollIntoView({ block: 'center' });
+          el.click();
+        }
+        if (el.checked !== ${want}) {
+          return { ok: false, error: 'Expected the control to be ' + (${want} ? 'ticked' : 'unticked') + ' — the page did not accept the change' };
+        }
+        return { ok: true };`
+      break
+    }
+
     case 'select': {
       const v = JSON.stringify(step.value ?? '')
       // We recorded the option's VISIBLE text, so match by text then set value.

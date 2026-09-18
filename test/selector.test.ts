@@ -119,4 +119,34 @@ describe('the human label', () => {
   it('ignores a bare number, which is a count rather than a name', () => {
     expect(labelFrom(facts({ tag: 'span', text: '1', testId: 'cart-badge' }))).toBe('cart badge')
   })
+
+  // demoqa's Hobbies boxes: <input id="hobbies-checkbox-1"> + <label for=…>Sports
+  it("names a control after its <label>, not its id", () => {
+    const box = facts({ tag: 'input', type: 'checkbox', id: 'hobbies-checkbox-1', labelText: 'Sports' })
+    expect(labelFrom(box)).toBe('Sports')
+  })
+
+  it('still prefers a placeholder over the label — what self-heal matches on', () => {
+    expect(labelFrom(facts({ tag: 'input', placeholder: 'Username', labelText: 'User' }))).toBe(
+      'Username'
+    )
+  })
+
+  // the-internet /checkboxes: two bare <input type=checkbox>, no id, no label.
+  it('numbers an unnamed control by its position on the PAGE, and says what it is', () => {
+    const at = (index: number): ElementFacts =>
+      facts({
+        tag: 'input',
+        type: 'checkbox',
+        anchor: { css: '#checkboxes input[type="checkbox"]', count: 2, index }
+      })
+    expect(labelFrom(at(0))).toBe('checkbox 1')
+    expect(labelFrom(at(1))).toBe('checkbox 2')
+  })
+
+  it('adds no number when the unnamed control is the only one of its kind', () => {
+    const only = facts({ tag: 'input', type: 'checkbox', anchor: { css: 'form input', count: 1, index: 0 } })
+    expect(labelFrom(only)).toBe('checkbox')
+    expect(labelFrom(facts({ tag: 'div' }))).toBe('div')
+  })
 })

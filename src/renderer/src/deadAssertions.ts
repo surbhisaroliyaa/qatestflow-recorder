@@ -19,7 +19,7 @@ export interface WeakAssertion {
   reason: string // why it's weak + what it fails to prove
 }
 
-const INTERACTIONS = new Set(['click', 'type', 'select', 'hover', 'press'])
+const INTERACTIONS = new Set(['click', 'type', 'check', 'select', 'hover', 'press'])
 
 export function findWeakAssertions(steps: RecorderStep[]): WeakAssertion[] {
   const out: WeakAssertion[] = []

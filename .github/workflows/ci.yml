@@ -1,0 +1,107 @@
+# =====================================================================
+#  QATestFlow Recorder — CI
+# =====================================================================
+#  Added in response to the independent QA audit (25 Aug 2026), whose fix
+#  for the release blocker QF-001 was not only "correct the checkbox" but:
+#
+#      "Execute both inline and Page Object export for every HTML input
+#       type in CI."
+#
+#  That is the `export-contract` job below, and it is the most important
+#  job in this file. Everything else here checks that the code is sane;
+#  that one checks the promise the product actually makes — that a test
+#  you record and export RUNS somewhere else. The app replaying a step
+#  green while the exported spec cannot run at all is the single failure
+#  mode that makes this product worthless, and it is invisible to every
+#  other kind of test, because the generated file is perfectly valid
+#  TypeScript. It is just wrong.
+# =====================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ── Does it compile, and do the fast checks pass? ──────────────────
+  build:
+    name: Typecheck, build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # `npm ci` would also run the electron-builder postinstall, which needs
+      # native toolchains we don't have here and don't need to typecheck.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # ── THE EXPORT CONTRACT (QF-001) ───────────────────────────────────
+  # Generates a spec for every HTML form control with the REAL exporters,
+  # inline AND page-object, then runs them with a REAL `npx playwright
+  # test` and requires green. See test-dom/exported-spec.spec.ts.
+  export-contract:
+    name: Export contract — generated specs must actually run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - name: Exported specs run green in real Playwright
+        run: npm run test:export
+
+  # ── The rest of the real-DOM suite ─────────────────────────────────
+  # The replay engine builds JavaScript that it injects into a page, so it
+  # can only be judged by executing it in a real browser.
+  dom:
+    name: Real-DOM tests (observer, replay, selectors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:dom
+
+  # ── Known-red gates, reported but not yet blocking ─────────────────
+  # The audit found both of these red, and neither is fixed yet:
+  #
+  #   QF-009  lint — 8 errors and 3,329 warnings in the tree
+  #   QF-006  npm audit — 2 high advisories via Electron's extract-zip,
+  #           whose resolution needs an Electron major upgrade
+  #
+  # They run so the numbers stay visible on every commit, and they do not
+  # block so that a pipeline which is red for known, tracked reasons
+  # can't teach everyone to ignore a red pipeline. BOTH `continue-on-error`
+  # lines come out the moment their finding is closed — that removal is
+  # part of fixing them, not a follow-up.
+  known-issues:
+    name: Known-red gates (lint, audit) — reported, not blocking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Lint (QF-009 — currently red)
+        continue-on-error: true
+        run: npm run lint
+      - name: Dependency audit (QF-006 — currently red)
+        continue-on-error: true
+        run: npm audit --omit=dev

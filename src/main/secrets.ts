@@ -30,42 +30,146 @@
 // every one of those. A ref travelling ON the step survives all of them, because
 // copying the step copies the ref.
 //
-// == What this is and isn't ==
+// == Encrypted at rest (QF-003) ==
 //
-// This is NOT encryption — it's the same trust model as environments.json: a
-// file readable by the logged-in user, kept out of the artefact you share. It
-// stops you MAILING a password, which is the actual failure mode. Anyone with
-// your unlocked machine could already read the browser's saved passwords.
+// F40 originally stored these values as plain JSON, and said so. That stopped
+// you MAILING a password — the failure mode that actually bites — but it left
+// the PRD's encrypt-at-rest requirement unmet: any process running as you, any
+// backup tool, and any synced Documents folder could read the lot.
+//
+// The values are now sealed with Electron's `safeStorage`, which is the OS
+// keychain underneath (DPAPI on Windows, Keychain on macOS, libsecret on
+// Linux). A file copied off the machine is useless on another one.
+//
+// The file format and the migration live in src/shared/secretsCodec.ts, away
+// from Electron, so they can be tested with a fake cipher.
+//
+// WHAT THIS STILL ISN'T: protection from code running AS YOU on YOUR unlocked
+// machine — safeStorage will happily decrypt for it, because it decrypts for
+// us. It raises "readable by anything that can open a file" to "readable only
+// on this machine, by this user account".
 // =====================================================================
 
-import { app } from 'electron'
+import { app, safeStorage } from 'electron'
 import { mkdir, readFile, writeFile, copyFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'node:crypto'
-
-type SecretMap = Record<string, string>
+import {
+  decodeStore,
+  encodeStore,
+  orphanedRefs,
+  type SecretMap
+} from '../shared/secretsCodec'
 
 function secretsPath(): string {
   return join(app.getPath('userData'), 'secrets.json')
 }
 
+/** Is the OS secure store usable right now? False on a Linux box with no
+ *  keyring, and during very early startup before the app is ready. */
+function encryptionAvailable(): boolean {
+  try {
+    return safeStorage.isEncryptionAvailable()
+  } catch {
+    return false
+  }
+}
+
+const encrypt = (plain: string): string | null => {
+  if (!encryptionAvailable()) return null
+  try {
+    return safeStorage.encryptString(plain).toString('base64')
+  } catch {
+    return null
+  }
+}
+
+const decrypt = (stored: string): string | null => {
+  if (!encryptionAvailable()) return null
+  try {
+    return safeStorage.decryptString(Buffer.from(stored, 'base64'))
+  } catch {
+    // Written on another machine, under another user, or after an OS key
+    // rotation. Not recoverable — and not a crash.
+    return null
+  }
+}
+
 let cache: SecretMap | null = null
+/** Refs on disk we could not decrypt, so a caller can say so out loud rather
+ *  than letting a test fail later with an empty password. */
+let unreadableRefs: string[] = []
+/** Did the last write end up unencrypted because the platform had no secure
+ *  store? Surfaced to the user rather than hidden. */
+let storedInPlaintext = false
 
 async function load(): Promise<SecretMap> {
   if (cache) return cache
+  let raw = ''
   try {
-    cache = JSON.parse(await readFile(secretsPath(), 'utf-8')) as SecretMap
+    raw = await readFile(secretsPath(), 'utf-8')
   } catch {
     cache = {}
+    return cache
+  }
+
+  const { map, needsMigration, unreadable } = decodeStore(raw, decrypt)
+  cache = map
+  unreadableRefs = unreadable
+
+  // Upgrade a pre-QF-003 plaintext file the first time it is read — but only
+  // if we can actually encrypt, or we would rewrite plaintext as plaintext and
+  // call it a migration.
+  if (needsMigration && encryptionAvailable()) {
+    await persist(map)
   }
   return cache
 }
 
 async function persist(map: SecretMap): Promise<void> {
   cache = map
+  const file = encodeStore(map, encrypt)
+  storedInPlaintext = !file.encrypted
   await mkdir(app.getPath('userData'), { recursive: true })
-  await writeFile(secretsPath(), JSON.stringify(map, null, 2), 'utf-8')
+  // Overwrites the old plaintext file in place. Deliberately no backup copy —
+  // see the note in secretsCodec.ts: a backup here would be a plaintext copy of
+  // the very thing being encrypted.
+  await writeFile(secretsPath(), JSON.stringify(file, null, 2), 'utf-8')
+}
+
+/** How the secret store is actually behaving, for the UI to report honestly. */
+export async function secretStoreStatus(): Promise<{
+  encrypted: boolean
+  unreadable: string[]
+  count: number
+}> {
+  const map = await load()
+  return {
+    encrypted: encryptionAvailable() && !storedInPlaintext,
+    unreadable: [...unreadableRefs],
+    count: Object.keys(map).length
+  }
+}
+
+/**
+ * Delete stored secrets nothing refers to any more (QF-003).
+ *
+ * Without this, deleting a test leaves its password in userData forever — so
+ * "I deleted that test" was not true of the part that mattered most. `liveRefs`
+ * is every secretRef still reachable from a saved test, block or draft; the
+ * caller gathers it, because only main knows where those live.
+ *
+ * Returns how many were removed.
+ */
+export async function collectOrphanedSecrets(liveRefs: Iterable<string>): Promise<number> {
+  const map = await load()
+  const orphans = orphanedRefs(map, liveRefs)
+  if (!orphans.length) return 0
+  const next = { ...map }
+  for (const ref of orphans) delete next[ref]
+  await persist(next)
+  return orphans.length
 }
 
 export function newSecretRef(): string {

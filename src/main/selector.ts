@@ -37,6 +37,10 @@ export interface ElementFacts {
   text?: string // trimmed visible text
   imgAlt?: string // alt of the element's own / inner image
   inputValue?: string // value of an <input type=submit|button>
+  // Text of the <label> tied to a form control (label[for] or a wrapping
+  // <label>). A control has no text of its own, so without this a checkbox was
+  // named after its id ("hobbies checkbox 1") while the page said "Sports".
+  labelText?: string
   // Per-strategy duplicate info — only present when a strategy matched MORE
   // than one element (absence means "unique", the happy path).
   dup?: Partial<Record<'testId' | 'id' | 'role' | 'name' | 'placeholder' | 'text', DupInfo>>
@@ -293,7 +297,22 @@ export function labelFrom(facts: ElementFacts): string {
     return facts.text.length <= 40 ? facts.text : `${facts.text.slice(0, 40)}…`
   }
   if (facts.placeholder) return facts.placeholder
+  // What the PAGE calls the control beats what the developer called it in the
+  // markup — the tester reads "Sports", not "hobbies-checkbox-1".
+  if (facts.labelText) {
+    return facts.labelText.length <= 40 ? facts.labelText : `${facts.labelText.slice(0, 40)}…`
+  }
   const slug = facts.testId || facts.name || facts.id
   if (slug) return humanize(slug)
-  return facts.tag
+  // Nothing names it at all. Say what KIND of control it is ("checkbox", not the
+  // bare tag "input"), and — when it's one of several alike — WHICH one, by its
+  // position on the page. Before, two unnamed checkboxes were both "input", and
+  // the export numbered them in the order they were clicked, so `inputCheckbox2`
+  // could be the FIRST box on the page.
+  const kind =
+    facts.tag === 'input' && (facts.type === 'checkbox' || facts.type === 'radio')
+      ? facts.type
+      : facts.tag
+  if (facts.anchor && facts.anchor.count > 1) return `${kind} ${facts.anchor.index + 1}`
+  return kind
 }

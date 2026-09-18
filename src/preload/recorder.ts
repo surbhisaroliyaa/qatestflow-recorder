@@ -1,4 +1,5 @@
 import { ipcRenderer, webUtils } from 'electron'
+import { relayDecision } from '../shared/recorderMessages'
 
 // =====================================================================
 // THE RELAY (Day 15 rewrite)
@@ -17,11 +18,48 @@ import { ipcRenderer, webUtils } from 'electron'
 // So every recorded event from any frame travels:
 //   frame's observer ──postMessage──▶ top window ──(this relay)──▶ main (IPC)
 
+// === QF-002: this relay is a TRUST BOUNDARY, not a pipe ==============
+// It used to forward any channel name with any payload for any message tagged
+// __qaflow, which meant the website under test could pick an Electron IPC
+// channel and call it. See src/shared/recorderMessages.ts for the full finding
+// and for what this does and does not fix.
+//
+// The nonce is re-rolled by main for every recording session and delivered
+// HERE, over IPC, into the preload's isolated world — a place the page's own
+// scripts cannot read. A page that has never observed a live recorder message
+// cannot guess it.
+let sessionNonce: string | null = null
+
+ipcRenderer.on('recorder:arm', (_event, nonce: unknown) => {
+  sessionNonce = typeof nonce === 'string' && nonce ? nonce : null
+})
+
+// Is the sender a frame of THIS tab?
+//
+// Comparing `.top` rather than walking `.parent` is deliberate: the observer is
+// injected into every frame at any depth, and a parent check would silently
+// stop recording anything inside a nested iframe — the exact capture gap the
+// Day 15 rewrite existed to close. `.top` is readable cross-origin, so this
+// works for foreign frames too, while a message from another tab or from an
+// opener fails it.
+function isSameTab(source: MessageEventSource | null): boolean {
+  try {
+    return !!source && (source as Window).top === window.top
+  } catch {
+    return false // unreadable source — not something to trust
+  }
+}
+
 window.addEventListener('message', (event: MessageEvent) => {
-  const data = event.data as { __qaflow?: boolean; channel?: unknown; payload?: unknown } | null
-  // Only our own messages, tagged with __qaflow and a channel name.
-  if (!data || data.__qaflow !== true || typeof data.channel !== 'string') return
-  ipcRenderer.send(data.channel, data.payload)
+  // Every rule about what may cross lives in relayDecision, so it can be tested
+  // from the attacker's side without Electron. This is only the plumbing.
+  const relay = relayDecision({
+    sessionNonce,
+    sameTab: isSameTab(event.source),
+    data: event.data
+  })
+  if (!relay) return
+  ipcRenderer.send(relay.channel, relay.payload)
 })
 
 // === Day 16: file upload capture (TOP frame only) ====================

@@ -454,6 +454,122 @@ describe('the page-object export keeps what the inline export got', () => {
 })
 
 // =====================================================================
+// § QF-001 — the checkbox contract
+// The audit's release blocker. Ticking a box recorded a click AND a type
+// whose value was the HTML default "on"; the export emitted .fill('on'),
+// which Playwright rejects on a checkbox. So the app went green and the
+// exported spec went red — the one failure mode that destroys the whole
+// promise of "your recording becomes real automation".
+//
+// Capture is pinned in test-dom/observer.spec.ts (it needs a real DOM);
+// these pin the CODE THAT COMES OUT, for both exporters.
+// =====================================================================
+describe('a checkbox exports as a checkbox, not as a filled text field', () => {
+  const TICK = [
+    s({ type: 'navigate', url: 'https://example.com/signup' }),
+    s({ type: 'check', selector: "getByTestId('terms')", value: 'true', label: 'I agree' })
+  ]
+  const UNTICK = [
+    s({ type: 'check', selector: "getByTestId('news')", value: 'false', label: 'Newsletter' })
+  ]
+
+  // (The locator itself is rewritten by the test-id portability policy, so
+  // these match the ACTION on whatever locator that policy settles on.)
+  it('emits .check() for a ticked box', () => {
+    expect(generatePlaywrightTest(TICK, { name: 'Signup' })).toMatch(
+      /await page\..+terms.+\.check\(\)/
+    )
+  })
+
+  it('emits .uncheck() for an unticked box', () => {
+    expect(generatePlaywrightTest(UNTICK, { name: 'Signup' })).toMatch(
+      /await page\..+news.+\.uncheck\(\)/
+    )
+  })
+
+  it('never emits the .fill("on") that failed in CI', () => {
+    const inline = generatePlaywrightTest(TICK, { name: 'Signup' })
+    const pom = generatePageObjectTest(TICK, { name: 'Signup' })!
+    for (const [where, code] of [
+      ['inline', inline],
+      ['pom spec', pom.spec],
+      ['pom page', pom.page]
+    ] as const) {
+      expect(code, `${where} still fills a checkbox`).not.toMatch(/\.fill\((["'])on\1\)/)
+    }
+  })
+
+  it('the POM export ticks the box too, and names the field for what it IS', () => {
+    const pom = generatePageObjectTest(TICK, { name: 'Signup' })!
+    expect(pom.page).toMatch(/Checkbox\b/)
+    expect(pom.page).toMatch(/\.check\(\)/)
+    expect(syntaxErrors(pom.spec)).toEqual([])
+    expect(syntaxErrors(pom.page)).toEqual([])
+  })
+
+  it('does not say "Checkbox" twice when the name already says it', () => {
+    const flow = [
+      s({ type: 'check', selector: "locator('#hobbies-checkbox-1')", value: 'true', label: 'hobbies checkbox 1' })
+    ]
+    const pom = generatePageObjectTest(flow, { name: 'Form' })!
+    expect(pom.page).toContain('hobbiesCheckbox1:')
+    expect(pom.page).not.toMatch(/Checkbox1Checkbox/)
+  })
+
+  it('names unnamed boxes by page position, whatever order they were clicked in', () => {
+    // Box 2 clicked FIRST — the case that produced inputCheckbox → .nth(1).
+    const flow = [
+      s({
+        type: 'check',
+        selector: `locator('#checkboxes input[type="checkbox"]').nth(1)`,
+        value: 'false',
+        label: 'checkbox 2'
+      }),
+      s({
+        type: 'check',
+        selector: `locator('#checkboxes input[type="checkbox"]').nth(0)`,
+        value: 'true',
+        label: 'checkbox 1'
+      })
+    ]
+    const page = generatePageObjectTest(flow, { name: 'Boxes' })!.page
+    expect(page).toMatch(/this\.checkbox2 = page\.locator\(.+\.nth\(1\)/)
+    expect(page).toMatch(/this\.checkbox1 = page\.locator\(.+\.nth\(0\)/)
+    expect(syntaxErrors(page)).toEqual([])
+  })
+
+  it('still adds the suffix when the name does not already carry it', () => {
+    const pom = generatePageObjectTest(TICK, { name: 'Signup' })!
+    expect(pom.page).toContain('iAgreeCheckbox:')
+  })
+
+  it('a data column drives the ticked state through setChecked', () => {
+    // .check() takes no argument, so a column-bound state needs setChecked or
+    // the binding would be silently dropped and every row would tick.
+    const flow = [
+      s({ type: 'check', selector: "getByTestId('terms')", value: '{{agree}}', label: 'I agree' })
+    ]
+    const data = { columns: ['agree'], rows: [{ agree: 'true' }, { agree: 'false' }] }
+    const inline = generatePlaywrightTest(flow, { name: 'Signup', data })
+    const pom = generatePageObjectTest(flow, { name: 'Signup', data })!
+    expect(inline).toContain('setChecked(')
+    expect(inline + pom.page).toContain('data.agree')
+    expect(syntaxErrors(inline)).toEqual([])
+  })
+
+  it('both exports describe the step in plain English', () => {
+    expect(stepText(TICK[1])).toBe('Tick I agree')
+    expect(stepText(UNTICK[0])).toBe('Untick Newsletter')
+  })
+
+  it('everything it emits still compiles', () => {
+    for (const steps of [TICK, UNTICK]) {
+      expect(syntaxErrors(generatePlaywrightTest(steps, { name: 'T' }))).toEqual([])
+    }
+  })
+})
+
+// =====================================================================
 // § POM — the four flows it used to refuse
 // Each has a standard hand-written page-object shape. The tests below say
 // what that shape IS, because "it compiles" would pass on a page object

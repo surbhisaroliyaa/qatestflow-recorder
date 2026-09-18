@@ -16,6 +16,8 @@ import { mkdir, readdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
 // F40: keeps plaintext passwords out of the shared/committed test files.
 import { stripSecrets } from './secrets'
+// QF-001: repair checkbox steps recorded before the canonical `check` step.
+import { migrateLegacyCheckSteps, type LegacyStep } from '../shared/legacyCheckSteps'
 
 // Outcome of one replay — gives the library list its green/red
 // "mini CI dashboard" dots.
@@ -197,6 +199,14 @@ async function readTestFile(fileName: string): Promise<SavedTestFile | null> {
     const parsed = JSON.parse(raw)
     // Minimal sanity check — a corrupt/foreign JSON file is skipped, not fatal.
     if (!parsed || typeof parsed.name !== 'string' || !Array.isArray(parsed.steps)) return null
+    // QF-001: every saved test enters the app through here, so this is the one
+    // place a pre-fix checkbox recording can be repaired for ALL of them at once
+    // — the step list, replay, export, suites, monitors and bundles alike.
+    //
+    // Read-time, not write-time: the file on disk is left exactly as the user
+    // saved it until they save again, so a migration that ever guessed wrong
+    // costs them nothing permanent.
+    parsed.steps = migrateLegacyCheckSteps(parsed.steps as LegacyStep[]).steps
     return parsed as SavedTestFile
   } catch {
     return null
@@ -305,6 +315,18 @@ export async function listSuites(): Promise<string[]> {
 // Reads the root too, so tests saved before sections existed still appear.
 export async function listTests(): Promise<SavedTestSummary[]> {
   await ensureDir()
+  const relPaths = await listTestPaths()
+  const summaries: SavedTestSummary[] = []
+  for (const fileName of relPaths) {
+    const test = await readTestFile(fileName)
+    if (test) summaries.push(toSummary(fileName, test))
+  }
+  return summaries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+}
+
+/** Every test file path in the library, relative to its folder. */
+async function listTestPaths(): Promise<string[]> {
+  await ensureDir()
   const relPaths: string[] = []
   const entries = await readdir(libraryDir(), { withFileTypes: true })
   for (const entry of entries) {
@@ -316,12 +338,53 @@ export async function listTests(): Promise<SavedTestSummary[]> {
       }
     }
   }
-  const summaries: SavedTestSummary[] = []
-  for (const fileName of relPaths) {
-    const test = await readTestFile(fileName)
-    if (test) summaries.push(toSummary(fileName, test))
+  return relPaths
+}
+
+/**
+ * Every secret reference still reachable from anything on disk (QF-003).
+ *
+ * This is the "live set" for garbage-collecting the secret store, so being
+ * wrong in one direction is very different from being wrong in the other:
+ * missing a ref DELETES a password the user still needs, while including a
+ * dead one merely delays a cleanup. So it reads everything that can hold a
+ * step — and that includes:
+ *
+ *   · VERSION HISTORY. F12 keeps previous edits so you can roll back, and
+ *     those snapshots carry their own secretRefs. Collecting only the current
+ *     steps would quietly break every rollback to a version with a login in it.
+ *   · reusable blocks, which are steps too
+ *   · auto-saved drafts, which are a recording the user has not saved yet —
+ *     the most painful thing to break, because it is unrecoverable
+ */
+export async function allSecretRefs(): Promise<string[]> {
+  const refs = new Set<string>()
+  const collect = (steps: unknown): void => {
+    if (!Array.isArray(steps)) return
+    for (const raw of steps) {
+      const ref = (raw as Record<string, unknown> | null)?.secretRef
+      if (typeof ref === 'string' && ref) refs.add(ref)
+    }
   }
-  return summaries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+
+  for (const file of await listTestPaths()) {
+    const test = await readTestFile(file)
+    if (!test) continue
+    collect(test.steps)
+    for (const version of test.versions ?? []) collect(version.steps)
+  }
+
+  for (const block of await listBlocks()) {
+    const b = await readBlockFile(block.fileName)
+    if (b) collect(b.steps)
+  }
+
+  for (const draft of await listDrafts()) {
+    const d = await loadDraft(draft.id)
+    if (d) collect(d.steps)
+  }
+
+  return [...refs]
 }
 
 export async function loadTest(fileName: string): Promise<SavedTestFile | null> {
@@ -453,6 +516,9 @@ export async function loadDraft(id: string): Promise<DraftFile | null> {
   try {
     const d = JSON.parse(await readFile(join(draftsDir(), `${id}.json`), 'utf-8'))
     if (!d || !Array.isArray(d.steps)) return null
+    // QF-001: an auto-saved draft from before the fix carries the same broken
+    // checkbox pair — resuming one must not reintroduce it.
+    d.steps = migrateLegacyCheckSteps(d.steps as LegacyStep[]).steps
     return d as DraftFile
   } catch {
     return null
@@ -556,6 +622,9 @@ async function readBlockFile(fileName: string): Promise<BlockFile | null> {
     const raw = await readFile(join(blocksDir(), safeSegment(fileName)), 'utf-8')
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed.name !== 'string' || !Array.isArray(parsed.steps)) return null
+    // QF-001: a reusable block is steps too, and a legacy checkbox inside one
+    // would otherwise be copied into every test that references it.
+    parsed.steps = migrateLegacyCheckSteps(parsed.steps as LegacyStep[]).steps
     return parsed as BlockFile
   } catch {
     return null

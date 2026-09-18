@@ -18,6 +18,7 @@ import {
   type MonitorRun
 } from './monitors'
 import { join, basename, dirname } from 'path'
+import { randomUUID } from 'crypto'
 import { execFile } from 'child_process'
 import { writeFile, mkdir, copyFile, readFile, readdir, rm } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -40,8 +41,20 @@ import {
 // app and the exported spec can never disagree about how a loop runs.
 import { analyzeControlFlow, isControlStep, resolveLoopTokens } from '../shared/controlFlow'
 import { collidesWithOsEnv } from '../shared/osEnvNames'
+import { portableBasename } from '../shared/portablePath'
+// QF-002: the page → Electron trust boundary. Main re-validates rather than
+// trusting the relay preload to have done it.
+import { validateElementFacts, validatePageMessage } from '../shared/recorderMessages'
+import { createRelaySession } from '../shared/relaySession'
 // F40: passwords live in userData, not in the shared test files.
-import { resolveSecrets, getSecrets, migratePlaintextSecrets } from './secrets'
+import {
+  resolveSecrets,
+  getSecrets,
+  migratePlaintextSecrets,
+  // QF-003: encrypted at rest, and cleaned up when the tests that used them go.
+  collectOrphanedSecrets,
+  secretStoreStatus
+} from './secrets'
 // F40: export/import the library as a portable, git-committable bundle.
 import { exportBundle, inspectBundle, importBundle, type ImportPlanEntry } from './bundle'
 import {
@@ -60,6 +73,7 @@ import {
   loadBlock,
   deleteBlock,
   blockUsage,
+  allSecretRefs,
   libraryDir,
   slugify,
   loadHar,
@@ -655,6 +669,50 @@ function createWindow(): void {
   // that navigates (fresh document) is dropped from the set and re-injected.
   const injectedFrames = new Set<number>()
 
+  // QF-002: the relay nonce for the CURRENT recording session.
+  //
+  // Main mints it, bakes it into each injected observer, and hands the same
+  // value to every tab's relay preload over IPC — into that preload's isolated
+  // world, which the page's own scripts cannot read. The relay forwards nothing
+  // that doesn't carry it, so while no recording is armed the page→IPC path is
+  // closed outright.
+  //
+  // Re-rolled per session so a nonce a page scraped off a live recording is
+  // dead the moment that recording ends.
+  // The arming rule itself is a pure state machine in src/shared/relaySession —
+  // getting it wrong looks like "the recorder captured nothing", so it is unit
+  // tested rather than only observable by running the app.
+  const relaySession = createRelaySession(randomUUID)
+
+  // A newly created tab needs the current nonce, or everything captured in a
+  // popup is silently dropped by that tab's relay.
+  const armRelay = (wc: Electron.WebContents): void => {
+    try {
+      wc.send('recorder:arm', relaySession.current())
+    } catch {
+      // view gone before it was armed — nothing to do
+    }
+  }
+
+  /**
+   * Bring every tab's relay in line with what the app is currently doing.
+   *
+   * The relay must be armed for RECORDING *or* PICKING — picking an element to
+   * assert on is its own session and comes back through the very same relay, so
+   * gating purely on `isRecording` would have quietly broken the picker.
+   *
+   * `fresh` mints a new nonce (a new session begins). Otherwise an existing one
+   * is kept, so turning pick mode on mid-recording doesn't invalidate the
+   * observers already running with the session's value.
+   *
+   * MUST be called BEFORE re-injecting observers: they bake in the nonce their
+   * relay is about to start expecting.
+   */
+  const syncRelayArming = (fresh = false): void => {
+    relaySession.sync({ recording: isRecording, picking: isPicking, fresh })
+    for (const t of tabs) armRelay(t.view.webContents)
+  }
+
   const injectObserver = (frame: Electron.WebFrameMain | null): void => {
     if (!frame) return
     let id: number
@@ -678,6 +736,10 @@ function createWindow(): void {
       `window.__qaflowFrame=${JSON.stringify(ref ?? null)};` +
       `window.__qaflowInitActive=${isRecording};` +
       `window.__qaflowInitPicking=${isPicking};` +
+      // QF-002: the observer reads this and deletes it from `window` on its
+      // first statement, inside this same executeJavaScript call — so no page
+      // script ever gets a turn while it is sitting on the global object.
+      `window.__qaflowNonce=${JSON.stringify(relaySession.current())};` +
       `(${observerProgram.toString()})();`
     frame.executeJavaScript(boot).catch(() => {
       // injection can fail on a frame that's navigating — allow a retry later
@@ -1076,6 +1138,10 @@ function createWindow(): void {
     const tab: Tab = { id: `tab-${++tabIdSeq}`, ordinal, view }
     tabs.push(tab)
     const wc = view.webContents
+    // QF-002: hand this tab's relay the current session nonce. A popup opened
+    // mid-recording is part of that recording, and an unarmed relay would drop
+    // everything captured in it without a word.
+    armRelay(wc)
 
     // The active tab drives the URL bar; any tab's navigation refreshes the
     // strip (titles / urls change).
@@ -1103,6 +1169,13 @@ function createWindow(): void {
     wc.on('destroyed', () => {
       if (!mainWindow.isDestroyed()) closeTab(tab)
     })
+
+    // QF-002: the relay preload is re-executed for EVERY new document, so its
+    // nonce resets to null on every navigation. Re-arm as each document becomes
+    // ready — which is before did-finish-load, so the relay is always listening
+    // by the time the observer is injected and starts posting. Without this,
+    // recording stopped the moment the page navigated.
+    wc.on('dom-ready', () => armRelay(wc))
 
     // Inject the observer into every frame as pages/iframes load.
     wc.on('did-finish-load', () => injectAllFrames(wc))
@@ -1316,6 +1389,9 @@ function createWindow(): void {
   // step (the existing list already begins with one), we just append more.
   ipcMain.handle('recorder:toggle', (_event, resume?: boolean): boolean => {
     isRecording = !isRecording
+    // QF-002: a fresh nonce for each recording session, so one scraped off a
+    // live recording is dead as soon as that recording ends.
+    syncRelayArming(isRecording)
     // Arm or disarm the observer in every live frame (top page + all iframes).
     reinjectAllFrames()
     // When a FRESH recording begins, start from a clean SINGLE tab (like a fresh
@@ -1362,6 +1438,27 @@ function createWindow(): void {
     return isRecording
   })
 
+  // QF-002: is this IPC message really from one of our embedded browser tabs?
+  //
+  // Main must not take the relay's word for it. `event.sender` is supplied by
+  // Electron, not by the message, so it is the one part of an incoming message
+  // that cannot be spoofed by its content — and it tells us whether this came
+  // from a tab view at all, rather than from the app's own renderer or a view
+  // that has since been closed.
+  //
+  // Defence in depth rather than a second lock: the relay already validated the
+  // channel and the shape. This is the check that survives a future change to
+  // the relay, and re-validating the payload here means main never relies on
+  // another process having done it.
+  const isTabSender = (sender: Electron.WebContents): boolean =>
+    tabs.some((t) => {
+      try {
+        return !t.view.webContents.isDestroyed() && t.view.webContents === sender
+      } catch {
+        return false
+      }
+    })
+
   // The observer reports a click/type/select with the RAW facts of the
   // element. Here we run those facts through the selector engine to build the
   // canonical step (a human label + a ranked selector ladder) before sending
@@ -1383,6 +1480,11 @@ function createWindow(): void {
       }
     ) => {
       if (!isRecording) return
+      // QF-002: from one of our tabs, and shaped like a real recorder event.
+      if (!isTabSender(event.sender)) return
+      const clean = validatePageMessage('recorder:event', raw) as typeof raw | null
+      if (!clean) return
+      raw = clean
       const { primary, candidates } = buildSelectors(raw.facts)
       sendStep(
         {
@@ -1416,6 +1518,11 @@ function createWindow(): void {
       }
     ) => {
       if (!isRecording) return
+      // QF-002: see isTabSender.
+      if (!isTabSender(event.sender)) return
+      const clean = validatePageMessage('recorder:dialog', raw) as typeof raw | null
+      if (!clean) return
+      raw = clean
       sendStep(
         {
           type: 'dialog',
@@ -1461,10 +1568,42 @@ function createWindow(): void {
     'recorder:upload',
     async (event, raw: { facts: ElementFacts; paths: string[]; names?: string[] }) => {
       if (!isRecording) return
+      // === QF-002b: uploads come from a trusted picker event, or not at all ===
+      //
+      // This handler copies caller-supplied paths into the user's test library,
+      // which made it the sharpest edge reachable through the old open relay: a
+      // page could name any path on disk and have it copied in.
+      //
+      // The tie to a real file pick is now structural rather than a check here.
+      // `recorder:upload` is deliberately NOT in PAGE_CHANNELS (see
+      // src/shared/recorderMessages.ts), so a page-world message can no longer
+      // select this channel at all. The only producer left is the relay
+      // preload's own `change` listener on a file input, running in an isolated
+      // world, resolving paths through webUtils.getPathForFile — which the page
+      // world cannot call and cannot forge a File for.
+      //
+      // What remains here is what main owes regardless of who it trusts:
+      // confirm the sender is one of our tabs, and take nothing on faith about
+      // the shape.
+      if (!isTabSender(event.sender)) return
+      if (!raw || typeof raw !== 'object') return
+      const facts = validateElementFacts(raw.facts) as ElementFacts | undefined
+      if (!facts) return
+      const paths = (Array.isArray(raw.paths) ? raw.paths : [])
+        .filter((p): p is string => typeof p === 'string' && !!p && p.length <= 4096)
+        // A real multi-select is a handful of files, not thousands; the cap
+        // keeps a malformed message from copying a directory's worth.
+        .slice(0, 50)
+      if (!paths.length) return
+      const names = (Array.isArray(raw.names) ? raw.names : [])
+        .filter((n): n is string => typeof n === 'string' && n.length <= 500)
+        .slice(0, 50)
+      raw = { facts, paths, names }
+
       const ordinal = recWindowIdOfWC(event.sender)
       const { primary, candidates } = buildSelectors(raw.facts)
       const stored: string[] = []
-      for (const p of raw.paths ?? []) stored.push(await copyIntoUploads(p))
+      for (const p of raw.paths) stored.push(await copyIntoUploads(p))
       sendStep(
         {
           type: 'upload',
@@ -1789,6 +1928,8 @@ function createWindow(): void {
   // selector engine (same as recorded steps) before handing to the UI.
   ipcMain.handle('recorder:setPicking', (_event, active: boolean) => {
     isPicking = active
+    // QF-002: picking is a relay session of its own — arm before re-injecting.
+    syncRelayArming(active && !isRecording)
     reinjectAllFrames()
   })
 
@@ -1822,6 +1963,11 @@ function createWindow(): void {
         frame?: { url: string; name?: string }[] | null
       }
     ) => {
+      // QF-002: see isTabSender.
+      if (!isTabSender(event.sender)) return
+      const cleanPick = validatePageMessage('recorder:picked', raw) as typeof raw | null
+      if (!cleanPick) return
+      raw = cleanPick
       // A completed pick ENDS pick mode. The page's own observer already flips
       // its local `picking` off when it captures the click, but main must reset
       // its flag too — otherwise the next observer re-injection (e.g. the
@@ -4900,7 +5046,26 @@ function createWindow(): void {
   })
   ipcMain.handle('library:listSuites', () => listSuites())
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))
-  ipcMain.handle('library:delete', (_event, fileName: string) => deleteTest(fileName))
+  // QF-003: deleting a test must also delete its stored password. Without this,
+  // "I deleted that test" was untrue of the part that mattered most — the
+  // credential stayed in userData forever.
+  //
+  // Swept after the delete rather than by reading the doomed file: a secret ref
+  // can be shared by several tests (clone, or a block flattened into two), so
+  // the only safe question is "does ANYTHING still reference it?".
+  ipcMain.handle('library:delete', async (_event, fileName: string) => {
+    await deleteTest(fileName)
+    try {
+      await collectOrphanedSecrets(await allSecretRefs())
+    } catch {
+      // A failed sweep must never fail the delete the user asked for; the next
+      // delete sweeps again anyway.
+    }
+  })
+
+  // QF-003: is the secret store actually encrypted on this machine? The UI can
+  // then say so rather than implying a guarantee the platform didn't give.
+  ipcMain.handle('secrets:status', () => secretStoreStatus())
   ipcMain.handle('library:recordRun', (_event, fileName: string, run: RunInfo) =>
     recordRun(fileName, run)
   )
@@ -5622,7 +5787,10 @@ function createWindow(): void {
         const fixturesDir = join(dirname(result.filePath), 'fixtures')
         await mkdir(fixturesDir, { recursive: true }).catch(() => {})
         for (const src of fixturePaths) {
-          await copyFile(src, join(fixturesDir, basename(src))).catch(() => {})
+          // QF-005: portableBasename, not basename — the exporter names this
+          // file with the same cross-platform rule, and if the two disagree the
+          // spec references a fixture that isn't there under that name.
+          await copyFile(src, join(fixturesDir, portableBasename(src))).catch(() => {})
         }
       }
       // Day 17: the test.use({ storageState }) the export emits points at

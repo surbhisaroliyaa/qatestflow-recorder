@@ -1,5 +1,9 @@
 <!doctype html>
-<html>
+<!-- QF-004: `lang` is one of the two SERIOUS axe violations the audit found in
+     the app's own shell. Without it a screen reader announces the entire
+     interface using the user's default voice and pronunciation rules, which for
+     a non-English default makes the UI read as gibberish. One attribute. -->
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <title>QATestFlow Recorder</title>

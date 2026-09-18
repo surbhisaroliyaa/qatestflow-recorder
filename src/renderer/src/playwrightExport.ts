@@ -10,6 +10,9 @@ import { TOKEN_RE, extractTokens } from './dataDriven'
 // F37: shared with the replay engine in main, so the exported spec and the
 // in-app run can never disagree about how a loop or an if-block behaves.
 import { isControlStep, conditionText, repeatText } from '../../shared/controlFlow'
+// QF-005: shared with main's fixture copier, so the name the spec references
+// and the name written to disk are produced by the same rule on every OS.
+import { portableBasename } from '../../shared/portablePath'
 
 // F33 (CI export): a standard GitHub Actions workflow that runs the exported
 // Playwright tests on every push / PR — the official Playwright CI template, so
@@ -834,6 +837,11 @@ export function stepText(step: RecorderStep): string {
       return `Click ${name}`
     case 'type':
       return `Type "${step.secret ? '••••••••' : (step.value ?? '')}" into ${name}`
+    case 'check':
+      // QF-001: reads as the state the step guarantees, not the gesture — the
+      // step is idempotent, so "Tick" is the honest word whether or not the box
+      // happened to already be ticked when replay reached it.
+      return step.value === 'false' ? `Untick ${name}` : `Tick ${name}`
     case 'select':
       return `Select "${step.value ?? ''}" in ${name}`
     case 'press':
@@ -1392,6 +1400,21 @@ function actionFor(
         return `await ${locator}.fill(process.env.PASSWORD ?? '') // password field — set the PASSWORD env var`
       }
       return `await ${locator}.fill(${valueExpr(step.value ?? '', columns)})`
+    // QF-001: a checkbox/radio used to come through here as a `type` step and
+    // emit .fill('on'), which Playwright rejects — the in-app run was green and
+    // the exported spec was red. .check()/.uncheck() are also idempotent and
+    // auto-waiting, so they assert the resulting state rather than just poking
+    // the element. Both the inline and Page Object exporters call actionFor(),
+    // so this one change covers both outputs.
+    case 'check': {
+      const v = step.value ?? 'true'
+      // A data-driven column supplies the state as text ("true"/"false"), which
+      // only setChecked can take — .check() has no argument to bind it to.
+      if (hasRefs(v, columns)) {
+        return `await ${locator}.setChecked(String(${valueExpr(v, columns)}).toLowerCase() === 'true')`
+      }
+      return v === 'false' ? `await ${locator}.uncheck()` : `await ${locator}.check()`
+    }
     case 'select':
       // We stored the option's VISIBLE text, so select by label.
       return `await ${locator}.selectOption({ label: ${valueExpr(step.value ?? '', columns)} })`
@@ -1408,7 +1431,9 @@ function actionFor(
       // exported test is self-contained (no machine-specific absolute paths).
       const paths = (step.value ?? '').split('\n').filter(Boolean)
       if (!paths.length) return null
-      const rel = paths.map((p) => `fixtures/${p.split(/[\\/]/).pop()}`)
+      // QF-005: one definition of "the filename part", shared with the code
+      // that copies the fixture next to the spec — see src/shared/portablePath.
+      const rel = paths.map((p) => `fixtures/${portableBasename(p)}`)
       const arg = rel.length === 1 ? quote(rel[0]) : `[${rel.map(quote).join(', ')}]`
       return `await ${locator}.setInputFiles(${arg})`
     }
@@ -2137,7 +2162,7 @@ export function generatePageObjectTest(
   // class then read `await this.usernameButton.fill("standard_user")`, which is
   // nonsense a reviewer would flag instantly. A click tells you what the tester
   // DID; it does not tell you what the element IS. Typing into it does.
-  type ElKind = 'input' | 'select' | 'button'
+  type ElKind = 'input' | 'select' | 'checkbox' | 'button'
   const kindByKey = new Map<string, ElKind>()
   for (const s of enabled) {
     if (!s.selector) continue
@@ -2145,11 +2170,20 @@ export function generatePageObjectTest(
     // `type` wins unconditionally — you cannot fill a button, so a fill is proof.
     if (s.type === 'type') kindByKey.set(e, 'input')
     else if (s.type === 'select' && kindByKey.get(e) !== 'input') kindByKey.set(e, 'select')
+    // QF-001: same reasoning as `select` — ticking it proves what it IS, where a
+    // click on it would only have proved what the tester did. Reads as
+    // `await this.termsCheckbox.check()`.
+    else if (s.type === 'check' && kindByKey.get(e) !== 'input') kindByKey.set(e, 'checkbox')
     else if ((s.type === 'click' || s.type === 'press') && !kindByKey.has(e)) {
       kindByKey.set(e, 'button')
     }
   }
-  const SUFFIX: Record<ElKind, string> = { input: 'Input', select: 'Select', button: 'Button' }
+  const SUFFIX: Record<ElKind, string> = {
+    input: 'Input',
+    select: 'Select',
+    checkbox: 'Checkbox',
+    button: 'Button'
+  }
 
   // === One class per tab ===============================================
   // A page object models ONE page, so a flow that opens a popup needs a second
@@ -2240,11 +2274,12 @@ export function generatePageObjectTest(
     if (existing) return existing
     const ctx = tabCtx(tabOf(step))
     const kind = kindByKey.get(key)
-    // An element only ever ASSERTED on gets no suffix — it isn't a control.
-    const name = uniqueName(
-      ctx,
-      camelName(step.label || step.type) + (kind ? SUFFIX[kind] : '')
-    )
+    // An element only ever ASSERTED on gets no suffix — it isn't a control. Nor
+    // does one whose name already says what it is: a box labelled from the id
+    // "hobbies-checkbox-1" would otherwise become `hobbiesCheckbox1Checkbox`.
+    const base = camelName(step.label || step.type)
+    const saysItAlready = !!kind && new RegExp(`${SUFFIX[kind]}\\d*$`, 'i').test(base)
+    const name = uniqueName(ctx, base + (kind && !saysItAlready ? SUFFIX[kind] : ''))
     nameByKey.set(key, name)
     const frameField = frameFieldFor(ctx, step)
     ctx.locatorDefs.push({

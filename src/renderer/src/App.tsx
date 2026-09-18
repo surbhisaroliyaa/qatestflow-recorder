@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+// QF-004: keyboard focus containment for every modal — see modalA11y.ts.
+import { trapFocus } from './modalA11y'
 import {
   generatePlaywrightTest,
   generatePageObjectTest,
@@ -1469,8 +1471,14 @@ function App(): React.JSX.Element {
   const a11yPanelOpen = a11yScanning || a11yScan !== null
   // F14: same for the performance panel.
   const perfPanelOpen = perfMeasuring || perfResult !== null
-  useEffect(() => {
-    window.api.browser.setOverlay(
+  // QF-004: the same condition that hides the native browser pane also says
+  // "a dialog is on screen", so focus containment rides along with it rather
+  // than being a second list that can drift out of step with this one.
+  //
+  // A dialog that appears WITHOUT joining the list below already has a worse
+  // bug (it renders under the native pane and the app looks frozen), so there
+  // is no case where a modal is visible and this misses it.
+  const anyOverlayOpen =
       exportCode !== null ||
         suiteSummaryOpen ||
         dataPopupOpen ||
@@ -1531,7 +1539,21 @@ function App(): React.JSX.Element {
         // is what guarantees the banner is actually visible.
         parallelRunning ||
         apiPanelIndex !== null
-    )
+
+  // QF-004: hold focus inside whichever dialog is open, and hand it back when
+  // it closes. `anyOverlayOpen` is the only dependency: the effect re-runs on
+  // open and tears down on close, which is exactly the trap's lifetime.
+  //
+  // A layout effect, not a plain one — it must run after React has committed
+  // the dialog to the DOM (so there is something to focus) but before the
+  // browser paints, so focus never visibly lands in the wrong place first.
+  useLayoutEffect(() => {
+    if (!anyOverlayOpen) return
+    return trapFocus()
+  }, [anyOverlayOpen])
+
+  useEffect(() => {
+    window.api.browser.setOverlay(anyOverlayOpen)
   }, [
     exportCode,
     suiteSummaryOpen,
@@ -2332,6 +2354,9 @@ function App(): React.JSX.Element {
   const canParameterize = (step: RecorderStep): boolean =>
     step.type === 'type' ||
     step.type === 'select' ||
+    // QF-001: "does this row tick the box?" is a legitimate data column — the
+    // export binds it through setChecked.
+    step.type === 'check' ||
     (step.type === 'assert' && !!step.assertKind && assertNeedsValue(step.assertKind))
 
   // A readable name for a row in the run summary: its first column's value, else
@@ -4098,7 +4123,7 @@ function App(): React.JSX.Element {
   // Which steps can be optional: ones that TARGET an element (so "present or
   // not" is meaningful). Page/flow steps (navigate, wait, back) always run.
   const canBeOptional = (step: RecorderStep): boolean =>
-    ['click', 'type', 'select', 'press', 'hover', 'assert'].includes(step.type)
+    ['click', 'type', 'check', 'select', 'press', 'hover', 'assert'].includes(step.type)
 
   // The text an inline edit would change: a navigate edits its URL; a type /
   // select edits its value; a wait edits its seconds; a valued assertion edits
@@ -4110,6 +4135,10 @@ function App(): React.JSX.Element {
     if (step.type === 'type' || step.type === 'select') {
       return step.value ?? ''
     }
+    // QF-001: a check step edits the state it asserts — 'true' ticks the box,
+    // 'false' unticks it. Editable so a recorded tick can be flipped into an
+    // untick without re-recording, and so a data column can drive it.
+    if (step.type === 'check') return step.value ?? 'true'
     // F3: a fixed wait edits its seconds, a "wait for text" edits the text; a
     // "wait for network idle" has nothing to type.
     if (step.type === 'wait') {
@@ -6197,25 +6226,17 @@ function App(): React.JSX.Element {
         </div>
       )}
 
-      {/* The native embedded browser is painted OVER this area, so anything in
-          here is invisible while the page is showing. It becomes visible at
-          exactly one moment: when a modal opens and main shrinks the native view
-          to nothing (browser:setOverlay) so it can't cover the dialog. Before,
-          that left a large flat #1e1e1e void that read as "the app broke" —
-          Surbhi kept a screenshot of it titled "back ground goes black". The
-          page is still loaded the whole time; this just says so. */}
+      {/* The native embedded browser is painted OVER this area, so it is only
+          ever seen when a modal opens and main shrinks the native view to
+          nothing (browser:setOverlay) so it can't cover the dialog.
+
+          There used to be a "Page hidden while this dialog is open" note here.
+          Removed 2026-09-18: a tall modal (Export) covered it wherever it sat,
+          and the backdrop dimmed it below readable contrast when it wasn't
+          covered. The open dialog over a dimmed window already says why the
+          page is gone, and the page returns the moment the dialog closes. */}
       <div className="workspace">
-        <div className="browser-area">
-          {/* Anchored to the TOP, not centred: modals are vertically centred, so
-              a centred note sits directly behind the dialog and only its ends
-              poke out — which looks like a rendering fault, not a message. */}
-          <div className="browser-hidden-note">
-            🗔 Page hidden while this dialog is open
-            {(urlInput || baseURL) && (
-              <span className="browser-hidden-url">{urlInput || baseURL}</span>
-            )}
-          </div>
-        </div>
+        <div className="browser-area" />
         <aside className="steps-panel">
           {/* === Day 11: current test identity (name + editable base URL) ===
               Show for an UNSAVED recording too (any steps) — otherwise the env

@@ -89,3 +89,9 @@ fixtures/
 # they get re-checked), but never committed: the generated specs are throwaway
 # and the reports are machine-specific. Same treatment as docs/.
 .qa-audit/
+
+# --- Export contract gate scratch (.export-gate/) ---
+# Where test-dom/exported-spec.spec.ts writes the specs it generates and then
+# runs with a real `npx playwright test` (audit finding QF-001). Created and
+# deleted by that test on every run — never source.
+.export-gate/

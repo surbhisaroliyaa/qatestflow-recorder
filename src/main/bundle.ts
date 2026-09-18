@@ -35,8 +35,9 @@
 
 import { mkdir, readFile, writeFile, readdir, copyFile, stat } from 'fs/promises'
 import { existsSync } from 'fs'
-import { join, basename } from 'path'
+import { join } from 'path'
 import { placeholderSecrets, scrubDataRows } from './secrets'
+import { portableBasename } from '../shared/portablePath'
 
 export const BUNDLE_VERSION = 1
 
@@ -77,7 +78,12 @@ export function uploadFilesIn(steps: unknown[]): string[] {
   const out: string[] = []
   for (const raw of Array.isArray(steps) ? steps : []) {
     const s = raw as Record<string, unknown>
-    if (s?.type === 'upload' && typeof s.value === 'string' && s.value) out.push(basename(s.value))
+    // QF-005: the step's path was serialized by whichever OS RECORDED it, which
+    // is not necessarily the one reading it now — so the separator rule can't
+    // come from this platform's `basename`.
+    if (s?.type === 'upload' && typeof s.value === 'string' && s.value) {
+      out.push(portableBasename(s.value))
+    }
   }
   return out
 }

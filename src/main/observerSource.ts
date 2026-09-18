@@ -36,9 +36,13 @@ export function observerProgram(): void {
     __qaflowFrame?: unknown
     __qaflowInitActive?: boolean
     __qaflowInitPicking?: boolean
+    // QF-002: this recording session's relay nonce. Read into a closure local
+    // and deleted immediately — see postToHost.
+    __qaflowNonce?: string
     __qaflow?: {
       setActive: (v: boolean) => void
       setPicking: (v: boolean) => void
+      setNonce: (v: string) => void
       findByLabel: (
         label: string,
         role?: string,
@@ -48,6 +52,20 @@ export function observerProgram(): void {
       ) => unknown
     }
   }
+  // QF-002: read the nonce main baked in for this run and REMOVE it from the
+  // page's global object straight away, so it isn't sitting there for a page
+  // script to read. This runs inside main's single executeJavaScript call, so
+  // no page code can interleave between the write and this removal.
+  const takeNonce = (): string => {
+    const n = typeof g.__qaflowNonce === 'string' ? g.__qaflowNonce : ''
+    try {
+      delete g.__qaflowNonce
+    } catch {
+      g.__qaflowNonce = undefined
+    }
+    return n
+  }
+
   if (g.__qaflowInstalled) {
     // Re-injected by main to push a fresh record/pick state. Main re-injects
     // EVERY frame on a record/pick toggle, because that path reliably reaches
@@ -57,6 +75,11 @@ export function observerProgram(): void {
     if (g.__qaflow) {
       g.__qaflow.setActive(!!g.__qaflowInitActive)
       g.__qaflow.setPicking(!!g.__qaflowInitPicking)
+      // QF-002: main re-rolls the relay nonce for every recording session, and
+      // an already-installed observer would otherwise keep posting the previous
+      // one — which the relay now drops, silently recording nothing. Re-arming
+      // it here is what keeps the second recording in a session working.
+      g.__qaflow.setNonce(takeNonce())
     }
     return
   }
@@ -70,10 +93,16 @@ export function observerProgram(): void {
   // Transport: bubble every event up to the TOP window. The top frame's
   // preload relay forwards it to main. Posting cross-origin to the top is
   // allowed (we only post, never read), so this works for nested/foreign frames.
+  // QF-002: every message carries the session NONCE main baked in for this run.
+  // The relay drops anything without the current one, so a page cannot post
+  // recorder traffic cold — it would first have to observe a real event from a
+  // recording already in progress. Held in a closure local, never on a global.
+  let nonce = takeNonce()
+
   const postToHost = (channel: string, payload: Record<string, unknown>): void => {
     try {
       const top = window.top
-      if (top) top.postMessage({ __qaflow: true, channel, payload }, '*')
+      if (top) top.postMessage({ __qaflow: true, nonce, channel, payload }, '*')
     } catch {
       // detached frame or blocked — nothing we can do
     }
@@ -256,6 +285,13 @@ export function observerProgram(): void {
     setPicking: (v: boolean): void => {
       picking = v
       if (!picking) clearHighlight()
+    },
+    // QF-002: re-arm with the nonce for a NEW recording session (main re-rolls
+    // it each time). A page calling this can only break its own recording — it
+    // cannot mint a nonce the relay will accept, which is the property that
+    // matters.
+    setNonce: (v: string): void => {
+      nonce = typeof v === 'string' ? v : ''
     },
     // Day 18 (self-heal): main calls this on a replay failure to AUTO-find the
     // element a broken step meant — by its recorded human label. Returns the
@@ -577,6 +613,18 @@ export function observerProgram(): void {
       }
     }
 
+    // The control's <label> — `labels` covers both label[for=id] and a wrapping
+    // <label>, so no id lookup (and no CSS escaping) is needed. Read from a copy
+    // with the controls removed: `<label>Country <select>…</select></label>`
+    // would otherwise be named "Country" plus the text of every option.
+    const labelled = el as HTMLInputElement
+    if (labelled.labels && labelled.labels.length) {
+      const copy = labelled.labels[0].cloneNode(true) as HTMLElement
+      copy.querySelectorAll('input, select, textarea, button').forEach((c) => c.remove())
+      const lt = (copy.textContent || '').trim().replace(/\s+/g, ' ')
+      if (lt && lt.length <= 100) facts.labelText = lt
+    }
+
     if (el.tagName.toLowerCase() !== 'select') {
       const heading = el.querySelector('h1, h2, h3, h4, h5, h6')
       const text = ((heading && heading.textContent) || el.textContent || '')
@@ -835,6 +883,25 @@ export function observerProgram(): void {
     }
   }
 
+  // QF-001: is this a tickable control? Checkbox and radio are the two input
+  // types whose interaction is a STATE CHANGE, not a value entry — they need
+  // the canonical `check` step rather than `click` + `type`.
+  // (Deliberately a plain boolean, not an `el is HTMLInputElement` predicate:
+  // as a type guard it would narrow the ELSE branch of the change listener —
+  // where the field is already known to be an input — down to `never`.)
+  const isCheckable = (el: Element | null): boolean =>
+    !!el && el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')
+
+  // QF-001: the control a click on this element would toggle, if any. Covers
+  // `<label for=x>`, the wrapping `<label><input>text</label>` form, and a click
+  // on any descendant of either (the span inside a styled checkbox, say).
+  const labelledControl = (el: Element): HTMLInputElement | null => {
+    const label = el.closest('label')
+    if (!label) return null
+    const control = (label as HTMLLabelElement).control
+    return isCheckable(control) ? (control as HTMLInputElement) : null
+  }
+
   // --- Capture CLICKS ---
   document.addEventListener(
     'click',
@@ -875,6 +942,13 @@ export function observerProgram(): void {
       // CDP setFileInputFiles), so recording this click is pointless — and on
       // replay it would pop that "Open" dialog endlessly instead of uploading.
       if (tag === 'input' && (el as HTMLInputElement).type === 'file') return
+      // QF-001: a checkbox/radio is recorded ONCE, by the change listener below,
+      // as a canonical `check` step carrying the resulting ticked state. Record
+      // nothing here or the tick lands twice (a click AND a bogus type "on").
+      // The label counts too: clicking a <label> toggles its control, so a
+      // label click would otherwise sneak the duplicate straight back in —
+      // covers both `for=` labels and the wrapping <label><input>…</label> form.
+      if (isCheckable(el) || isCheckable(labelledControl(el))) return
       try {
         const trigger = findHoverTrigger(el)
         if (trigger) {
@@ -918,6 +992,22 @@ export function observerProgram(): void {
     // the real disk path, via webUtils — the page world can't). Don't record a
     // bogus 'type' step carrying the browser's fake "C:\fakepath\…" value.
     if (field.type === 'file') return
+
+    // QF-001: a checkbox/radio reports `field.value` as the HTML default "on",
+    // which says nothing about whether it ended up ticked. Record the STATE.
+    // `change` is the right listener for this: it fires for a mouse click, a
+    // label click, and the keyboard Space toggle alike, and it fires only when
+    // the state actually moved — so a page that preventDefaults the click
+    // (leaving the box untouched) correctly records nothing.
+    if (isCheckable(field)) {
+      postToHost('recorder:event', {
+        type: 'check',
+        facts: collectFacts(field),
+        value: String(field.checked),
+        frame: FRAME
+      })
+      return
+    }
 
     if (enterHandled.has(field)) {
       enterHandled.delete(field)
