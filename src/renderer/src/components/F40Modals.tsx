@@ -30,8 +30,8 @@ export interface F40ModalsProps {
       choices: Record<string, 'keep-both' | 'overwrite' | 'skip'>
     } | null>
   >
-  secretMigration: { migrated: number; tests: string[] } | null
-  setSecretMigration: (v: { migrated: number; tests: string[] } | null) => void
+  secretMigration: SecretSweepResult | null
+  setSecretMigration: (v: SecretSweepResult | null) => void
   handleApplyImport: () => Promise<void>
 }
 
@@ -57,7 +57,7 @@ export function F40Modals({
             <div className="modal-backdrop" onClick={() => setSecretMigration(null)}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-header">
-                  <span className="modal-title">🔑 Passwords moved out of your test files</span>
+                  <span className="modal-title">🔑 Passwords protected on this computer</span>
                   <button
                     className="modal-close"
                     onClick={() => setSecretMigration(null)}
@@ -68,31 +68,48 @@ export function F40Modals({
                 </div>
                 <div className="modal-body bundle-body">
                   <p>
-                    Until now, a password field marked <strong>secret</strong> was masked on screen
-                    and kept out of the export — but the value itself was still written into the
-                    test&apos;s JSON file, in plain text, in a folder meant to be shared and
-                    committed.
+                    Passwords were still saved in readable form in some of your files. They are
+                    now encrypted on this computer, and each file keeps only a reference to them.
                   </p>
+                  {secretMigration.migrated > 0 && (
+                    <>
+                      <p>
+                        <strong>{secretMigration.migrated}</strong> test
+                        {secretMigration.migrated === 1 ? '' : 's'} updated: password steps,
+                        password columns in data tables, and saved history.
+                      </p>
+                      <ul className="secret-sweep-list">
+                        {secretMigration.tests.slice(0, 10).map((t) => (
+                          <li key={t}>
+                            <code>{t}</code>
+                          </li>
+                        ))}
+                        {secretMigration.tests.length > 10 && (
+                          <li>…and {secretMigration.tests.length - 10} more</li>
+                        )}
+                      </ul>
+                    </>
+                  )}
+                  {!!secretMigration.otherFiles && (
+                    <p>
+                      Also removed passwords from <strong>{secretMigration.otherFiles}</strong> other
+                      file{secretMigration.otherFiles === 1 ? '' : 's'}: backups, drafts, run
+                      recordings, baselines and edge-case runs.
+                    </p>
+                  )}
                   <p>
-                    <strong>{secretMigration.migrated}</strong> test
-                    {secretMigration.migrated === 1 ? '' : 's'} updated. The passwords now live in
-                    your app data alongside your environments; each step keeps only a reference.
-                    <strong> Nothing about how your tests run has changed.</strong>
+                    <strong>Your tests run in the app exactly as before.</strong> In an exported
+                    test, a data table with different passwords per row now reads each one from
+                    its own environment variable (<code>PASSWORD_1</code>, <code>PASSWORD_2</code>
+                    …) — add those as secrets in your CI.
                   </p>
-                  <ul>
-                    {secretMigration.tests.slice(0, 10).map((t) => (
-                      <li key={t}>
-                        <code>{t}</code>
-                      </li>
-                    ))}
-                    {secretMigration.tests.length > 10 && (
-                      <li>…and {secretMigration.tests.length - 10} more</li>
-                    )}
-                  </ul>
-                  <p className="import-note">
-                    A full copy of your library was saved to{' '}
-                    <code>QATestFlow Tests/_backups/</code> before anything was changed.
-                  </p>
+                  {secretMigration.backupDir && (
+                    <p className="import-note">
+                      The {secretMigration.migrated} changed test
+                      {secretMigration.migrated === 1 ? ' was' : 's were'} backed up first, with the
+                      passwords removed, to <code>QATestFlow Tests/{secretMigration.backupDir}/</code>.
+                    </p>
+                  )}
                 </div>
                 <div className="assert-actions">
                   <button className="modal-btn primary" onClick={() => setSecretMigration(null)}>

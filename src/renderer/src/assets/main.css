@@ -2462,6 +2462,14 @@ body {
   padding-left: 18px;
 }
 
+/* The modal body centres its text, which left each bullet at the far left
+   and its file name floating in the middle. Keep the list together. */
+.secret-sweep-list {
+  text-align: left;
+  width: fit-content;
+  margin: 0 auto !important;
+}
+
 .bundle-path code {
   display: block;
   padding: 6px 8px;

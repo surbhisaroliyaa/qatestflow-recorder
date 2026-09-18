@@ -46,11 +46,17 @@ import { portableBasename } from '../shared/portablePath'
 // trusting the relay preload to have done it.
 import { validateElementFacts, validatePageMessage } from '../shared/recorderMessages'
 import { createRelaySession } from '../shared/relaySession'
+import { maskPasswordInputs, secretCellRef } from '../shared/secretCells'
 // F40: passwords live in userData, not in the shared test files.
 import {
   resolveSecrets,
+  getSecret,
   getSecrets,
   migratePlaintextSecrets,
+  scrubFolder,
+  scrubEdgeRuns,
+  scrubTraces,
+  scrubBaselines,
   // QF-003: encrypted at rest, and cleaned up when the tests that used them go.
   collectOrphanedSecrets,
   secretStoreStatus
@@ -172,6 +178,7 @@ import {
   type RunTokens
 } from './runtimeTokens'
 import {
+  allEdgeRuns,
   saveEdgeRun,
   listEdgeRuns,
   loadEdgeRun,
@@ -2255,11 +2262,14 @@ function createWindow(): void {
             // capture can fail if the page is gone — keep the row without a shot
           }
           try {
-            const html = await currentWC.executeJavaScript(
+            const raw = await currentWC.executeJavaScript(
               'document.documentElement.outerHTML',
               true
             )
-            if (typeof html === 'string') {
+            if (typeof raw === 'string') {
+              // A site that mirrors a field's value into its value ATTRIBUTE
+              // (React does) put the typed password in this file. Blank it.
+              const html = maskPasswordInputs(raw)
               // Raw outerHTML has no base, so its relative CSS/img/script paths
               // 404 and the snapshot renders broken. Inject a <base href> (the
               // page's URL) so those resolve against the real site, and a
@@ -3171,7 +3181,11 @@ function createWindow(): void {
                 .slice(0, 120)
                 .map((el) => {
                   const o = { tag: el.tagName.toLowerCase() };
-                  for (const k of pick) { const v = el.getAttribute && el.getAttribute(k); if (v) o[k] = String(v).slice(0, 80); }
+                  // Never a password field's value: sites that mirror it into the
+                  // attribute (React does) put the typed password in _baselines/
+                  // and in the "what changed" diff shown on a failure.
+                  const isPw = String((el.getAttribute && el.getAttribute('type')) || '').toLowerCase() === 'password';
+                  for (const k of pick) { if (k === 'value' && isPw) continue; const v = el.getAttribute && el.getAttribute(k); if (v) o[k] = String(v).slice(0, 80); }
                   const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
                   if (t) o.text = t.slice(0, 60);
                   return o;
@@ -3950,7 +3964,10 @@ function createWindow(): void {
                   .slice(0, 80)
                   .map((el) => {
                     const o = { tag: el.tagName.toLowerCase() };
-                    for (const k of pick) { const v = el.getAttribute && el.getAttribute(k); if (v) o[k] = String(v).slice(0, 80); }
+                    // This list is SENT TO THE AI MODEL. A password field's
+                    // mirrored value attribute would go with it — never.
+                    const isPw = String((el.getAttribute && el.getAttribute('type')) || '').toLowerCase() === 'password';
+                    for (const k of pick) { if (k === 'value' && isPw) continue; const v = el.getAttribute && el.getAttribute(k); if (v) o[k] = String(v).slice(0, 80); }
                     const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
                     if (t) o.text = t.slice(0, 60);
                     return o;
@@ -4640,6 +4657,16 @@ function createWindow(): void {
       const values: Record<string, string> = {}
       const unresolved: string[] = []
       for (const name of Array.isArray(names) ? names : []) {
+        // A sensitive data cell (`{{secret:ref}}`) travels down this same road,
+        // named `secret:<ref>`: resolved from the encrypted store, never from an
+        // environment. The value exists in memory for the run, like any env value.
+        const ref = secretCellRef(`{{${name}}}`)
+        if (ref) {
+          const value = (await getSecret(ref)) ?? ''
+          values[name] = value
+          if (!value) unresolved.push(name)
+          continue
+        }
         // An environment the user configured always wins, collision or not —
         // they named it deliberately.
         const fromEnv = envVars[name]
@@ -4964,7 +4991,7 @@ function createWindow(): void {
   // touching anything (it rewrites the user's real test files). Returns what it
   // moved so the UI can say so rather than changing files silently.
   ipcMain.handle('secrets:migrate', async () => {
-    return migratePlaintextSecrets(
+    const result = await migratePlaintextSecrets(
       libraryDir(),
       async () => (await listTests()).map((t) => t.fileName),
       async (f) => (await loadTest(f)) as Record<string, unknown> | null,
@@ -4972,6 +4999,42 @@ function createWindow(): void {
         await writeFile(join(libraryDir(), f), JSON.stringify(data, null, 2), 'utf-8')
       }
     )
+    // The places the F40 choke point never covered. Each is its own try: one
+    // unreadable folder must not leave the others in plaintext.
+    let other = 0
+    for (const [folder, byName] of [
+      ['_backups', true],
+      ['_drafts', false],
+      ['_blocks', false]
+    ] as const) {
+      try {
+        other += await scrubFolder(join(libraryDir(), folder), byName)
+      } catch {
+        // retried on the next launch
+      }
+    }
+    try {
+      other += await scrubEdgeRuns(join(libraryDir(), '_edgeRuns'))
+    } catch {
+      // retried on the next launch
+    }
+    try {
+      other += await scrubBaselines(join(libraryDir(), '_baselines'))
+    } catch {
+      // retried on the next launch
+    }
+    try {
+      // An edge VARIANT's recording shows the hostile value it typed into the
+      // password field — that's the evidence, so its step text is kept.
+      const reveal = new Set<string>()
+      for (const rec of await allEdgeRuns()) {
+        for (const v of rec.results ?? []) if (!v.baseline && v.traceId) reveal.add(v.traceId)
+      }
+      other += await scrubTraces(join(libraryDir(), '_traces'), reveal)
+    } catch {
+      // retried on the next launch
+    }
+    return { ...result, otherFiles: other }
   })
 
   // F32/F39: the headless paths run the EXPORTED spec, which reads

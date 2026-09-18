@@ -24,6 +24,13 @@ const ENV_PREFIX = 'env:'
 const isEnvToken = (name: string): boolean => name.startsWith(ENV_PREFIX)
 export const envVarOf = (name: string): string => name.slice(ENV_PREFIX.length).trim()
 
+// A sensitive data cell is stored as {{secret:sec_…}} (src/shared/secretCells.ts)
+// and rides the env road: collected by envVarNames, resolved by main's env:get
+// from the encrypted store, and found in the same envMap under its full name
+// `secret:sec_…`. It only ever appears inside a CELL, never in a step.
+const SECRET_PREFIX = 'secret:'
+const isSecretToken = (name: string): boolean => name.startsWith(SECRET_PREFIX)
+
 // F24.1 — RUNTIME tokens, resolved by MAIN during the run, not here.
 //   {{uuid}} {{timestamp}} {{randomInt}}  a fresh value per run (unique data)
 //   {{saved:orderId}}                     a value lifted out of an API response
@@ -85,7 +92,7 @@ export function dataColumns(steps: RecorderStep[]): string[] {
       for (const t of extractTokens(f)) {
         // F24.1: runtime tokens are NOT columns — nobody types a uuid into a
         // data table, and a saved id doesn't exist until the run produces it.
-        if (isEnvToken(t) || isRuntimeToken(t) || seen.has(t)) continue
+        if (isEnvToken(t) || isSecretToken(t) || isRuntimeToken(t) || seen.has(t)) continue
         seen.add(t)
         cols.push(t)
       }
@@ -100,7 +107,10 @@ export function dataColumns(steps: RecorderStep[]): string[] {
 export function envVarNames(steps: RecorderStep[], rows: Record<string, string>[]): string[] {
   const names = new Set<string>()
   const collect = (text: string | undefined): void => {
-    for (const t of extractTokens(text)) if (isEnvToken(t)) names.add(envVarOf(t))
+    for (const t of extractTokens(text)) {
+      if (isEnvToken(t)) names.add(envVarOf(t))
+      else if (isSecretToken(t)) names.add(t)
+    }
   }
   for (const s of steps) for (const f of tokenFields(s)) collect(f)
   for (const row of rows) for (const v of Object.values(row)) collect(v)
@@ -118,6 +128,7 @@ export function substituteText(
   return text.replace(TOKEN_RE, (whole, raw) => {
     const name = String(raw).trim()
     if (isEnvToken(name)) return envMap[envVarOf(name)] ?? ''
+    if (isSecretToken(name)) return envMap[name] ?? ''
     // F24.1: leave runtime tokens EXACTLY as written — main resolves them mid-run.
     // Blanking them here (the old `?? ''`) would silently gut the step.
     if (isRuntimeToken(name)) return whole

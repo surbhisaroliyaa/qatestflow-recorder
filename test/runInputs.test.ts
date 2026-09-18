@@ -163,6 +163,16 @@ describe('missingEnvMessage', () => {
     expect(missingEnvMessage(['A', 'B'])).toContain('2 environment variables had no value')
   })
 
+  it('does not tell you to add a protected data cell to an environment', () => {
+    // "{{env:secret:sec_91a…}}" names something that doesn't exist. A cell goes
+    // missing when the encrypted store can't be read here; retyping fixes it.
+    const msg = missingEnvMessage(['secret:sec_91a', 'SAUCE_PW'])
+    expect(msg).not.toContain('secret:')
+    expect(msg).toContain('{{env:SAUCE_PW}}')
+    expect(msg).toContain('1 protected data-table value could not be read')
+    expect(missingEnvMessage(['secret:sec_91a'])).not.toMatch(/environment variable/)
+  })
+
   it('says so when the pinned environment is the thing that is gone', () => {
     expect(missingEnvMessage(['SAUCE_PW'], { pinnedButMissing: true })).toMatch(/no longer exists/)
   })

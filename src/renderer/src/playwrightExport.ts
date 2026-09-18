@@ -13,6 +13,8 @@ import { isControlStep, conditionText, repeatText } from '../../shared/controlFl
 // QF-005: shared with main's fixture copier, so the name the spec references
 // and the name written to disk are produced by the same rule on every OS.
 import { portableBasename } from '../../shared/portablePath'
+// Sensitive data cells: which env var each one reads in an exported spec.
+import { isSecretForDisplay, isSensitiveColumn, planSecretEnv } from '../../shared/secretCells'
 
 // F33 (CI export): a standard GitHub Actions workflow that runs the exported
 // Playwright tests on every push / PR — the official Playwright CI template, so
@@ -682,12 +684,27 @@ function hasRefs(raw: string, columns: string[]): boolean {
 // A data row as an object literal for the exported `dataset` array. Cells can
 // only carry env tokens (not data refs — that would be circular), so columns
 // is empty here: a {{env:…}} cell becomes process.env, anything else a string.
-function rowLiteral(row: Record<string, string>, columns: string[]): string {
+//
+// `secretEnv` names the environment variable each sensitive cell reads instead
+// of its value (planSecretEnv in shared/secretCells.ts) — one per DISTINCT
+// value, so a matrix with a deliberately wrong password keeps it wrong.
+function rowLiteral(
+  row: Record<string, string>,
+  columns: string[],
+  secretEnv: Record<string, string> = {}
+): string {
   const props = columns.map((c) => {
     const key = isIdent(c) ? c : quote(c)
-    return `${key}: ${valueExpr(row[c] ?? '', [])}`
+    const env = secretEnv[c]
+    return `${key}: ${env ? `process.env.${env} ?? ''` : valueExpr(row[c] ?? '', [])}`
   })
   return `{ ${props.join(', ')} }`
+}
+
+/** The dataset array's lines, with sensitive cells as process.env reads. */
+function datasetLines(rows: Record<string, string>[], columns: string[]): string {
+  const plan = planSecretEnv(rows)
+  return rows.map((r, i) => `  ${rowLiteral(r, columns, plan.cells[i])}`).join(',\n')
 }
 
 // Day 17 (page-object export): turn a step's human label into a camelCase JS
@@ -836,7 +853,10 @@ export function stepText(step: RecorderStep): string {
     case 'click':
       return `Click ${name}`
     case 'type':
-      return `Type "${step.secret ? '••••••••' : (step.value ?? '')}" into ${name}`
+      // isSecretForDisplay, not just `step.secret`: a data-driven run describes a
+      // COPY of the step with the row's password filled in, and that copy isn't
+      // flagged — so traces and failure records printed the password in full.
+      return `Type "${isSecretForDisplay(step) ? '••••••••' : (step.value ?? '')}" into ${name}`
     case 'check':
       // QF-001: reads as the state the step guarantees, not the gesture — the
       // step is idempotent, so "Tick" is the honest word whether or not the box
@@ -1395,8 +1415,12 @@ function actionFor(
     case 'click':
       return `await ${locator}.click()`
     case 'type':
-      if (step.secret) {
-        // Don't leak secrets — read the password from an environment variable.
+      // Don't leak secrets — read the password from an environment variable.
+      // UNLESS the value is already a reference: `{{password}}` (a data column)
+      // or `{{env:SAUCE_PW}}`. Those were overridden with PASSWORD too, so a
+      // data-driven login ignored its password column and gave every row the
+      // same one — a negative-login matrix whose "wrong password" row logged in.
+      if (step.secret && !hasRefs(step.value ?? '', columns)) {
         return `await ${locator}.fill(process.env.PASSWORD ?? '') // password field — set the PASSWORD env var`
       }
       return `await ${locator}.fill(${valueExpr(step.value ?? '', columns)})`
@@ -1558,9 +1582,12 @@ export function dataRowTitles(
   disc: string
 ): string[] {
   const seen = new Map<string, number>()
+  // A test's title is printed in every report and CI log — so a password must
+  // never become one, whether it's still plaintext or a {{secret:…}} ref.
+  const hidden = isSensitiveColumn(disc)
   return rows.map((r, i) => {
     const cell = (r[disc] ?? '').trim()
-    const label = cell === '' ? '(empty)' : cell
+    const label = cell === '' ? '(empty)' : hidden ? `row ${i + 1}` : cell
     const n = (seen.get(label.toLowerCase()) ?? 0) + 1
     seen.set(label.toLowerCase(), n)
     return `${base} — ${label}${n > 1 ? ` (row ${i + 1})` : ''}`
@@ -1870,7 +1897,7 @@ export function generatePlaywrightTest(
   // column so a failing row is identifiable). The body references `data.*`.
   if (dataMode) {
     const rows = options!.data!.rows
-    const dataset = rows.map((r) => `  ${rowLiteral(r, columns)}`).join(',\n')
+    const dataset = datasetLines(rows, columns)
     const disc = columns[0]
     const base = options?.name || 'recorded flow'
     // Day 20 named each row's test after its first column, built at RUNTIME as a
@@ -2723,7 +2750,7 @@ export function generatePageObjectTest(
   // the page object and driving it with that row's `data`.
   if (dataMode) {
     const rows = options!.data!.rows
-    const dataset = rows.map((r) => `  ${rowLiteral(r, columns)}`).join(',\n')
+    const dataset = datasetLines(rows, columns)
     const disc = columns[0]
     // Pre-computed, NOT a runtime template literal — see dataRowTitles(). The
     // inline exporter was fixed for this in Test 7; this path was missed, so a

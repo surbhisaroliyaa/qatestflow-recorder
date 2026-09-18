@@ -221,7 +221,13 @@ const controls: Control[] = [
 
 // Write a clean gate folder and export every flow into it, inline AND (when the
 // exporter offers one) page-object. Returns the spec names written.
-function exportInto(flows: { name: string; steps: unknown[] }[]): string[] {
+function exportInto(
+  flows: {
+    name: string
+    steps: unknown[]
+    data?: { columns: string[]; rows: Record<string, string>[] }
+  }[]
+): string[] {
   rmSync(GATE_DIR, { recursive: true, force: true })
   mkdirSync(join(GATE_DIR, 'fixtures'), { recursive: true })
   // The POM spec imports its classes from './pages/<Class>' while `fileName` is
@@ -238,7 +244,7 @@ function exportInto(flows: { name: string; steps: unknown[] }[]): string[] {
   const written: string[] = []
   for (const flow of flows) {
     const steps = flow.steps as never[]
-    const options = { name: flow.name }
+    const options = { name: flow.name, data: flow.data }
 
     writeFileSync(
       join(GATE_DIR, `${flow.name}.inline.spec.ts`),
@@ -265,10 +271,12 @@ function exportInto(flows: { name: string; steps: unknown[] }[]): string[] {
 // single request and every generated spec died at page.goto. The harness
 // failing in a way that looks exactly like the product failing is the whole
 // reason this gate had to be proven before it could be trusted.
-async function runGeneratedSpecs(): Promise<{ status: number | null; output: string }> {
+async function runGeneratedSpecs(
+  extraEnv: Record<string, string> = {}
+): Promise<{ status: number | null; output: string }> {
   // Strip the parent run's Playwright env before shelling out, or the child
   // decides it is a nested call and refuses to start.
-  const env = { ...process.env }
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv }
   for (const key of Object.keys(env)) {
     if (key.startsWith('PLAYWRIGHT') || key.startsWith('PW_') || key === 'TEST_WORKER_INDEX') {
       delete env[key]
@@ -355,5 +363,50 @@ test.describe('the exported spec passes when Playwright actually runs it', () =>
 
     expect(status, 'the old broken export somehow passed — the gate is blind').not.toBe(0)
     expect(output).toMatch(/fill|checkbox/i)
+  })
+
+  // Option A: a protected password column exports as process.env reads — one
+  // name per DISTINCT value. This proves the part text-matching can't: that in
+  // a real run EACH ROW still gets ITS OWN password. `expected` is an ordinary
+  // column carrying what that row's password should be, so a spec that handed
+  // every row the same PASSWORD would fail on the second row.
+  const matrix = (env: Record<string, string>) => ({
+    flows: [
+      {
+        name: 'protected-matrix',
+        steps: [
+          s({ type: 'navigate', url: base }),
+          s({ type: 'type', selector: 'locator("#password")', value: '{{password}}', label: 'Password', secret: true }),
+          s({ type: 'assert', assertKind: 'value', selector: 'locator("#password")', value: '{{expected}}', label: 'Password' })
+        ],
+        data: {
+          columns: ['password', 'expected'],
+          rows: [
+            { password: '{{secret:sec_alpha}}', expected: 'alpha' },
+            { password: '{{secret:sec_beta}}', expected: 'beta' },
+            { password: '', expected: '' }
+          ]
+        }
+      }
+    ],
+    env
+  })
+
+  test('a protected password column: every row still gets its own value', async () => {
+    const { flows, env } = matrix({ PASSWORD_1: 'alpha', PASSWORD_2: 'beta' })
+    const written = exportInto(flows)
+    const { status, output } = await runGeneratedSpecs(env)
+    expect(status, `a row got the wrong password under real Playwright\n\n${output}`).toBe(0)
+    // 3 rows × (inline + POM, when offered)
+    expect(output).toContain(`${written.length * 3} passed`)
+  })
+
+  test('…and has teeth: one shared PASSWORD for every row goes red', async () => {
+    // What the old bundle scrub did. If this goes green, the check above can
+    // no longer tell per-value names from a single shared one.
+    const { flows } = matrix({})
+    exportInto(flows)
+    const { status } = await runGeneratedSpecs({ PASSWORD_1: 'alpha', PASSWORD_2: 'alpha' })
+    expect(status, 'every row got the same password and it still passed — blind check').not.toBe(0)
   })
 })

@@ -265,7 +265,7 @@ interface XBrowserAPI {
   // F40: resolve secret refs for a headless run (reads process.env.PASSWORD).
   resolveSecrets: (refs: string[]) => Promise<Record<string, string>>
   // F40: one-time move of plaintext passwords out of test files into userData.
-  migrateSecrets: () => Promise<{ migrated: number; tests: string[] }>
+  migrateSecrets: () => Promise<SecretSweepResult>
   // F39: run a batch of tests through real Playwright, `workers` at a time.
   // In-app replay can't parallelize (one embedded browser view), so this is the
   // only path that can — at the cost of being the EXPORTED spec, not the replay
@@ -591,6 +591,15 @@ interface API {
 }
 
 declare global {
+  // What the startup secret sweep did — shown in the "passwords protected"
+  // notice so a file rewrite is never silent.
+  interface SecretSweepResult {
+    migrated: number // tests rewritten
+    tests: string[]
+    backupDir?: string // library-relative, where the (scrubbed) backup went
+    otherFiles?: number // backups / drafts / blocks / traces / baselines / edge runs cleaned
+  }
+
   // === Environment / config manager (F25) ===
   // MIRROR: same shapes as EnvVar / Environment / EnvState in
   // src/main/environments.ts.
@@ -1162,6 +1171,10 @@ declare global {
     // data-driven substitutes per row, clone, F20 variants) and a ref survives
     // all of that. Main puts the value back at replay time, on a copy.
     secretRef?: string
+    // Deliberately NOT a secret although its field is named like a password —
+    // an F20 edge-case variant typing a hostile value the report must show.
+    // Wins over the by-name masking in shared/secretCells.ts.
+    revealValue?: boolean
     disabled?: boolean // turned off in the editor — skipped by replay + export
     // F26 (conditional): this step MAY be absent (e.g. an optional cookie
     // banner / promo popup). Replay skips it instead of failing when its element

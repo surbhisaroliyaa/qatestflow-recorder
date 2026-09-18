@@ -51,7 +51,7 @@
 // =====================================================================
 
 import { app, safeStorage } from 'electron'
-import { mkdir, readFile, writeFile, copyFile } from 'fs/promises'
+import { mkdir, readFile, readdir, writeFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'node:crypto'
@@ -61,6 +61,16 @@ import {
   orphanedRefs,
   type SecretMap
 } from '../shared/secretsCodec'
+import {
+  maskPasswordInputs,
+  maskStepDescription,
+  placeholderRows,
+  refsByStepId,
+  stripRowSecrets,
+  stripStepSecrets,
+  type SecretSink,
+  type StripOptions
+} from '../shared/secretCells'
 
 function secretsPath(): string {
   return join(app.getPath('userData'), 'secrets.json')
@@ -207,24 +217,79 @@ export async function getSecrets(refs: string[]): Promise<Record<string, string>
  * would break the F25 environment machinery that deliberately puts the value in
  * an environment.
  */
-export async function stripSecrets(steps: unknown[]): Promise<unknown[]> {
+export async function stripSecrets(steps: unknown[], opts: StripOptions = {}): Promise<unknown[]> {
   if (!Array.isArray(steps)) return steps
   const map = await load()
-  let changed = false
-  const out = steps.map((raw) => {
-    const s = raw as Record<string, unknown>
-    if (!s || s.secret !== true) return raw
-    const value = typeof s.value === 'string' ? s.value : ''
-    // Already a token, or already empty → nothing to protect.
-    if (!value || value.includes('{{')) return raw
-    const ref = typeof s.secretRef === 'string' && s.secretRef ? s.secretRef : newSecretRef()
-    map[ref] = value
-    changed = true
-    return { ...s, secretRef: ref, value: '' }
-  })
+  const { steps: out, changed } = stripStepSecrets(steps, sinkOver(map), opts)
   if (changed) await persist(map)
   return out
 }
+
+/** A data table with its sensitive cells moved into the store. */
+export async function stripDataRows(
+  rows: Record<string, string>[] | undefined
+): Promise<Record<string, string>[] | undefined> {
+  if (!Array.isArray(rows) || !rows.length) return rows
+  const map = await load()
+  const { rows: out, changed } = stripRowSecrets(rows, sinkOver(map))
+  if (changed) await persist(map)
+  return out
+}
+
+/** The live store as a SecretSink — the pure logic in secretCells.ts writes
+ *  into it, and the caller persists once at the end. */
+const sinkOver = (map: SecretMap): SecretSink => ({
+  get: (ref) => map[ref],
+  put: (ref, value) => {
+    map[ref] = value
+  },
+  newRef: newSecretRef
+})
+
+/**
+ * Everything in one test-shaped file that can hold a secret: the current
+ * steps, every version in its history, and its data rows. One read of the
+ * store, one write.
+ *
+ * History matters as much as the current steps: F12 keeps previous edits for
+ * rollback, and snapshots taken before F40 still carried the literal password
+ * — so the file on disk held it even though the live steps didn't.
+ */
+export async function stripTestFile(
+  data: Record<string, unknown>,
+  opts: StripOptions = {}
+): Promise<{ data: Record<string, unknown>; changed: boolean }> {
+  const map = await load()
+  const sink = sinkOver(map)
+  let changed = false
+  const next: Record<string, unknown> = { ...data }
+
+  if (Array.isArray(data.steps)) {
+    const r = stripStepSecrets(data.steps, sink, opts)
+    next.steps = r.steps
+    changed ||= r.changed
+  }
+  if (Array.isArray(data.versions)) {
+    next.versions = (data.versions as Record<string, unknown>[]).map((v) => {
+      if (!v || !Array.isArray(v.steps)) return v
+      // A version's own ids are the same steps as the current ones, so they
+      // can share refs — but never refsById from a DIFFERENT file.
+      const r = stripStepSecrets(v.steps, sink, { byName: opts.byName })
+      changed ||= r.changed
+      return r.changed ? { ...v, steps: r.steps } : v
+    })
+  }
+  if (Array.isArray(data.dataRows)) {
+    const r = stripRowSecrets(data.dataRows as Record<string, string>[], sink)
+    next.dataRows = r.rows
+    changed ||= r.changed
+  }
+
+  if (changed) await persist(map)
+  return { data: changed ? next : data, changed }
+}
+
+export { refsByStepId }
 
 /** Put the real values back — used by replay, on a COPY, in main only. */
 export async function resolveSecrets(steps: unknown[]): Promise<unknown[]> {
@@ -239,13 +304,24 @@ export async function resolveSecrets(steps: unknown[]): Promise<unknown[]> {
   })
 }
 
+/** Stamped on a test file once the by-name pass has run over it (and on every
+ *  save from this version on). The by-name guess is a one-time repair: running
+ *  it again would re-mask a step the user deliberately unmasked. */
+export const SECRETS_FILE_VERSION = 2
+
 /**
- * One-time migration of tests saved before F40.
+ * One-time migration of tests saved before F40 / before this sweep.
  *
- * Walks every test file, moves any plaintext secret into the store, and rewrites
- * the file. The whole library is BACKED UP first: this rewrites the user's real
- * test files, and a migration that eats them would be unforgivable — a backup
- * costs a few hundred KB.
+ * Walks every test file and moves any plaintext secret — marked steps,
+ * password steps found by name (once per file), version history, sensitive
+ * data cells — into the store, then rewrites the file.
+ *
+ * The library is backed up first, because this rewrites the user's real test
+ * files. The backup is written SCRUBBED: the first version of this migration
+ * copied the files verbatim, which left a plaintext copy of every password it
+ * was moving in _backups/ — the exact thing it existed to remove. A backup
+ * guards the files' STRUCTURE against a bad rewrite; the values are safe in
+ * the store by the time it is written, under the refs the backup carries.
  *
  * Idempotent: a second run finds nothing to move.
  */
@@ -254,38 +330,208 @@ export async function migratePlaintextSecrets(
   listFiles: () => Promise<string[]>,
   readTest: (f: string) => Promise<Record<string, unknown> | null>,
   writeTest: (f: string, data: Record<string, unknown>) => Promise<void>
-): Promise<{ migrated: number; tests: string[] }> {
+): Promise<{ migrated: number; tests: string[]; backupDir?: string }> {
   const files = await listFiles()
   const touched: string[] = []
-  let migrated = 0
-  let backedUp = false
+  let backupDir: string | null = null
   for (const file of files) {
     const data = await readTest(file)
-    if (!data || !Array.isArray(data.steps)) continue
-    const hasPlaintext = (data.steps as Record<string, unknown>[]).some(
-      (s) => s && s.secret === true && typeof s.value === 'string' && s.value && !s.value.includes('{{')
-    )
-    if (!hasPlaintext) continue
-    if (!backedUp) {
-      // Back up ONCE, on the first file that actually needs changing — so a
-      // library with nothing to migrate leaves no clutter behind.
+    if (!data) continue
+    const byName = !((data.secretsVersion as number) >= SECRETS_FILE_VERSION)
+    const { data: safe, changed } = await stripTestFile(data, { byName })
+    if (!changed) continue
+    if (!backupDir) {
+      // Created on the first file that actually changes, so a library with
+      // nothing to migrate leaves no clutter behind.
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const backupDir = join(libraryPath, '_backups', `pre-f40-${stamp}`)
+      backupDir = join(libraryPath, '_backups', `pre-secrets-sweep-${stamp}`)
       await mkdir(backupDir, { recursive: true })
-      for (const f of files) {
-        const src = join(libraryPath, f)
-        if (!existsSync(src)) continue
-        const dst = join(backupDir, f.replace(/[\\/]/g, '__'))
-        await copyFile(src, dst).catch(() => {})
-      }
-      backedUp = true
     }
-    const steps = await stripSecrets(data.steps)
-    await writeTest(file, { ...data, steps })
+    // `safe`, not `data`: see above. Structure preserved, values by ref.
+    await writeFile(join(backupDir, file.replace(/[\\/]/g, '__')), JSON.stringify(safe, null, 2), 'utf-8')
+    await writeTest(file, { ...safe, secretsVersion: SECRETS_FILE_VERSION })
     touched.push(file)
-    migrated++
   }
-  return { migrated, tests: touched }
+  return {
+    migrated: touched.length,
+    tests: touched,
+    // Relative to the library, for the notice to name exactly where it went.
+    backupDir: backupDir ? `_backups/${backupDir.split(/[\\/]/).pop()}` : undefined
+  }
+}
+
+/**
+ * Scrub the plaintext out of a folder of test-shaped JSON files that already
+ * exist on disk: `_backups/` (the decision of 2026-09-18 — keep every backup,
+ * remove the passwords), and `_drafts/` / `_blocks/`, which were written
+ * without any stripping until today.
+ *
+ * Each test-shaped file gets the same treatment as a live test. Values move
+ * into the store under refs the file now carries, so restoring a backup still
+ * gets its password back — and allSecretRefs() counts refs in all three
+ * folders, so the orphan sweep never deletes one out from under it. Anything
+ * that isn't a test-shaped JSON file is left exactly as it is.
+ *
+ * `byName` for backups only: they are frozen copies nobody edits, so the
+ * one-time guess can't undo a deliberate unmask there.
+ */
+export async function scrubFolder(root: string, byName: boolean): Promise<number> {
+  if (!existsSync(root)) return 0
+  let scrubbed = 0
+  for (const file of await jsonFilesUnder(root)) {
+    let data: Record<string, unknown>
+    try {
+      data = JSON.parse(await readFile(file, 'utf-8'))
+    } catch {
+      continue // not JSON — not ours to rewrite
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) continue
+    if (!Array.isArray(data.steps) && !Array.isArray(data.dataRows)) continue
+    const { data: safe, changed } = await stripTestFile(data, { byName })
+    if (!changed) continue
+    await writeFile(file, JSON.stringify(safe, null, 2), 'utf-8')
+    scrubbed++
+  }
+  return scrubbed
+}
+
+/**
+ * Edge-case batches already on disk (`_edgeRuns/`). Each variant carries the
+ * full step list it ran, so the login's password sat in every one of them.
+ * Only steps flagged secret are moved — a hostile value an edge variant typed
+ * into the password field is the EVIDENCE, and is left exactly as it is.
+ */
+export async function scrubEdgeRuns(dir: string): Promise<number> {
+  if (!existsSync(dir)) return 0
+  let scrubbed = 0
+  for (const file of await jsonFilesUnder(dir)) {
+    let rec: { results?: { steps?: unknown[] }[] }
+    try {
+      rec = JSON.parse(await readFile(file, 'utf-8'))
+    } catch {
+      continue
+    }
+    if (!Array.isArray(rec?.results)) continue
+    let changed = false
+    const map = await load()
+    const results = rec.results.map((r) => {
+      if (!r || !Array.isArray(r.steps)) return r
+      const out = stripStepSecrets(r.steps, sinkOver(map))
+      changed ||= out.changed
+      return out.changed ? { ...r, steps: out.steps } : r
+    })
+    if (!changed) continue
+    await persist(map)
+    await writeFile(file, JSON.stringify({ ...rec, results }, null, 2), 'utf-8')
+    scrubbed++
+  }
+  return scrubbed
+}
+
+/**
+ * Run traces already on disk (`_traces/<id>/`):
+ *   · step-N.html — page snapshots with the typed password in the password
+ *     field's value attribute (maskPasswordInputs)
+ *   · trace.json  — step descriptions like `Type "secret_sauce" into Password`
+ *     (maskStepDescription)
+ * `revealTraceIds` are edge-case VARIANT recordings: the value typed into their
+ * password field is a hostile test input the report must keep showing.
+ */
+export async function scrubTraces(dir: string, revealTraceIds: Set<string>): Promise<number> {
+  if (!existsSync(dir)) return 0
+  let scrubbed = 0
+  for (const e of await readdir(dir, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue
+    const traceRoot = join(dir, e.name)
+    for (const f of await readdir(traceRoot)) {
+      const p = join(traceRoot, f)
+      let before: string
+      try {
+        before = await readFile(p, 'utf-8')
+      } catch {
+        continue
+      }
+      let after = before
+      if (f.endsWith('.html')) after = maskPasswordInputs(before)
+      else if (f === 'trace.json' && !revealTraceIds.has(e.name)) {
+        try {
+          after = JSON.stringify(maskStrings(JSON.parse(before)), null, 2)
+        } catch {
+          continue // not JSON — leave it
+        }
+      }
+      if (after !== before) {
+        await writeFile(p, after, 'utf-8')
+        scrubbed++
+      }
+    }
+  }
+  return scrubbed
+}
+
+/**
+ * F8 green baselines already on disk (`_baselines/<test>.json`). Each step's
+ * page snapshot lists notable elements with their attributes — including a
+ * password field's `value`, which React-style sites mirror from what was
+ * typed. Drop that one attribute; the rest of the baseline is untouched.
+ * (The `.png` files beside them are visual baselines — pixels, where a
+ * password field already shows dots.)
+ */
+export async function scrubBaselines(dir: string): Promise<number> {
+  if (!existsSync(dir)) return 0
+  let scrubbed = 0
+  for (const file of await jsonFilesUnder(dir)) {
+    let b: { steps?: Record<string, { elements?: Record<string, string>[] }> }
+    try {
+      b = JSON.parse(await readFile(file, 'utf-8'))
+    } catch {
+      continue
+    }
+    let changed = false
+    for (const snap of Object.values(b?.steps ?? {})) {
+      for (const el of snap?.elements ?? []) {
+        if (el && String(el.type).toLowerCase() === 'password' && 'value' in el) {
+          delete el.value
+          changed = true
+        }
+      }
+    }
+    if (!changed) continue
+    await writeFile(file, JSON.stringify(b), 'utf-8')
+    scrubbed++
+  }
+  return scrubbed
+}
+
+/** Every string anywhere in a JSON value, passed through maskStepDescription.
+ *  Returns the SAME object when nothing changed, so an unchanged trace.json is
+ *  never rewritten (and never reformatted). */
+function maskStrings(v: unknown): unknown {
+  if (typeof v === 'string') return maskStepDescription(v)
+  if (Array.isArray(v)) {
+    const out = v.map(maskStrings)
+    return out.some((x, i) => x !== v[i]) ? out : v
+  }
+  if (v && typeof v === 'object') {
+    let changed = false
+    const out: Record<string, unknown> = {}
+    for (const [k, x] of Object.entries(v)) {
+      out[k] = maskStrings(x)
+      if (out[k] !== x) changed = true
+    }
+    return changed ? out : v
+  }
+  return v
+}
+
+async function jsonFilesUnder(dir: string): Promise<string[]> {
+  const out: string[] = []
+  for (const e of await readdir(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) out.push(...(await jsonFilesUnder(p)))
+    else if (e.isFile() && e.name.endsWith('.json')) out.push(p)
+  }
+  return out
 }
 
 /**
@@ -313,33 +559,17 @@ export function placeholderSecrets(steps: unknown[]): unknown[] {
  *
  * A data-driven test is useless without its rows (it would run zero times and
  * verify nothing), but rows are exactly where real test-account credentials
- * live. So the rows travel and the sensitive COLUMNS are placeholdered, matched
- * by name — the same convention CI systems use.
+ * live. So the rows travel and the sensitive cells are placeholdered, matched
+ * by column name — the same convention CI systems use.
+ *
+ * One `{{env:…}}` name per DISTINCT value, and empty cells left empty. The old
+ * version wrote one `{{env:PASSWORD}}` into every row, which silently collapsed
+ * a negative-login matrix: the "wrong password" row got the right one. The
+ * naming rule lives in secretCells.ts, shared with the spec exporter, so a
+ * bundle and an export always ask for the same variables.
  */
-// `api[-_ ]?key` rather than the two literal spellings it used to list: it
-// covered `apikey` and `api_key` and missed `api-key`, which is the commonest of
-// the three — so a column named that carried a live key into a bundle meant for
-// git. The space is there because a data column's name comes from a {{token}},
-// and the token syntax permits spaces ("api key").
-//
-// MIRROR: apiStep.ts's SECRET_KEY already got this right (`api[-_]?key`). Two
-// "is this name a credential?" patterns in one codebase, and the weaker one was
-// guarding the artefact that gets COMMITTED.
-const SENSITIVE_COLUMN = /pass|pwd|secret|token|api[-_ ]?key|card|cvv|ssn|auth/i
-
 export function scrubDataRows(
   rows: Record<string, string>[] | undefined
 ): { rows: Record<string, string>[]; scrubbed: string[] } {
-  if (!Array.isArray(rows) || !rows.length) return { rows: rows ?? [], scrubbed: [] }
-  const columns = Object.keys(rows[0] ?? {})
-  const sensitive = columns.filter((c) => SENSITIVE_COLUMN.test(c))
-  if (!sensitive.length) return { rows, scrubbed: [] }
-  return {
-    rows: rows.map((row) => {
-      const copy = { ...row }
-      for (const c of sensitive) copy[c] = `{{env:${c.toUpperCase().replace(/[^A-Z0-9]/g, '_')}}}`
-      return copy
-    }),
-    scrubbed: sensitive
-  }
+  return placeholderRows(rows)
 }

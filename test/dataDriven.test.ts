@@ -96,6 +96,29 @@ describe('envVarNames', () => {
     )
     expect(names).toEqual(['PW'])
   })
+
+  it('collects a protected cell under its full secret: name, for main to resolve', () => {
+    // Option A: a saved sensitive cell holds {{secret:ref}} and rides the env
+    // road. If it isn't collected, the run types an empty password.
+    const names = envVarNames(
+      [step({ type: 'type', value: '{{password}}' })],
+      [{ password: '{{secret:sec_abc}}' }]
+    )
+    expect(names).toEqual(['secret:sec_abc'])
+  })
+})
+
+describe('a protected data cell during an in-app run', () => {
+  it('is filled from the resolved value, never typed as the raw ref', () => {
+    const row = resolveRow({ password: '{{secret:sec_abc}}' }, { 'secret:sec_abc': 'secret_sauce' })
+    expect(row.password).toBe('secret_sauce')
+    const [s] = substituteSteps([step({ type: 'type', value: '{{password}}' })], row, {})
+    expect((s as { value: string }).value).toBe('secret_sauce')
+  })
+
+  it('is not mistaken for a data column', () => {
+    expect(dataColumns([step({ type: 'type', value: '{{secret:sec_abc}}' })])).toEqual([])
+  })
 })
 
 describe('substituteText', () => {

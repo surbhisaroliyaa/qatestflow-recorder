@@ -24,9 +24,11 @@
 //
 // ── WHY THE MIGRATION KEEPS NO BACKUP ───────────────────────────────────
 // Everywhere else in this codebase a migration backs the old file up first
-// (see migratePlaintextSecrets, which copies the whole library). Here that
-// would be actively wrong: the backup would be a plaintext copy of exactly the
-// secrets we are encrypting, sitting next to the encrypted one forever. The
+// (see migratePlaintextSecrets — whose backups are now written SCRUBBED, for
+// this same reason: its first version copied the library verbatim and left a
+// plaintext copy of every password in _backups/). Here a backup would be
+// actively wrong: a plaintext copy of exactly the secrets we are encrypting,
+// sitting next to the encrypted one forever. The
 // old file is overwritten in place instead, and the safety comes from only
 // writing once the new content has been successfully built.
 // =====================================================================

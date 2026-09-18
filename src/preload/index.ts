@@ -341,7 +341,12 @@ const api = {
       ipcRenderer.invoke('secrets:resolve', refs),
 
     // F40: one-time move of plaintext passwords out of test files into userData.
-    migrateSecrets: (): Promise<{ migrated: number; tests: string[] }> =>
+    migrateSecrets: (): Promise<{
+      migrated: number
+      tests: string[]
+      backupDir?: string
+      otherFiles?: number
+    }> =>
       ipcRenderer.invoke('secrets:migrate'),
 
     // F39: run a batch of tests at once via real Playwright, `workers` at a time.

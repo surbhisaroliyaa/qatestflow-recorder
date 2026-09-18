@@ -15,7 +15,8 @@ import { app } from 'electron'
 import { mkdir, readdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
 // F40: keeps plaintext passwords out of the shared/committed test files.
-import { stripSecrets } from './secrets'
+import { stripSecrets, stripDataRows, refsByStepId, SECRETS_FILE_VERSION } from './secrets'
+import { secretCellRef } from '../shared/secretCells'
 // QF-001: repair checkbox steps recorded before the canonical `check` step.
 import { migrateLegacyCheckSteps, type LegacyStep } from '../shared/legacyCheckSteps'
 
@@ -81,6 +82,9 @@ export interface SavedTestFile {
   // F12: previous edits of this test (newest first, capped) — snapshotted on
   // save whenever the steps change, so you can see the history and roll back.
   versions?: TestVersion[]
+  // Set once the secret sweep has run over this file (see
+  // SECRETS_FILE_VERSION in secrets.ts) — stops a one-time repair re-running.
+  secretsVersion?: number
   steps: unknown[]
 }
 
@@ -269,6 +273,8 @@ export async function saveTest(input: {
   // value moves to the userData secret store and the step keeps only a ref.
   // Done BEFORE the version snapshot below, so history holds the safe form too.
   const safeSteps = await stripSecrets(input.steps)
+  // …and the data table's sensitive cells, the same way (Option A, 2026-09-18).
+  const safeRows = await stripDataRows(input.dataRows)
 
   // F12: if the STEPS actually changed vs the last save, snapshot the previous
   // steps as a version (so you can see what changed and roll back). Re-saving
@@ -292,9 +298,12 @@ export async function saveTest(input: {
     viewport: input.viewport,
     deviceId: input.deviceId,
     tags: input.tags,
-    dataRows: input.dataRows,
+    dataRows: safeRows,
     har,
     versions,
+    // Saved by a build that already protects secrets, so the one-time by-name
+    // repair must never run over it — it would re-mask a deliberate unmask.
+    secretsVersion: SECRETS_FILE_VERSION,
     steps: safeSteps // F40: never the plaintext form
   }
   await writeFile(join(libraryDir(), fileName), JSON.stringify(test, null, 2), 'utf-8')
@@ -366,12 +375,27 @@ export async function allSecretRefs(): Promise<string[]> {
       if (typeof ref === 'string' && ref) refs.add(ref)
     }
   }
+  // A sensitive data cell holds `{{secret:ref}}` — a ref like any other.
+  const collectRows = (rows: unknown): void => {
+    if (!Array.isArray(rows)) return
+    for (const row of rows) {
+      for (const cell of Object.values((row as Record<string, unknown>) ?? {})) {
+        const ref = secretCellRef(cell)
+        if (ref) refs.add(ref)
+      }
+    }
+  }
+  const collectFile = (data: Record<string, unknown> | null | undefined): void => {
+    if (!data) return
+    collect(data.steps)
+    collectRows(data.dataRows)
+    for (const version of (data.versions as { steps?: unknown }[] | undefined) ?? []) {
+      collect(version?.steps)
+    }
+  }
 
   for (const file of await listTestPaths()) {
-    const test = await readTestFile(file)
-    if (!test) continue
-    collect(test.steps)
-    for (const version of test.versions ?? []) collect(version.steps)
+    collectFile((await readTestFile(file)) as unknown as Record<string, unknown> | null)
   }
 
   for (const block of await listBlocks()) {
@@ -380,11 +404,49 @@ export async function allSecretRefs(): Promise<string[]> {
   }
 
   for (const draft of await listDrafts()) {
-    const d = await loadDraft(draft.id)
-    if (d) collect(d.steps)
+    collectFile((await loadDraft(draft.id)) as unknown as Record<string, unknown> | null)
+  }
+
+  // BACKUPS. Their passwords were moved into the store under refs the backup
+  // now carries (scrubBackups). Restoring one must get its password back, so
+  // those refs are live for as long as the backup exists.
+  for (const file of await backupJsonFiles()) {
+    try {
+      collectFile(JSON.parse(await readFile(file, 'utf-8')))
+    } catch {
+      // not JSON — carries no refs
+    }
+  }
+
+  // EDGE RUNS. Each saved variant keeps its steps, login included, so "replay
+  // just these" needs those refs alive. Read directly rather than through
+  // edgeRuns.ts, which imports this module.
+  for (const file of await backupJsonFiles(join(libraryDir(), '_edgeRuns'))) {
+    try {
+      const rec = JSON.parse(await readFile(file, 'utf-8')) as { results?: { steps?: unknown }[] }
+      for (const r of rec.results ?? []) collect(r?.steps)
+    } catch {
+      // not JSON — carries no refs
+    }
   }
 
   return [...refs]
+}
+
+async function backupJsonFiles(dir = join(libraryDir(), '_backups')): Promise<string[]> {
+  let entries: import('fs').Dirent[]
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const out: string[] = []
+  for (const e of entries) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) out.push(...(await backupJsonFiles(p)))
+    else if (e.isFile() && e.name.endsWith('.json')) out.push(p)
+  }
+  return out
 }
 
 export async function loadTest(fileName: string): Promise<SavedTestFile | null> {
@@ -471,9 +533,16 @@ export async function saveDraft(input: {
     viewport: input.viewport,
     deviceId: input.deviceId,
     tags: input.tags,
-    dataRows: input.dataRows,
+    // A draft is auto-saved every few seconds DURING a recording — so a login
+    // you just typed sat in _drafts/ in plaintext until you saved the test.
+    // It goes through the same stripping as a saved test. The renderer never
+    // learns the ref, so reuse the one the previous autosave minted for the
+    // same step, or every autosave would add a new entry to the store.
+    dataRows: await stripDataRows(input.dataRows),
     updatedAt: new Date().toISOString(),
-    steps: input.steps
+    steps: await stripSecrets(input.steps, {
+      refsById: refsByStepId((await loadDraft(input.id))?.steps)
+    })
   }
   await writeFile(join(draftsDir(), `${input.id}.json`), JSON.stringify(draft, null, 2), 'utf-8')
   await pruneDrafts()
@@ -641,7 +710,8 @@ export async function saveBlock(input: { name: string; steps: unknown[] }): Prom
     name: input.name,
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
-    steps: input.steps
+    // A block made from a login would otherwise carry its password in plaintext.
+    steps: (await stripSecrets(input.steps, { refsById: refsByStepId(previous?.steps) })) as unknown[]
   }
   await writeFile(join(blocksDir(), fileName), JSON.stringify(block, null, 2), 'utf-8')
   return { fileName, name: block.name, stepCount: block.steps.length, updatedAt: block.updatedAt }

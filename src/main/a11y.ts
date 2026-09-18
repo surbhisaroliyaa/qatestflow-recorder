@@ -14,6 +14,7 @@
 // sees the real, rendered DOM.
 // =====================================================================
 import axe from 'axe-core'
+import { maskPasswordInputs } from '../shared/secretCells'
 
 // One offending element inside a violation.
 export interface A11yNode {
@@ -114,5 +115,12 @@ export async function scanAccessibility(wc: Electron.WebContents): Promise<A11yS
   })()`
 
   const raw = (await wc.executeJavaScript(program)) as Omit<A11yScanResult, 'at'>
+  // A violation ON a password field (a missing label, say) quotes its markup,
+  // which can carry the typed value — and this result is saved and reported.
+  // Done here, not in `program`: that runs in the page, where this helper
+  // doesn't exist.
+  for (const v of raw.violations ?? []) {
+    for (const n of v.nodes ?? []) n.html = maskPasswordInputs(n.html)
+  }
   return { ...raw, at: new Date().toISOString() }
 }

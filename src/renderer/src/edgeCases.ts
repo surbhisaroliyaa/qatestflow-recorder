@@ -224,7 +224,10 @@ export function generateEdgeCases(
         value: ev.value,
         hint: ev.hint,
         steps: flat.map((s, i) =>
-          i === idx ? { ...s, value: ev.value, secret: false } : { ...s }
+          // revealValue: a hostile value in a field NAMED "Password" would
+          // otherwise be shown as dots (isSecretForDisplay) — hiding the very
+          // input the report exists to show.
+          i === idx ? { ...s, value: ev.value, secret: false, revealValue: true } : { ...s }
         )
       })
     }

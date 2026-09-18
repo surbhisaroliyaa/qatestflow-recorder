@@ -48,6 +48,14 @@ import {
   runFixturePaths,
   runSecretRefs
 } from '../../shared/runInputs'
+// Option A: protected data-table cells — masked in the grid, and turned into
+// the PASSWORD_1… env names an exported spec reads on the headless paths.
+import {
+  isSensitiveColumn,
+  secretCellEnv,
+  secretCellRef,
+  withoutSecretKeys
+} from '../../shared/secretCells'
 import { matchesTags } from './tags'
 import { headlessBlockers, blockerSummary, defaultWorkers, headlessCategory } from './headless'
 
@@ -328,10 +336,7 @@ function App(): React.JSX.Element {
   } | null>(null)
   const [importDone, setImportDone] = useState<string | null>(null)
   // F40: what the one-time plaintext-secret migration moved, if anything.
-  const [secretMigration, setSecretMigration] = useState<{
-    migrated: number
-    tests: string[]
-  } | null>(null)
+  const [secretMigration, setSecretMigration] = useState<SecretSweepResult | null>(null)
   const [savePanelOpen, setSavePanelOpen] = useState(false)
   const [saveNameInput, setSaveNameInput] = useState('')
   // Pillar 4 — reusable step blocks: named, saved step sequences you record once
@@ -921,14 +926,15 @@ function App(): React.JSX.Element {
   // F40: move any plaintext password left in a test file into the userData
   // secret store. Runs ONCE at startup and is idempotent — a library with
   // nothing to move does nothing and says nothing. It rewrites real test files,
-  // so main backs the whole library up first. Reported rather than silent,
-  // because changing someone's files without telling them is not on.
+  // so main backs the changed ones up first (scrubbed). Reported rather than
+  // silent, because changing someone's files without telling them is not on —
+  // and that includes the non-test files it cleans, not only the tests.
   useEffect(() => {
     let cancelled = false
     window.api.xbrowser
       .migrateSecrets()
       .then((res) => {
-        if (cancelled || !res?.migrated) return
+        if (cancelled || !(res?.migrated || res?.otherFiles)) return
         setSecretMigration(res)
       })
       .catch(() => {
@@ -2818,10 +2824,16 @@ function App(): React.JSX.Element {
       // using {{env:API_KEY}} therefore ran with the variable unset on every
       // engine. Unresolved names are surfaced the same way every other path does
       // rather than being substituted as ''.
-      const { values: envOverride, missing } = await resolveEnvVars(
+      const { values: resolvedEnv, missing } = await resolveEnvVars(
         envVarNames(flat, dataRows)
       )
       unresolvedEnvRef.current = missing
+      // Protected data cells: the spec reads process.env.PASSWORD_1 etc., so
+      // hand it those names — not the internal `secret:<ref>` lookup keys.
+      const envOverride = {
+        ...withoutSecretKeys(resolvedEnv),
+        ...secretCellEnv(dataRows, resolvedEnv)
+      }
       const res = await window.api.xbrowser.run(
         code,
         [...xbSel] as ('chromium' | 'firefox' | 'webkit')[],
@@ -3552,6 +3564,7 @@ function App(): React.JSX.Element {
         // never did, so an upload step died on ENOENT …\fixtures\<name>.
         fixturePaths?: string[]
         harFile?: string
+        rows: Record<string, string>[] // for its protected data cells' env names
       }[] = []
       // Every {{env:…}} name any test in the batch needs. The batch used to send
       // only PASSWORD, so a suite whose tests read {{env:API_KEY}} or
@@ -3603,7 +3616,8 @@ function App(): React.JSX.Element {
           // Absolute source paths — main copies them into the run folder and
           // repoints the spec at the copies.
           fixturePaths: runFixturePaths(flat),
-          harFile: (data as { har?: string }).har || undefined
+          harFile: (data as { har?: string }).har || undefined,
+          rows
         })
       }
       if (safe.length) {
@@ -3626,6 +3640,35 @@ function App(): React.JSX.Element {
           const resolved = await window.api.xbrowser.resolveSecrets(secretRefs)
           const password = secretRefs.map((r) => resolved[r]).find((v) => v)
           if (password) batchEnv = { ...(batchEnv ?? {}), PASSWORD: password }
+        }
+        // Protected data cells. Each exported spec reads process.env.PASSWORD_1
+        // etc. — but the batch shares ONE environment, so two tests whose
+        // PASSWORD_1 means different values can't both run in it. The second
+        // goes to the sequential loop (which resolves per test), with the
+        // reason on the report, rather than silently typing the wrong one.
+        const secretNames = [...batchEnvNames].filter((n) => n.startsWith('secret:'))
+        if (secretNames.length) {
+          // Not environment variables, so resolved even when the user chose
+          // "run without environment".
+          const cellValues = suiteNoEnv
+            ? (await resolveEnvVars(secretNames)).values
+            : (batchEnv ?? {})
+          const cellEnvAll: Record<string, string> = {}
+          for (const s of [...safe]) {
+            const env = secretCellEnv(s.rows, cellValues)
+            const clash = Object.entries(env).some(([k, v]) => k in cellEnvAll && cellEnvAll[k] !== v)
+            if (clash) {
+              safe.splice(safe.indexOf(s), 1)
+              sequentialTests.push(s.test)
+              parallelSkipReasons.current.set(
+                s.test.fileName,
+                'its protected data-table values clash with another test in the same parallel batch'
+              )
+              continue
+            }
+            Object.assign(cellEnvAll, env)
+          }
+          batchEnv = { ...withoutSecretKeys(batchEnv ?? {}), ...cellEnvAll }
         }
         const res = await window.api.xbrowser.runSuite(
           safe.map((s) => ({
@@ -4449,7 +4492,9 @@ function App(): React.JSX.Element {
       if (needed.length) {
         // The pinned environment is passed as `provided`, so it wins.
         const out = await resolveEnvVars(needed, envVars)
-        Object.assign(envVars, out.values)
+        // Protected data cells become the PASSWORD_1… names the spec reads; the
+        // `secret:<ref>` lookup keys stay out of the child's environment.
+        Object.assign(envVars, withoutSecretKeys(out.values), secretCellEnv(rows, out.values))
         const missing = out.missing
         if (missing.length) {
           const run = {
@@ -7274,17 +7319,32 @@ function App(): React.JSX.Element {
                       <tbody>
                         {dataRows.map((row, r) => (
                           <tr key={r}>
-                            {dataCols.map((c) => (
-                              <td key={c}>
-                                <input
-                                  className="data-cell"
-                                  value={row[c] ?? ''}
-                                  onChange={(e) => setCell(r, c, e.target.value)}
-                                  placeholder={c}
-                                  spellCheck={false}
-                                />
-                              </td>
-                            ))}
+                            {dataCols.map((c) => {
+                              // A sensitive column (password, token, api-key…) is
+                              // masked while you type, and once saved its cell
+                              // holds only a {{secret:…}} ref — shown as dots.
+                              // Typing replaces the stored value on the next save.
+                              const sensitive = isSensitiveColumn(c)
+                              const stored = secretCellRef(row[c]) !== null
+                              return (
+                                <td key={c}>
+                                  <input
+                                    className="data-cell"
+                                    type={sensitive ? 'password' : 'text'}
+                                    value={stored ? '' : (row[c] ?? '')}
+                                    onChange={(e) => setCell(r, c, e.target.value)}
+                                    placeholder={stored ? '•••••••• (saved, encrypted)' : c}
+                                    title={
+                                      stored
+                                        ? 'Stored encrypted on this machine. Type to replace it.'
+                                        : undefined
+                                    }
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                  />
+                                </td>
+                              )
+                            })}
                             <td className="data-grid-rowact">
                               <button
                                 className="data-row-del"

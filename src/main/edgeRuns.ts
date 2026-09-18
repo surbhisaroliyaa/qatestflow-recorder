@@ -15,6 +15,7 @@ import { join } from 'path'
 import { mkdir, writeFile, readFile, readdir, rm, unlink } from 'fs/promises'
 import { libraryDir } from './library'
 import { traceDir, isSafeTraceId } from './trace'
+import { stripSecrets } from './secrets'
 
 // One generated variant's outcome within a batch.
 export interface EdgeRunVariant {
@@ -87,6 +88,10 @@ function summarize(rec: EdgeRunRecord): EdgeRunSummary {
   }
 }
 
+/** Every saved batch, across all tests — for the secret sweep, which has to
+ *  know which password refs these records hold and which traces are variants. */
+export const allEdgeRuns = (): Promise<EdgeRunRecord[]> => readAll()
+
 async function readAll(): Promise<EdgeRunRecord[]> {
   try {
     const files = (await readdir(edgeRunsDir())).filter((f) => f.endsWith('.json'))
@@ -133,8 +138,19 @@ export async function saveEdgeRun(
     : input.baselineOk
       ? variants.filter((r) => r.ok).length
       : 0
+  // Every variant carries the full step list it ran — including the login, with
+  // its password in plaintext. Same treatment as a saved test: the value moves
+  // to the encrypted store and the step keeps a ref, so "replay just these"
+  // still logs in (replay resolves refs in main).
+  const results: typeof input.results = []
+  for (const r of input.results) {
+    results.push(
+      Array.isArray(r.steps) ? { ...r, steps: (await stripSecrets(r.steps)) as typeof r.steps } : r
+    )
+  }
   const rec: EdgeRunRecord = {
     ...input,
+    results,
     id: `edge-${Date.now()}`,
     at: new Date().toISOString(),
     variantCount: variants.length,

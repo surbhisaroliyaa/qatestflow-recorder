@@ -153,11 +153,29 @@ export function missingEnvMessage(
     fixHint?: string
   } = {}
 ): string {
-  const names = missing.map((n) => `{{env:${n}}}`).join(', ')
-  const plural = missing.length === 1 ? '' : 's'
-  const hint = opts.fixHint ?? 'Add the value to the environment this run uses, or pick a different one.'
-  const why = opts.pinnedButMissing
-    ? `This run is pinned to an environment that no longer exists, so none of its variables were applied. ${hint}`
-    : hint
-  return `${missing.length} environment variable${plural} had no value: ${names}. ${why}`
+  // A `secret:<ref>` name is a protected data-table cell, not an environment
+  // variable — telling someone to add "{{env:secret:sec_91a…}}" to an
+  // environment would send them looking for something that doesn't exist. It
+  // goes missing when the encrypted store can't be read (another machine or
+  // user account), and the fix is to type the value into the table again.
+  const cells = missing.filter((n) => n.startsWith('secret:'))
+  const envs = missing.filter((n) => !n.startsWith('secret:'))
+  const parts: string[] = []
+  if (envs.length) {
+    const names = envs.map((n) => `{{env:${n}}}`).join(', ')
+    const plural = envs.length === 1 ? '' : 's'
+    const hint = opts.fixHint ?? 'Add the value to the environment this run uses, or pick a different one.'
+    const why = opts.pinnedButMissing
+      ? `This run is pinned to an environment that no longer exists, so none of its variables were applied. ${hint}`
+      : hint
+    parts.push(`${envs.length} environment variable${plural} had no value: ${names}. ${why}`)
+  }
+  if (cells.length) {
+    const plural = cells.length === 1 ? '' : 's'
+    parts.push(
+      `${cells.length} protected data-table value${plural} could not be read on this machine. ` +
+        'Type the value into the data table again and save.'
+    )
+  }
+  return parts.join(' ')
 }

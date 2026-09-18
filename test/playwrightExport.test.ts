@@ -1240,3 +1240,68 @@ describe('step descriptions', () => {
     })
   })
 })
+
+// ── Option A: protected data-table values in the export ────────────────
+describe('a data-driven login with a protected password column', () => {
+  const flow = [
+    s({ type: 'navigate', url: 'https://www.saucedemo.com/' }),
+    s({ type: 'type', selector: "getByTestId('username')", value: '{{username}}', label: 'Username' }),
+    s({ type: 'type', selector: "getByTestId('password')", value: '{{password}}', label: 'Password', secret: true })
+  ]
+  const data = {
+    columns: ['username', 'password'],
+    rows: [
+      { username: 'locked_out_user', password: '{{secret:sec_aaaa}}' },
+      { username: 'standard_user', password: '{{secret:sec_bbbb}}' },
+      { username: 'ghost_user', password: '{{secret:sec_aaaa}}' },
+      { username: 'standard_user', password: '' }
+    ]
+  }
+
+  it('reads each distinct value from its own env var, and keeps empty cells empty', () => {
+    const code = generatePlaywrightTest(flow, { name: 'Negative login', data })
+    expect(code).toContain(`password: process.env.PASSWORD_1 ?? ''`)
+    expect(code).toContain(`password: process.env.PASSWORD_2 ?? ''`)
+    expect(code).toMatch(/username: "standard_user", password: ""/)
+  })
+
+  it('never writes a store ref into a file meant for git', () => {
+    for (const code of [
+      generatePlaywrightTest(flow, { name: 'Negative login', data }),
+      generatePageObjectTest(flow, { name: 'Negative login', data })!.spec
+    ]) {
+      expect(code).not.toContain('secret:')
+      expect(code).not.toContain('sec_aaaa')
+    }
+  })
+
+  it('types the ROW value into a password field — not one PASSWORD for every row', () => {
+    // A secret step whose value is {{password}} used to be overridden with
+    // process.env.PASSWORD, ignoring the data column entirely.
+    const code = generatePlaywrightTest(flow, { name: 'Negative login', data })
+    expect(code).toContain(`.fill(data.password)`)
+    expect(code).not.toContain(`.fill(process.env.PASSWORD ?? '')`)
+  })
+
+  it('a password field set to {{env:SAUCE_PW}} reads SAUCE_PW, not PASSWORD', () => {
+    const code = generatePlaywrightTest(
+      [s({ type: 'type', selector: "getByTestId('password')", value: '{{env:SAUCE_PW}}', secret: true })],
+      { name: 'T' }
+    )
+    expect(code).toContain('process.env.SAUCE_PW')
+  })
+
+  it('still reads PASSWORD for an ordinary recorded password step', () => {
+    const code = generatePlaywrightTest(
+      [s({ type: 'type', selector: "getByTestId('password')", value: '', secret: true, secretRef: 'sec_x' })],
+      { name: 'T' }
+    )
+    expect(code).toContain(`.fill(process.env.PASSWORD ?? '')`)
+  })
+
+  it('never puts a password in a test TITLE, where every report and CI log prints it', () => {
+    const titles = dataRowTitles('Login', [{ password: 'hunter2' }, { password: '' }], 'password')
+    expect(titles.join(' ')).not.toContain('hunter2')
+    expect(titles).toEqual(['Login — row 1', 'Login — (empty)'])
+  })
+})
