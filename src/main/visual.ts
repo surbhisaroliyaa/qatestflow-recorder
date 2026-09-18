@@ -107,11 +107,7 @@ export function cropSimilarity(baseCropB64: string, candidate: NativeImage, size
 // Compare a stored baseline PNG against a fresh capture. A pixel "differs"
 // when its biggest channel change exceeds `colorTol` (ignores sub-perceptual
 // noise + light anti-aliasing). Returns the changed ratio + a diff image.
-export function diffImages(
-  baselinePng: Buffer,
-  current: NativeImage,
-  colorTol = 24
-): DiffResult {
+export function diffImages(baselinePng: Buffer, current: NativeImage, colorTol = 24): DiffResult {
   const base = nativeImage.createFromBuffer(baselinePng)
   const bSize = base.getSize()
   const cSize = current.getSize()

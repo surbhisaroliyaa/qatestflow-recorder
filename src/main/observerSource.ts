@@ -236,8 +236,9 @@ export function createObserver(
 ): ObserverHandle {
   // Per-document guard, kept on a WeakMap that lives in THIS world — the page
   // can't see it, clear it, or fake it.
-  const registry = ((createObserver as unknown as { registry?: WeakMap<Document, ObserverHandle> })
-    .registry ??= new WeakMap())
+  const registry = ((
+    createObserver as unknown as { registry?: WeakMap<Document, ObserverHandle> }
+  ).registry ??= new WeakMap())
   const existing = registry.get(doc)
   if (existing) return existing
 
@@ -690,8 +691,7 @@ export function createObserver(
       if (el.placeholder) return el.placeholder
       if (el.id) {
         const escaped =
-          (window as { CSS?: { escape?: (s: string) => string } }).CSS &&
-          window.CSS.escape
+          (window as { CSS?: { escape?: (s: string) => string } }).CSS && window.CSS.escape
             ? window.CSS.escape(el.id)
             : el.id
         const lab = document.querySelector('label[for="' + escaped + '"]')
@@ -702,7 +702,7 @@ export function createObserver(
     const ph = el.getAttribute('placeholder')
     if (ph) return ph
     const heading = el.querySelector && el.querySelector('h1, h2, h3, h4, h5, h6')
-    const text = (((heading && heading.textContent) || el.textContent) || '').trim()
+    const text = ((heading && heading.textContent) || el.textContent || '').trim()
     if (text && text.length <= 80) return text
     const title = el.getAttribute('title')
     if (title) return title
@@ -763,7 +763,9 @@ export function createObserver(
       return true
     }
     const nodes = Array.prototype.slice.call(
-      document.querySelectorAll('a,button,input,select,textarea,label,img,[role],[data-test],[data-testid]')
+      document.querySelectorAll(
+        'a,button,input,select,textarea,label,img,[role],[data-test],[data-testid]'
+      )
     ) as Element[]
     const scored: {
       el: Element
@@ -1009,7 +1011,11 @@ export function createObserver(
     // QF-002: a change the PAGE dispatched is not something the user did.
     if (!event.isTrusted) return
     if (!recording) return
-    const el = realTarget(event) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null
+    const el = realTarget(event) as
+      | HTMLInputElement
+      | HTMLSelectElement
+      | HTMLTextAreaElement
+      | null
     if (!el) return
     const tag = el.tagName.toLowerCase()
 

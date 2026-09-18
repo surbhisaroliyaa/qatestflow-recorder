@@ -133,9 +133,7 @@ interface RecorderAPI {
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
   // F24: an API step's exchange (pass or fail), for the step-row chip + panel.
-  onApiResponse: (
-    callback: (info: { index: number; evidence: ApiEvidence }) => void
-  ) => () => void
+  onApiResponse: (callback: (info: { index: number; evidence: ApiEvidence }) => void) => () => void
   // F4 (self-heal 2.0): main auto-healed a broken selector mid-run and re-ran the
   // step. The renderer swaps in the healed step (so a 💾 save keeps the fix) and
   // shows a "fixed by AI" badge. `signals` = which of role/text/name/position/
@@ -167,9 +165,7 @@ interface RecorderAPI {
   // process environment, so a real secret never sits in the data table.
   // `unresolved` = names with no value anywhere. An OS-defined name (USERNAME…)
   // never falls through to the process value — see src/shared/osEnvNames.ts.
-  resolveEnv: (
-    names: string[]
-  ) => Promise<{ values: Record<string, string>; unresolved: string[] }>
+  resolveEnv: (names: string[]) => Promise<{ values: Record<string, string>; unresolved: string[] }>
 }
 
 // === Environment / config manager (F25) ===
@@ -319,11 +315,7 @@ interface MonitorsAPI {
 interface NotifyAPI {
   show: (title: string, body: string) => Promise<void>
   // F32b: POST a monitor failure to a Slack/Discord/Teams incoming webhook.
-  webhook: (
-    url: string,
-    title: string,
-    body: string
-  ) => Promise<{ ok: boolean; error?: string }>
+  webhook: (url: string, title: string, body: string) => Promise<{ ok: boolean; error?: string }>
 }
 
 // === Coverage gap map (F23) ===
@@ -388,9 +380,7 @@ interface MockEntry {
 // === Visual regression (Day 19) ===
 // F18: plain-English "AI Prompt" step — intent → draft steps grounded to the page.
 interface AiAPI {
-  generateSteps: (
-    intent: string
-  ) => Promise<{ steps: RecorderStep[]; note: string } | null>
+  generateSteps: (intent: string) => Promise<{ steps: RecorderStep[]; note: string } | null>
   // F21: bug repro + expected result → reproduce steps + a verification assertion.
   generateRegressionTest: (
     repro: string,
@@ -490,7 +480,9 @@ interface LibraryAPI {
   recordRun: (fileName: string, run: RunInfo) => Promise<void>
   openScreenshot: (path: string) => Promise<void>
   // F20 (Option 2): persisted edge-case batches (negative-testing evidence).
-  saveEdgeRun: (input: Omit<EdgeRunRecord, 'id' | 'at' | 'variantCount' | 'acceptedCount'>) => Promise<EdgeRunSummary>
+  saveEdgeRun: (
+    input: Omit<EdgeRunRecord, 'id' | 'at' | 'variantCount' | 'acceptedCount'>
+  ) => Promise<EdgeRunSummary>
   listEdgeRuns: (testFile: string) => Promise<EdgeRunSummary[]>
   loadEdgeRun: (id: string) => Promise<EdgeRunRecord | null>
   deleteEdgeRun: (id: string) => Promise<void>
@@ -1197,7 +1189,12 @@ declare global {
     // For an `if` step: what decides which branch runs. Element conditions use
     // the step's own selector ladder (so they self-heal like any other step);
     // text/url conditions use `value`.
-    condKind?: 'element-visible' | 'element-absent' | 'text-present' | 'text-absent' | 'url-contains'
+    condKind?:
+      | 'element-visible'
+      | 'element-absent'
+      | 'text-present'
+      | 'text-absent'
+      | 'url-contains'
     url?: string
     // Day 16(+): a `download` step's saved file path (for "Show in folder" and
     // the on-replay file check). The step's `value` holds the EXPECTED filename

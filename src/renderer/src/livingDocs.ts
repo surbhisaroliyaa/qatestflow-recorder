@@ -32,7 +32,6 @@ export interface DocMeta {
   dataRows?: Record<string, string>[]
 }
 
-
 function hostOf(url?: string): string {
   if (!url) return ''
   try {
@@ -49,7 +48,9 @@ function preconditions(steps: RecorderStep[], meta: DocMeta): string[] {
   const base = meta.baseURL || firstNav?.url
   if (base) out.push(`Base URL: ${base}`)
   if (meta.storageState) {
-    out.push(`Starts already logged in (session "${meta.storageState}") — the login steps are skipped.`)
+    out.push(
+      `Starts already logged in (session "${meta.storageState}") — the login steps are skipped.`
+    )
   }
   // F38: what this test is FOR, as opposed to where it files.
   if (meta.tags && meta.tags.length) {
@@ -67,7 +68,9 @@ function preconditions(steps: RecorderStep[], meta: DocMeta): string[] {
     )
   }
   if (meta.dataRows && meta.dataRows.length) {
-    out.push(`Data-driven: runs once per row of a data table (${plural(meta.dataRows.length, 'row')}).`)
+    out.push(
+      `Data-driven: runs once per row of a data table (${plural(meta.dataRows.length, 'row')}).`
+    )
   }
   const envs = envVarNames(steps, meta.dataRows ?? [])
   if (envs.length) {
@@ -141,7 +144,10 @@ export function generateTestDoc(name: string, flat: RecorderStep[], meta: DocMet
   )
   lines.push('')
 
-  const pre = preconditions(flat.filter((s) => !s.disabled), meta)
+  const pre = preconditions(
+    flat.filter((s) => !s.disabled),
+    meta
+  )
   if (pre.length) {
     lines.push('**Preconditions**')
     lines.push('')
@@ -186,7 +192,9 @@ export function generateSuiteDoc(
   const lines: string[] = []
   lines.push('# Test coverage')
   lines.push('')
-  lines.push(`${entries.length} test${entries.length === 1 ? '' : 's'} documented — a living map of what QA covers.`)
+  lines.push(
+    `${entries.length} test${entries.length === 1 ? '' : 's'} documented — a living map of what QA covers.`
+  )
   lines.push('')
   const bySuite = new Map<string, typeof entries>()
   for (const e of entries) {

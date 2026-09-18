@@ -20,9 +20,9 @@ describe('headlessCategory', () => {
     it('classifies an unclosed control block', () => {
       // One malformed spec aborts the ENTIRE Playwright batch, so this category
       // is the difference between "your test is broken" and "the site is broken".
-      expect(headlessCategory('Step 4: "repeat" is never closed — add a matching "endRepeat".')).toBe(
-        'authoring'
-      )
+      expect(
+        headlessCategory('Step 4: "repeat" is never closed — add a matching "endRepeat".')
+      ).toBe('authoring')
     })
 
     it('classifies our own pre-pass refusal', () => {
@@ -43,7 +43,9 @@ describe('headlessCategory', () => {
 
     it('classifies connection failures', () => {
       expect(headlessCategory('connect ECONNREFUSED 127.0.0.1:4517')).toBe('environment')
-      expect(headlessCategory('net::ERR_NAME_NOT_RESOLVED at https://nope.test/')).toBe('environment')
+      expect(headlessCategory('net::ERR_NAME_NOT_RESOLVED at https://nope.test/')).toBe(
+        'environment'
+      )
     })
 
     it('classifies our own API-step wording for the same thing', () => {

@@ -206,7 +206,10 @@ export function hasLoopToken(value: string | undefined): boolean {
  * assertion into a vacuous one (the F6 dead-check disease), so leaving it
  * visible makes the mistake obvious in the failure message.
  */
-export function resolveLoopTokens(value: string | undefined, loop: LoopContext | null): string | undefined {
+export function resolveLoopTokens(
+  value: string | undefined,
+  loop: LoopContext | null
+): string | undefined {
   if (value === undefined || !loop) return value
   return value.replace(LOOP_TOKEN, (whole, which: string) => {
     if (which === 'index') return String(loop.index)
@@ -231,7 +234,11 @@ export type RepeatKind = 'times' | 'each'
 
 /** Plain-English rendering, used by the step list, living docs and the export
  *  comments so all three describe a loop the same way. */
-export function conditionText(kind: ConditionKind | undefined, label?: string, value?: string): string {
+export function conditionText(
+  kind: ConditionKind | undefined,
+  label?: string,
+  value?: string
+): string {
   switch (kind) {
     case 'element-absent':
       return `"${label ?? 'element'}" is NOT on the page`

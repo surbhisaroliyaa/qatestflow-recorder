@@ -351,8 +351,7 @@ const api = {
       tests: string[]
       backupDir?: string
       otherFiles?: number
-    }> =>
-      ipcRenderer.invoke('secrets:migrate'),
+    }> => ipcRenderer.invoke('secrets:migrate'),
 
     // F39: run a batch of tests at once via real Playwright, `workers` at a time.
     runSuite: (
@@ -366,8 +365,7 @@ const api = {
       }[],
       workers: number,
       envOverride?: Record<string, string>
-    ): Promise<unknown> =>
-      ipcRenderer.invoke('xbrowser:runSuite', specs, workers, envOverride)
+    ): Promise<unknown> => ipcRenderer.invoke('xbrowser:runSuite', specs, workers, envOverride)
   },
 
   // === Scheduled monitors (F32) ===
@@ -493,8 +491,7 @@ const api = {
     map: (
       acs: string[],
       tests: { name: string; summary: string }[]
-    ): Promise<{ ac: string; tests: string[] }[] | null> =>
-      ipcRenderer.invoke('ac:map', acs, tests)
+    ): Promise<{ ac: string; tests: string[] }[] | null> => ipcRenderer.invoke('ac:map', acs, tests)
   },
   // F28: inspect the current page for localization issues (overflow / dir / text).
   i18n: {
@@ -563,8 +560,7 @@ const api = {
     listEdgeRuns: (testFile: string): Promise<unknown[]> =>
       ipcRenderer.invoke('library:listEdgeRuns', testFile),
     loadEdgeRun: (id: string): Promise<unknown> => ipcRenderer.invoke('library:loadEdgeRun', id),
-    deleteEdgeRun: (id: string): Promise<void> =>
-      ipcRenderer.invoke('library:deleteEdgeRun', id)
+    deleteEdgeRun: (id: string): Promise<void> => ipcRenderer.invoke('library:deleteEdgeRun', id)
   },
 
   // === Saved sessions (Day 17) — cookies + localStorage as storageState. ===

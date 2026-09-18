@@ -243,7 +243,9 @@ describe('the gate main applies to every recorder message', () => {
     // recorder:upload carries file paths; it has its own validation in main
     // and is not one of these channels.
     expect(isPageChannel('recorder:upload')).toBe(false)
-    expect(validatePageMessage('recorder:upload', { facts: FACTS, paths: ['/etc/passwd'] })).toBe(null)
+    expect(validatePageMessage('recorder:upload', { facts: FACTS, paths: ['/etc/passwd'] })).toBe(
+      null
+    )
   })
 
   it('refuses any other IPC channel', () => {
@@ -285,7 +287,11 @@ describe('element facts', () => {
   it("keeps the control's label text — the step is named from it", () => {
     // Dropped here once: the observer captured "Sports" and the gate threw it
     // away, so the step fell back to the id and read "hobbies checkbox 1".
-    const clean = validateElementFacts({ tag: 'input', id: 'hobbies-checkbox-1', labelText: 'Sports' })
+    const clean = validateElementFacts({
+      tag: 'input',
+      id: 'hobbies-checkbox-1',
+      labelText: 'Sports'
+    })
     expect(clean).toHaveProperty('labelText', 'Sports')
   })
 

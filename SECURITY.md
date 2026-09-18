@@ -10,7 +10,7 @@ installer name).
 
 - **Tested websites are untrusted.** A page you record or replay runs in its own browser view,
   session and **sandboxed** renderer process (the app's own window is sandboxed too).
-- **The recorder is invisible to the page.** It runs in each frame's *isolated world* (Electron
+- **The recorder is invisible to the page.** It runs in each frame's _isolated world_ (Electron
   context isolation) inside the recorder preload, and talks to the app over `ipcRenderer`, which
   page scripts cannot reach. The app learns which frame an event came from from Electron itself,
   not from anything the page could write. Script-written iframes (which get no preload) are
@@ -34,7 +34,7 @@ installer name).
   to the recorder. A page could describe a dialog that never opened — but a page decides which
   dialogs it shows anyway, so this adds nothing it couldn't do by opening one.
 - In a script-written iframe on a site whose Content-Security-Policy forbids inline scripts, the
-  dialog shim cannot be installed, so dialogs inside *that* iframe are not recorded. Clicks and
+  dialog shim cannot be installed, so dialogs inside _that_ iframe are not recorded. Clicks and
   typing there are unaffected.
 - Protection of stored passwords is "only this user on this machine": software running as you on
   your unlocked machine can ask the OS to decrypt them, as it can for your browser's passwords.

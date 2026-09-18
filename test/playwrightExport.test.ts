@@ -130,7 +130,12 @@ const DATA = {
 
 const DATA_FLOW = [
   s({ type: 'navigate', url: 'https://www.saucedemo.com/' }),
-  s({ type: 'type', selector: "getByTestId('username')", value: '{{username}}', label: 'Username' }),
+  s({
+    type: 'type',
+    selector: "getByTestId('username')",
+    value: '{{username}}',
+    label: 'Username'
+  }),
   s({
     type: 'type',
     selector: "getByTestId('password')",
@@ -201,7 +206,13 @@ describe('emitted specs parse as TypeScript', () => {
   it('edge-case suite — including an api step, which needs the request fixture', () => {
     const out = generateEdgeSuite(
       [
-        { baseline: true, fieldLabel: 'Username', edgeLabel: 'baseline', value: 'ok', steps: LOGIN },
+        {
+          baseline: true,
+          fieldLabel: 'Username',
+          edgeLabel: 'baseline',
+          value: 'ok',
+          steps: LOGIN
+        },
         {
           baseline: false,
           fieldLabel: 'Username',
@@ -323,7 +334,9 @@ describe('every identifier the spec uses, the spec declares', () => {
       )
     }
     if (/\bdata\.\w/.test(code.replace(/^\s*\/\/.*$/gm, ''))) {
-      expect(code, `${where}: declares the dataset loop`).toMatch(/for \(const \[i, data\]|\(data\)/)
+      expect(code, `${where}: declares the dataset loop`).toMatch(
+        /for \(const \[i, data\]|\(data\)/
+      )
     }
   }
 
@@ -509,7 +522,12 @@ describe('a checkbox exports as a checkbox, not as a filled text field', () => {
 
   it('does not say "Checkbox" twice when the name already says it', () => {
     const flow = [
-      s({ type: 'check', selector: "locator('#hobbies-checkbox-1')", value: 'true', label: 'hobbies checkbox 1' })
+      s({
+        type: 'check',
+        selector: "locator('#hobbies-checkbox-1')",
+        value: 'true',
+        label: 'hobbies checkbox 1'
+      })
     ]
     const pom = generatePageObjectTest(flow, { name: 'Form' })!
     expect(pom.page).toContain('hobbiesCheckbox1:')
@@ -590,7 +608,13 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
     }),
     s({ type: 'click', selector: "getByTestId('contact-us')", label: 'Contact us', windowId: 1 }),
     s({ type: 'closeTab', windowId: 1 }),
-    s({ type: 'type', selector: "getByTestId('card')", value: '4111', label: 'Card number', frame: FRAME }),
+    s({
+      type: 'type',
+      selector: "getByTestId('card')",
+      value: '4111',
+      label: 'Card number',
+      frame: FRAME
+    }),
     s({ type: 'click', selector: "getByTestId('pay')", label: 'Pay', frame: FRAME })
   ]
   const shop = (): NonNullable<ReturnType<typeof generatePageObjectTest>> =>
@@ -600,7 +624,9 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
     it('declares the frame ONCE as a field, and hangs its locators off it', () => {
       const { page } = shop()
       expect(page).toContain('readonly checkoutFrame: FrameLocator')
-      expect(page).toContain('this.checkoutFrame = page.frameLocator("iframe[name=\\"checkout\\"]")')
+      expect(page).toContain(
+        'this.checkoutFrame = page.frameLocator("iframe[name=\\"checkout\\"]")'
+      )
       // The point of the whole exercise: the frame is named once, not repeated
       // at every locator the way the inline export must.
       expect(page).toMatch(/this\.cardNumberInput = this\.checkoutFrame\./)
@@ -616,8 +642,20 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
       // Keying a field by selector alone would collapse these into one, and the
       // second frame's control would be driven through the first frame.
       const twoFrames = [
-        s({ type: 'type', selector: "getByTestId('code')", value: '1', label: 'Code', frame: [{ name: 'left' }] }),
-        s({ type: 'type', selector: "getByTestId('code')", value: '2', label: 'Code', frame: [{ name: 'right' }] })
+        s({
+          type: 'type',
+          selector: "getByTestId('code')",
+          value: '1',
+          label: 'Code',
+          frame: [{ name: 'left' }]
+        }),
+        s({
+          type: 'type',
+          selector: "getByTestId('code')",
+          value: '2',
+          label: 'Code',
+          frame: [{ name: 'right' }]
+        })
       ]
       const { page } = generatePageObjectTest(twoFrames, { name: 'T' })!
       expect(page).toContain('this.codeInput = this.leftFrame.')
@@ -753,7 +791,7 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
     it('a flow with neither imports neither type', () => {
       const { page } = generatePageObjectTest(LOGIN, { name: 'Login' })!
       expect(page).not.toContain('Download')
-      expect(page).not.toContain("import fs")
+      expect(page).not.toContain('import fs')
     })
   })
 
@@ -789,8 +827,9 @@ describe('runtime tokens', () => {
   })
 
   it('an api step that SAVES declares `saved` even when nothing reads it yet', () => {
-    expect(runtimeTokenUse([s({ type: 'api', url: 'https://a.test', apiSave: 'oid = id' })]).saved)
-      .toBe(true)
+    expect(
+      runtimeTokenUse([s({ type: 'api', url: 'https://a.test', apiSave: 'oid = id' })]).saved
+    ).toBe(true)
   })
 
   it('declares only the helpers actually used', () => {
@@ -807,7 +846,7 @@ describe('runtime tokens', () => {
     expect(osEnvCollisions(steps)).toEqual(['USERNAME'])
     const out = generatePlaywrightTest(steps, { name: 'T' })
     expect(out).toContain("process.env.QA_USERNAME ?? ''")
-    expect(out).toContain("throw new Error(")
+    expect(out).toContain('throw new Error(')
     // It must NOT silently fall back to the ambiguous name.
     expect(out).not.toMatch(/process\.env\.USERNAME(?!\w)/)
   })
@@ -825,7 +864,7 @@ describe('runtime tokens', () => {
       "goto(process.env.QA_BASE ?? '')"
     )
     expect(generatePlaywrightTest(mixed, { name: 'T' })).toContain(
-      'goto(`https://a.test/${process.env.QA_ID ?? \'\'}/edit`)'
+      "goto(`https://a.test/${process.env.QA_ID ?? ''}/edit`)"
     )
   })
 
@@ -913,9 +952,11 @@ describe('data row titles', () => {
   })
 
   it('disambiguates repeated cells by row number instead of colliding', () => {
-    expect(
-      dataRowTitles('Login', [{ u: 'bob' }, { u: 'bob' }, { u: 'BOB' }], 'u')
-    ).toEqual(['Login — bob', 'Login — bob (row 2)', 'Login — BOB (row 3)'])
+    expect(dataRowTitles('Login', [{ u: 'bob' }, { u: 'bob' }, { u: 'BOB' }], 'u')).toEqual([
+      'Login — bob',
+      'Login — bob (row 2)',
+      'Login — BOB (row 3)'
+    ])
   })
 
   it('labels an empty cell rather than emitting a title ending in a dash', () => {
@@ -990,7 +1031,13 @@ describe('golden files', () => {
   it('edge-case suite', async () => {
     const out = generateEdgeSuite(
       [
-        { baseline: true, fieldLabel: 'Username', edgeLabel: 'baseline', value: 'ok', steps: LOGIN },
+        {
+          baseline: true,
+          fieldLabel: 'Username',
+          edgeLabel: 'baseline',
+          value: 'ok',
+          steps: LOGIN
+        },
         {
           baseline: false,
           fieldLabel: 'Username',
@@ -1021,7 +1068,13 @@ describe('multi-tab flows (inline export only — the POM export refuses them)',
       label: 'Open help',
       opensWindow: 1
     }),
-    s({ type: 'assert', assertKind: 'visible', selector: "getByText('Help')", label: 'Help', windowId: 1 }),
+    s({
+      type: 'assert',
+      assertKind: 'visible',
+      selector: "getByText('Help')",
+      label: 'Help',
+      windowId: 1
+    }),
     s({ type: 'closeTab', windowId: 1 }),
     s({ type: 'click', selector: "getByTestId('cart')", label: 'Cart', windowId: 0 })
   ]
@@ -1127,9 +1180,12 @@ describe('iframe flows (inline export only — the POM export refuses them)', ()
   // (practice.expandtesting.com embeds src="/iframe-email-subscribe").
   describe('an unnamed frame is matched on the END of its src', () => {
     const inFrame = (url: string): string =>
-      generatePlaywrightTest([s({ type: 'click', selector: "getByText('Go')", label: 'Go', frame: [{ url }] })], {
-        name: 'T'
-      })
+      generatePlaywrightTest(
+        [s({ type: 'click', selector: "getByText('Go')", label: 'Go', frame: [{ url }] })],
+        {
+          name: 'T'
+        }
+      )
 
     it('matches a relative src by suffix', () => {
       expect(inFrame('https://practice.expandtesting.com/iframe-email-subscribe')).toContain(
@@ -1154,7 +1210,14 @@ describe('iframe flows (inline export only — the POM export refuses them)', ()
     it('a NAMED frame still wins — a name is exact, a src suffix is a guess', () => {
       expect(
         generatePlaywrightTest(
-          [s({ type: 'click', selector: "getByText('Go')", label: 'Go', frame: [{ name: 'checkout', url: 'https://x.test/f' }] })],
+          [
+            s({
+              type: 'click',
+              selector: "getByText('Go')",
+              label: 'Go',
+              frame: [{ name: 'checkout', url: 'https://x.test/f' }]
+            })
+          ],
           { name: 'T' }
         )
       ).toContain('iframe[name=\\"checkout\\"]')
@@ -1191,10 +1254,22 @@ describe('step descriptions', () => {
   // the failure report AND a comment above every line of the exported spec.
   describe('a step with no label names its element from the selector', () => {
     const cases: Array<[string, Record<string, unknown>, string]> = [
-      ['getByRole uses the accessible name, not the role', { selector: "getByRole('button', { name: 'Add to cart' })" }, 'Click Add to cart'],
-      ['getByTestId uses the test id', { selector: "getByTestId('login-button')" }, 'Click login-button'],
+      [
+        'getByRole uses the accessible name, not the role',
+        { selector: "getByRole('button', { name: 'Add to cart' })" },
+        'Click Add to cart'
+      ],
+      [
+        'getByTestId uses the test id',
+        { selector: "getByTestId('login-button')" },
+        'Click login-button'
+      ],
       ['getByText uses the text', { selector: "getByText('Products')" }, 'Click Products'],
-      ['locator() uses the raw selector', { selector: 'locator("#cart .badge")' }, 'Click #cart .badge'],
+      [
+        'locator() uses the raw selector',
+        { selector: 'locator("#cart .badge")' },
+        'Click #cart .badge'
+      ],
       ['nothing at all still reads as a sentence', {}, 'Click the element']
     ]
 
@@ -1206,14 +1281,50 @@ describe('step descriptions', () => {
 
     it('never emits the word "undefined" — for any step type or assert kind', () => {
       const kinds = [
-        'visible', 'hidden', 'text-equals', 'text-contains', 'value', 'empty', 'count',
-        'enabled', 'disabled', 'editable', 'focused', 'checked', 'unchecked', 'attribute',
-        'class', 'url-contains', 'title', 'nl'
+        'visible',
+        'hidden',
+        'text-equals',
+        'text-contains',
+        'value',
+        'empty',
+        'count',
+        'enabled',
+        'disabled',
+        'editable',
+        'focused',
+        'checked',
+        'unchecked',
+        'attribute',
+        'class',
+        'url-contains',
+        'title',
+        'nl'
       ]
       const bare = [
-        ...['click', 'type', 'select', 'press', 'hover', 'upload', 'download', 'navigate',
-          'back', 'closeTab', 'snapshot', 'a11y', 'perf', 'api', 'wait', 'dialog',
-          'repeat', 'endRepeat', 'if', 'else', 'endIf', 'block'].map((type) => s({ type })),
+        ...[
+          'click',
+          'type',
+          'select',
+          'press',
+          'hover',
+          'upload',
+          'download',
+          'navigate',
+          'back',
+          'closeTab',
+          'snapshot',
+          'a11y',
+          'perf',
+          'api',
+          'wait',
+          'dialog',
+          'repeat',
+          'endRepeat',
+          'if',
+          'else',
+          'endIf',
+          'block'
+        ].map((type) => s({ type })),
         ...kinds.map((assertKind) => s({ type: 'assert', assertKind }))
       ]
       for (const step of bare) {
@@ -1245,8 +1356,19 @@ describe('step descriptions', () => {
 describe('a data-driven login with a protected password column', () => {
   const flow = [
     s({ type: 'navigate', url: 'https://www.saucedemo.com/' }),
-    s({ type: 'type', selector: "getByTestId('username')", value: '{{username}}', label: 'Username' }),
-    s({ type: 'type', selector: "getByTestId('password')", value: '{{password}}', label: 'Password', secret: true })
+    s({
+      type: 'type',
+      selector: "getByTestId('username')",
+      value: '{{username}}',
+      label: 'Username'
+    }),
+    s({
+      type: 'type',
+      selector: "getByTestId('password')",
+      value: '{{password}}',
+      label: 'Password',
+      secret: true
+    })
   ]
   const data = {
     columns: ['username', 'password'],
@@ -1285,7 +1407,14 @@ describe('a data-driven login with a protected password column', () => {
 
   it('a password field set to {{env:SAUCE_PW}} reads SAUCE_PW, not PASSWORD', () => {
     const code = generatePlaywrightTest(
-      [s({ type: 'type', selector: "getByTestId('password')", value: '{{env:SAUCE_PW}}', secret: true })],
+      [
+        s({
+          type: 'type',
+          selector: "getByTestId('password')",
+          value: '{{env:SAUCE_PW}}',
+          secret: true
+        })
+      ],
       { name: 'T' }
     )
     expect(code).toContain('process.env.SAUCE_PW')
@@ -1293,7 +1422,15 @@ describe('a data-driven login with a protected password column', () => {
 
   it('still reads PASSWORD for an ordinary recorded password step', () => {
     const code = generatePlaywrightTest(
-      [s({ type: 'type', selector: "getByTestId('password')", value: '', secret: true, secretRef: 'sec_x' })],
+      [
+        s({
+          type: 'type',
+          selector: "getByTestId('password')",
+          value: '',
+          secret: true,
+          secretRef: 'sec_x'
+        })
+      ],
       { name: 'T' }
     )
     expect(code).toContain(`.fill(process.env.PASSWORD ?? '')`)

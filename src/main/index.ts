@@ -123,12 +123,7 @@ import {
   perfBudgetLabel,
   type PerfResult
 } from './perf'
-import {
-  matchEntry,
-  serveHeaders,
-  entryBodyBase64,
-  type HarLog
-} from './har'
+import { matchEntry, serveHeaders, entryBodyBase64, type HarLog } from './har'
 // F1: how long a HAR-intercepted request may stay paused before we give up and
 // let it hit the live network. Deciding what to serve is pure in-memory work
 // (match + base64), so anything still outstanding after this went wrong — and a
@@ -778,7 +773,6 @@ function createWindow(): void {
     const chain = [...base, ...rel]
     return chain.length ? chain : undefined
   }
-
 
   // Until the user navigates to a real URL, we keep the embedded browser
   // hidden (zero size) so the React welcome page is visible across the
@@ -2144,7 +2138,12 @@ function createWindow(): void {
       networkErrors?: string[]
       // Day 20: EVERY failed step in this run (not just the first) — so the
       // banner can surface each one's screenshot when Continue bypassed several.
-      failures?: { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
+      failures?: {
+        index: number
+        error: string
+        screenshotPath?: string
+        apiEvidence?: ApiEvidence
+      }[]
       // F1: how many requests were served from the HAR vs passed through live.
       harServed?: number
       harPassthrough?: number
@@ -2625,7 +2624,9 @@ function createWindow(): void {
             if (chaos?.locale) {
               d.sendCommand('Emulation.setLocaleOverride', { locale: chaos.locale }).catch(() => {})
               d.sendCommand('Network.setExtraHTTPHeaders', {
-                headers: { 'Accept-Language': `${chaos.locale},${chaos.locale.split('-')[0]};q=0.9` }
+                headers: {
+                  'Accept-Language': `${chaos.locale},${chaos.locale.split('-')[0]};q=0.9`
+                }
               }).catch(() => {})
             } else {
               d.sendCommand('Emulation.setLocaleOverride', {}).catch(() => {})
@@ -2794,13 +2795,24 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
         traceId?: string
-        failures?: { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
+        failures?: {
+          index: number
+          error: string
+          screenshotPath?: string
+          apiEvidence?: ApiEvidence
+        }[]
         harServed?: number
         harPassthrough?: number
         whatChanged?: DomDiff
         category?: FailureCategory
         aiHealed?: number
-        healable?: { index: number; label: string; signals: string[]; score: number; step: ReplayStep }
+        healable?: {
+          index: number
+          label: string
+          signals: string[]
+          score: number
+          step: ReplayStep
+        }
         // F37: which if-branches / loops actually executed. A green test whose
         // checks all sat in a branch that was never taken has verified NOTHING
         // — the F6 dead-assertion problem in control-flow form — so the run
@@ -2815,13 +2827,24 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
         traceId?: string
-        failures?: { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
+        failures?: {
+          index: number
+          error: string
+          screenshotPath?: string
+          apiEvidence?: ApiEvidence
+        }[]
         harServed?: number
         harPassthrough?: number
         whatChanged?: DomDiff
         category?: FailureCategory
         aiHealed?: number
-        healable?: { index: number; label: string; signals: string[]; score: number; step: ReplayStep }
+        healable?: {
+          index: number
+          label: string
+          signals: string[]
+          score: number
+          step: ReplayStep
+        }
         // F37: which if-branches / loops actually executed. A green test whose
         // checks all sat in a branch that was never taken has verified NOTHING
         // — the F6 dead-assertion problem in control-flow form — so the run
@@ -3137,7 +3160,10 @@ function createWindow(): void {
       // F24.3: the other half — an API that returns a TOKEN in the body (rather
       // than a cookie) needs it written into the page's localStorage under the key
       // the app reads. `key = value` per line; the value may use {{saved:token}}.
-      const injectLocalStorage = async (spec: string, tokens: RunTokens): Promise<string | null> => {
+      const injectLocalStorage = async (
+        spec: string,
+        tokens: RunTokens
+      ): Promise<string | null> => {
         const entries: [string, string][] = []
         for (const line of spec.split('\n')) {
           const t = line.trim()
@@ -3303,8 +3329,7 @@ function createWindow(): void {
           if (!frame) return undefined
           const label = (step as { label?: string }).label ?? ''
           const role = (step.candidates ?? []).find((c) => c.role)?.role ?? ''
-          const recordedText =
-            (step.candidates ?? []).find((c) => c.kind === 'text')?.text ?? label
+          const recordedText = (step.candidates ?? []).find((c) => c.kind === 'text')?.text ?? label
           // Position comes from the green baseline (top-frame steps only). Absent
           // for iframe steps or tests that never ran green — heal still works on
           // name/role/text, just without the geometric + visual signals.
@@ -3450,12 +3475,10 @@ function createWindow(): void {
       }[] = []
       // "its 1 step was" / "its 3 steps were" — the verb has to agree too, not
       // just the noun.
-      const stepsWere = (n: number): string =>
-        n === 1 ? 'its 1 step was' : `its ${n} steps were`
+      const stepsWere = (n: number): string => (n === 1 ? 'its 1 step was' : `its ${n} steps were`)
       const stepsNever = (n: number): string =>
         n === 1 ? 'its 1 step never' : `its ${n} steps never`
-      const stepsThe = (n: number): string =>
-        n === 1 ? 'the 1 step' : `the ${n} steps`
+      const stepsThe = (n: number): string => (n === 1 ? 'the 1 step' : `the ${n} steps`)
       // F37 coverage honesty: a branch that never ran verified NOTHING. How
       // many real (non-marker) steps sit in a span, so a note can say how much
       // was skipped — "the check you wrote never ran" is the useful part.
@@ -3587,10 +3610,7 @@ function createWindow(): void {
                   }
                 }
               } else {
-                const skipped = bodyStepCount(
-                  i,
-                  span.elseAt !== undefined ? span.elseAt : span.end
-                )
+                const skipped = bodyStepCount(i, span.elseAt !== undefined ? span.elseAt : span.end)
                 if (skipped > 0) {
                   controlNotes.push(
                     `Step ${i + 1}: the condition was false, so ${stepsThe(skipped)} inside the "if" did not run.`
@@ -4004,14 +4024,14 @@ function createWindow(): void {
             if (cached) {
               if (!cached.pass) throw new Error(cached.error)
             } else {
-            // F19: an AI (natural-language) assertion — judged by the LLM, not
-            // an in-page script. Capture the page's url/title/visible-text PLUS
-            // an image signal (innerText has no evidence of images) AND a
-            // screenshot the LLM can actually look at, so visual claims (images,
-            // layout, colours) can be judged. A FAIL throws like any assertion,
-            // so it flows into the normal failure path (screenshot/explain/report).
-            const ctx = (await currentWC.executeJavaScript(
-              `(() => {
+              // F19: an AI (natural-language) assertion — judged by the LLM, not
+              // an in-page script. Capture the page's url/title/visible-text PLUS
+              // an image signal (innerText has no evidence of images) AND a
+              // screenshot the LLM can actually look at, so visual claims (images,
+              // layout, colours) can be judged. A FAIL throws like any assertion,
+              // so it flows into the normal failure path (screenshot/explain/report).
+              const ctx = (await currentWC.executeJavaScript(
+                `(() => {
                 const imgs = Array.from(document.images || []);
                 // A bounded list of notable elements with their key attributes,
                 // so attribute/role/link claims have evidence (not in text/pixels).
@@ -4039,72 +4059,75 @@ function createWindow(): void {
                   elements
                 };
               })()`,
-              true
-            )) as {
-              url: string
-              title: string
-              text: string
-              images: { count: number; alts: string[] }
-              elements: Array<Record<string, string>>
-            }
-            // FULL-PAGE screenshot so the model can SEE everything, incl. below the
-            // fold. Prefer CDP (captureBeyondViewport); fall back to the viewport
-            // capture, then to text-only. Best-effort; deleted after the call.
-            let shotPath: string | undefined
-            try {
-              let png: Buffer | undefined
-              if (cdpReady) {
-                try {
-                  const res = (await cdp.sendCommand('Page.captureScreenshot', {
-                    format: 'png',
-                    captureBeyondViewport: true
-                  })) as { data?: string }
-                  if (res?.data) png = Buffer.from(res.data, 'base64')
-                } catch {
-                  // CDP capture failed — fall back to the viewport capture below
-                }
+                true
+              )) as {
+                url: string
+                title: string
+                text: string
+                images: { count: number; alts: string[] }
+                elements: Array<Record<string, string>>
               }
-              if (!png) png = (await currentWC.capturePage()).toPNG()
-              const dir = join(libraryDir(), '_nlchecks')
-              await mkdir(dir, { recursive: true })
-              shotPath = join(dir, `nl-${Date.now()}.png`)
-              await writeFile(shotPath, png)
-            } catch {
-              // couldn't capture — evaluate on text + signals alone
-            }
-            // Every consecutive AI check from here shares this exact page state
-            // — nothing runs between them to change it — so they can all be
-            // judged in ONE call. Later steps in the run read their verdict from
-            // the batch instead of paying for another round trip.
-            const runIdx: number[] = [i]
-            for (let k = i + 1; k < list.length; k++) {
-              const nx = list[k] as typeof step
-              if (nx?.type === 'assert' && nx.assertKind === 'nl' && !nx.disabled) runIdx.push(k)
-              else break
-            }
-            // Tell the UI what this pause IS. The leader of a batch carries the
-            // cost for every check in its run, so it sits there for ~10s while
-            // the ones after it return instantly — without saying so, that reads
-            // as a hang on one step and magic on the rest.
-            if (runIdx.length > 1) {
-              mainWindow.webContents.send('recorder:replay-progress', {
-                index: i,
-                status: 'running',
-                nlBatch: { count: runIdx.length }
+              // FULL-PAGE screenshot so the model can SEE everything, incl. below the
+              // fold. Prefer CDP (captureBeyondViewport); fall back to the viewport
+              // capture, then to text-only. Best-effort; deleted after the call.
+              let shotPath: string | undefined
+              try {
+                let png: Buffer | undefined
+                if (cdpReady) {
+                  try {
+                    const res = (await cdp.sendCommand('Page.captureScreenshot', {
+                      format: 'png',
+                      captureBeyondViewport: true
+                    })) as { data?: string }
+                    if (res?.data) png = Buffer.from(res.data, 'base64')
+                  } catch {
+                    // CDP capture failed — fall back to the viewport capture below
+                  }
+                }
+                if (!png) png = (await currentWC.capturePage()).toPNG()
+                const dir = join(libraryDir(), '_nlchecks')
+                await mkdir(dir, { recursive: true })
+                shotPath = join(dir, `nl-${Date.now()}.png`)
+                await writeFile(shotPath, png)
+              } catch {
+                // couldn't capture — evaluate on text + signals alone
+              }
+              // Every consecutive AI check from here shares this exact page state
+              // — nothing runs between them to change it — so they can all be
+              // judged in ONE call. Later steps in the run read their verdict from
+              // the batch instead of paying for another round trip.
+              const runIdx: number[] = [i]
+              for (let k = i + 1; k < list.length; k++) {
+                const nx = list[k] as typeof step
+                if (nx?.type === 'assert' && nx.assertKind === 'nl' && !nx.disabled) runIdx.push(k)
+                else break
+              }
+              // Tell the UI what this pause IS. The leader of a batch carries the
+              // cost for every check in its run, so it sits there for ~10s while
+              // the ones after it return instantly — without saying so, that reads
+              // as a hang on one step and magic on the rest.
+              if (runIdx.length > 1) {
+                mainWindow.webContents.send('recorder:replay-progress', {
+                  index: i,
+                  status: 'running',
+                  nlBatch: { count: runIdx.length }
+                })
+              }
+              const verdicts = await evaluateNlAssertions(
+                runIdx.map((k) => (list[k] as typeof step).value ?? ''),
+                { ...ctx, screenshotPath: shotPath },
+                libraryDir()
+              )
+              if (shotPath) await rm(shotPath, { force: true }).catch(() => {})
+              nlBatch = { indices: new Set(runIdx), verdicts: new Map() }
+              runIdx.forEach((k, n) => {
+                nlBatch!.verdicts.set(
+                  k,
+                  verdicts[n] ?? { pass: false, error: 'AI check produced no verdict.' }
+                )
               })
-            }
-            const verdicts = await evaluateNlAssertions(
-              runIdx.map((k) => (list[k] as typeof step).value ?? ''),
-              { ...ctx, screenshotPath: shotPath },
-              libraryDir()
-            )
-            if (shotPath) await rm(shotPath, { force: true }).catch(() => {})
-            nlBatch = { indices: new Set(runIdx), verdicts: new Map() }
-            runIdx.forEach((k, n) => {
-              nlBatch!.verdicts.set(k, verdicts[n] ?? { pass: false, error: 'AI check produced no verdict.' })
-            })
-            const nl = nlBatch.verdicts.get(i)!
-            if (!nl.pass) throw new Error(nl.error)
+              const nl = nlBatch.verdicts.get(i)!
+              if (!nl.pass) throw new Error(nl.error)
             }
           } else if (step.type === 'api') {
             // F24: fire an HTTP request from the main process (not the embedded
@@ -4513,7 +4536,14 @@ function createWindow(): void {
           // Day 18: the trace's failure shot reuses the ANNOTATED image (red
           // banner + culprit outline) so it shows WHERE it failed. DOM is grabbed
           // clean here (the marks were just erased above).
-          await captureTraceStep(i, 'error', stepStartMs, message, annotatedImage, pendingApi ?? undefined)
+          await captureTraceStep(
+            i,
+            'error',
+            stepStartMs,
+            message,
+            annotatedImage,
+            pendingApi ?? undefined
+          )
           // Day 12: in an interactive replay we PAUSE here instead of ending.
           // The browser is sitting in the exact state where things broke —
           // ideal for retrying or re-picking the element. The loop holds on
@@ -4570,7 +4600,12 @@ function createWindow(): void {
                 bypassedError = message
                 bypassedShot = screenshotPath
               }
-              failures.push({ index: i, error: message, screenshotPath, apiEvidence: pendingApi ?? undefined })
+              failures.push({
+                index: i,
+                error: message,
+                screenshotPath,
+                apiEvidence: pendingApi ?? undefined
+              })
               continue
             }
             if (decision.action === 'skip') {
@@ -4596,7 +4631,12 @@ function createWindow(): void {
           }
           // This step is a real failure (Stop, or a non-interactive run that
           // ends at the first failure) — record it before returning.
-          failures.push({ index: i, error: message, screenshotPath, apiEvidence: pendingApi ?? undefined })
+          failures.push({
+            index: i,
+            error: message,
+            screenshotPath,
+            apiEvidence: pendingApi ?? undefined
+          })
           // F24.4: the run is over, but the cleanup steps below never ran. Do them
           // now — otherwise every failed run leaves its data behind for good.
           await runTeardowns(i)
@@ -4680,7 +4720,10 @@ function createWindow(): void {
         captureHar?: boolean
       }
     ) => {
-      const saved = await saveTest({ ...input, harLog: input.captureHar ? har.captured() : undefined })
+      const saved = await saveTest({
+        ...input,
+        harLog: input.captureHar ? har.captured() : undefined
+      })
       // QF-003: the audit asked for secrets to be collected when tests AND
       // STEPS are deleted. Deleting a step and saving can orphan a password —
       // not at once (the previous version, kept for rollback, still holds its
@@ -4779,15 +4822,17 @@ function createWindow(): void {
   // Text OVERFLOW (a leaf whose content is wider than its box → clipped in this
   // locale), the layout DIRECTION (rtl?), and the visible strings (so the renderer
   // can flag strings that DIDN'T change from the base locale = likely untranslated).
-  ipcMain.handle('i18n:inspect', async (): Promise<{
-    dir: string
-    overflow: string[]
-    overflowCount: number
-    texts: string[]
-  }> => {
-    try {
-      return (await activeWC().executeJavaScript(
-        `(() => {
+  ipcMain.handle(
+    'i18n:inspect',
+    async (): Promise<{
+      dir: string
+      overflow: string[]
+      overflowCount: number
+      texts: string[]
+    }> => {
+      try {
+        return (await activeWC().executeJavaScript(
+          `(() => {
           const dir = document.documentElement.getAttribute('dir')
             || getComputedStyle(document.body).direction || 'ltr';
           const overflow = [];
@@ -4813,12 +4858,13 @@ function createWindow(): void {
             .map(s => s.trim()).filter(Boolean).slice(0, 400);
           return { dir, overflow: overflow.slice(0, 15), overflowCount: overflow.length, texts };
         })()`,
-        true
-      )) as { dir: string; overflow: string[]; overflowCount: number; texts: string[] }
-    } catch {
-      return { dir: 'ltr', overflow: [], overflowCount: 0, texts: [] }
+          true
+        )) as { dir: string; overflow: string[]; overflowCount: number; texts: string[] }
+      } catch {
+        return { dir: 'ltr', overflow: [], overflowCount: 0, texts: [] }
+      }
     }
-  })
+  )
 
   // === F23: coverage crawl ===========================================
   // Breadth-first walk of the app from the CURRENT page, driving the embedded
@@ -5043,9 +5089,7 @@ function createWindow(): void {
         id: s.id,
         name: s.name,
         code: s.code,
-        sessionPath: s.sessionFile
-          ? join(libraryDir(), '_sessions', s.sessionFile)
-          : undefined,
+        sessionPath: s.sessionFile ? join(libraryDir(), '_sessions', s.sessionFile) : undefined,
         fixturePaths: s.fixturePaths?.length ? s.fixturePaths : undefined,
         // A HAR is stored by bare filename in the library's _hars/, like a session.
         harPath: s.harFile ? join(libraryDir(), '_hars', s.harFile) : undefined
@@ -5113,25 +5157,22 @@ function createWindow(): void {
   ipcMain.handle('secrets:resolve', (_event, refs: string[]) => getSecrets(refs ?? []))
 
   // === F40: shareable bundles =======================================
-  ipcMain.handle(
-    'bundle:export',
-    async (_event, tests: string[], includeAcs: boolean) => {
-      const picked = await dialog.showOpenDialog(mainWindow, {
-        title: 'Choose a folder for the bundle',
-        defaultPath: await lastFolder('bundle-export'),
-        properties: ['openDirectory', 'createDirectory'],
-        buttonLabel: 'Export here'
-      })
-      if (picked.canceled || !picked.filePaths[0]) return { ok: false, error: 'cancelled' }
-      await rememberFolder('bundle-export', picked.filePaths[0], 'folder')
-      // A named subfolder, so exporting into an existing repo folder can't
-      // scatter bundle files among the user's own.
-      const stamp = new Date().toISOString().slice(0, 10)
-      const dest = join(picked.filePaths[0], `qaflow-bundle-${stamp}`)
-      const acs = includeAcs ? await loadAcs() : null
-      return exportBundle(libraryDir(), dest, tests, acs)
-    }
-  )
+  ipcMain.handle('bundle:export', async (_event, tests: string[], includeAcs: boolean) => {
+    const picked = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a folder for the bundle',
+      defaultPath: await lastFolder('bundle-export'),
+      properties: ['openDirectory', 'createDirectory'],
+      buttonLabel: 'Export here'
+    })
+    if (picked.canceled || !picked.filePaths[0]) return { ok: false, error: 'cancelled' }
+    await rememberFolder('bundle-export', picked.filePaths[0], 'folder')
+    // A named subfolder, so exporting into an existing repo folder can't
+    // scatter bundle files among the user's own.
+    const stamp = new Date().toISOString().slice(0, 10)
+    const dest = join(picked.filePaths[0], `qaflow-bundle-${stamp}`)
+    const acs = includeAcs ? await loadAcs() : null
+    return exportBundle(libraryDir(), dest, tests, acs)
+  })
 
   // Inspect first, apply second: the renderer shows collisions and gets a
   // decision per test BEFORE anything is written.
@@ -5148,30 +5189,27 @@ function createWindow(): void {
     return { ...inspection, bundleDir: picked.filePaths[0] }
   })
 
-  ipcMain.handle(
-    'bundle:import',
-    async (_event, bundleDir: string, plan: ImportPlanEntry[]) => {
-      const res = await importBundle(bundleDir, libraryDir(), plan)
-      // Acceptance criteria are additive — a shared AC list should ADD to what
-      // you already track, never replace it.
-      const acPath = join(bundleDir, 'acceptance-criteria.txt')
-      if (existsSync(acPath)) {
-        try {
-          const incoming = (await readFile(acPath, 'utf-8')).split(/\r?\n/)
-          const current = await loadAcs()
-          const lines = current ? current.split(/\r?\n/) : []
-          for (const a of incoming) {
-            const trimmed = a.trim()
-            if (trimmed && !lines.some((l) => l.trim() === trimmed)) lines.push(a)
-          }
-          await saveAcs(lines.join('\n'))
-        } catch {
-          // a malformed AC file must not fail the whole import
+  ipcMain.handle('bundle:import', async (_event, bundleDir: string, plan: ImportPlanEntry[]) => {
+    const res = await importBundle(bundleDir, libraryDir(), plan)
+    // Acceptance criteria are additive — a shared AC list should ADD to what
+    // you already track, never replace it.
+    const acPath = join(bundleDir, 'acceptance-criteria.txt')
+    if (existsSync(acPath)) {
+      try {
+        const incoming = (await readFile(acPath, 'utf-8')).split(/\r?\n/)
+        const current = await loadAcs()
+        const lines = current ? current.split(/\r?\n/) : []
+        for (const a of incoming) {
+          const trimmed = a.trim()
+          if (trimmed && !lines.some((l) => l.trim() === trimmed)) lines.push(a)
         }
+        await saveAcs(lines.join('\n'))
+      } catch {
+        // a malformed AC file must not fail the whole import
       }
-      return res
     }
-  )
+    return res
+  })
 
   ipcMain.handle('bundle:reveal', async (_event, path: string) => {
     // OPEN the bundle, don't reveal it. showItemInFolder drops you in the
@@ -5224,9 +5262,15 @@ function createWindow(): void {
   // — a bad/unreachable webhook must never break the run, so errors are swallowed.
   ipcMain.handle(
     'notify:webhook',
-    async (_event, url: string, title: string, body: string): Promise<{ ok: boolean; error?: string }> => {
+    async (
+      _event,
+      url: string,
+      title: string,
+      body: string
+    ): Promise<{ ok: boolean; error?: string }> => {
       const hook = (url || '').trim()
-      if (!/^https:\/\//.test(hook)) return { ok: false, error: 'Webhook URL must start with https://' }
+      if (!/^https:\/\//.test(hook))
+        return { ok: false, error: 'Webhook URL must start with https://' }
       try {
         const res = await fetch(hook, {
           method: 'POST',
@@ -5743,7 +5787,13 @@ function createWindow(): void {
     })
   ipcMain.handle(
     'repo:pickDiff',
-    async (): Promise<{ ok: boolean; path: string; diff: string; summary: string; note: string } | null> => {
+    async (): Promise<{
+      ok: boolean
+      path: string
+      diff: string
+      summary: string
+      note: string
+    } | null> => {
       const picked = await dialog.showOpenDialog(mainWindow, {
         title: 'Choose the app’s local git repo to draft from',
         defaultPath: await lastFolder('git-repo'),
@@ -5755,7 +5805,13 @@ function createWindow(): void {
       try {
         await gitText(dir, ['rev-parse', '--is-inside-work-tree'])
       } catch {
-        return { ok: false, path: dir, diff: '', summary: '', note: 'That folder isn’t a git repo (or git isn’t installed).' }
+        return {
+          ok: false,
+          path: dir,
+          diff: '',
+          summary: '',
+          note: 'That folder isn’t a git repo (or git isn’t installed).'
+        }
       }
       // Uncommitted work first; fall back to the last commit if the tree is clean.
       let diff = ''
@@ -5775,11 +5831,24 @@ function createWindow(): void {
         }
       }
       if (!diff) {
-        return { ok: false, path: dir, diff: '', summary: '', note: 'No changes found (clean tree, no prior commit to diff).' }
+        return {
+          ok: false,
+          path: dir,
+          diff: '',
+          summary: '',
+          note: 'No changes found (clean tree, no prior commit to diff).'
+        }
       }
       let stat = ''
       try {
-        stat = (await gitText(dir, scope === 'the last commit' ? ['diff', '--stat', 'HEAD~1', 'HEAD'] : ['diff', '--stat', 'HEAD'])).trim()
+        stat = (
+          await gitText(
+            dir,
+            scope === 'the last commit'
+              ? ['diff', '--stat', 'HEAD~1', 'HEAD']
+              : ['diff', '--stat', 'HEAD']
+          )
+        ).trim()
       } catch {
         /* stat is optional */
       }
@@ -5834,14 +5903,18 @@ function createWindow(): void {
       if (!/^https?:\/\//.test(base)) {
         return { ok: false, error: 'Jira site URL must start with https://' }
       }
-      if (/^http:\/\//.test(base) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(base)) {
+      if (
+        /^http:\/\//.test(base) &&
+        !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(base)
+      ) {
         return {
           ok: false,
           error:
             'Refusing to send your API token over plain http — that would put it on the network in readable form. Use https:// for the Jira site.'
         }
       }
-      if (!cfg.email || !cfg.apiToken) return { ok: false, error: 'Email and API token are required.' }
+      if (!cfg.email || !cfg.apiToken)
+        return { ok: false, error: 'Email and API token are required.' }
       if (!cfg.projectKey) return { ok: false, error: 'A project key (e.g. QA) is required.' }
       try {
         const auth = Buffer.from(`${cfg.email}:${cfg.apiToken}`).toString('base64')
@@ -6003,7 +6076,6 @@ function createWindow(): void {
     }
   )
 }
-
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.qatestflow.recorder')

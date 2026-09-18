@@ -136,9 +136,16 @@ export const edgeCtxOf = (run: {
 
 // How the verdicts in this run were reached — shown so a verdict is never a
 // black box, and so an INFERRED one is visibly weaker than an asserted one.
-export const edgeBasisNote = (ctx: { hasAssertion: boolean; successUrl: string; startUrl: string; baselineUrl: string; baselineOk: boolean }): string => {
+export const edgeBasisNote = (ctx: {
+  hasAssertion: boolean
+  successUrl: string
+  startUrl: string
+  baselineUrl: string
+  baselineOk: boolean
+}): string => {
   if (!ctx.baselineOk) return ''
-  if (ctx.successUrl.trim()) return `Judged by your rule: success = URL contains “${ctx.successUrl.trim()}”.`
+  if (ctx.successUrl.trim())
+    return `Judged by your rule: success = URL contains “${ctx.successUrl.trim()}”.`
   if (ctx.hasAssertion) return 'Judged by the test’s own ✓ check.'
   const base = normEdgeUrl(ctx.baselineUrl)
   const start = normEdgeUrl(ctx.startUrl)
@@ -166,7 +173,9 @@ export const buildEdgeReport = (edgeRun: EdgeRunLike | null, testName: string): 
   // Only claim accepted/rejected counts when they mean something. Printing
   // "0 rejected" beside "14 undetermined" reads as a finding; it isn't one.
   if (undetermined === variants.length) {
-    lines.push(`- ? Undetermined: ${undetermined} — no verdict is possible for this run (see below).`)
+    lines.push(
+      `- ? Undetermined: ${undetermined} — no verdict is possible for this run (see below).`
+    )
   } else {
     lines.push(`- ⚠ Accepted (app took the bad input — review): ${accepted}`)
     lines.push(`- ✓ Rejected (handled): ${rejected}`)
@@ -176,9 +185,14 @@ export const buildEdgeReport = (edgeRun: EdgeRunLike | null, testName: string): 
   // weaker than an asserted one and the reader has to be able to see which.
   const note = edgeBasisNote(ctx)
   if (note) lines.push(`- ${note}`)
-  if (!baselineOk) lines.push(`- ⚠ Baseline (happy path) FAILED — fix the test first, then re-run; nothing here can be judged until the valid inputs pass.`)
+  if (!baselineOk)
+    lines.push(
+      `- ⚠ Baseline (happy path) FAILED — fix the test first, then re-run; nothing here can be judged until the valid inputs pass.`
+    )
   if (undetermined === variants.length && baselineOk)
-    lines.push(`- ⚠ No success check in this test AND the valid-input baseline didn't move the page, so there is nothing to compare against. Add an assertion, or set a success rule in the 🧨 dialog, and re-run.`)
+    lines.push(
+      `- ⚠ No success check in this test AND the valid-input baseline didn't move the page, so there is nothing to compare against. Add an assertion, or set a success rule in the 🧨 dialog, and re-run.`
+    )
   lines.push('')
   for (const r of variants) {
     const v = edgeVerdict(r, ctx).verdict
@@ -190,7 +204,9 @@ export const buildEdgeReport = (edgeRun: EdgeRunLike | null, testName: string): 
           : baselineOk
             ? '? undetermined'
             : '· (baseline broken)'
-    lines.push(`- ${mark} — **${r.case.fieldLabel}** = ${r.case.edgeLabel}: \`${r.case.value.slice(0, 60) || '(empty)'}\``)
+    lines.push(
+      `- ${mark} — **${r.case.fieldLabel}** = ${r.case.edgeLabel}: \`${r.case.value.slice(0, 60) || '(empty)'}\``
+    )
     lines.push(`  - ${r.case.hint}`)
   }
   return lines.join('\n')

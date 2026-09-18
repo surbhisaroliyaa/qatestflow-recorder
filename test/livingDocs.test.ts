@@ -15,7 +15,12 @@ const entry = (
   ({ name, suite: 'S', flat: steps, meta: { tags } }) as never
 
 const click = { type: 'click', selector: "getByRole('button')" }
-const assertVisible = { type: 'assert', assertKind: 'visible', selector: "getByText('x')", label: 'x' }
+const assertVisible = {
+  type: 'assert',
+  assertKind: 'visible',
+  selector: "getByText('x')",
+  label: 'x'
+}
 
 describe('generateSuiteDoc — the "verifies nothing" warning', () => {
   it('flags a test that performs actions but asserts nothing', () => {

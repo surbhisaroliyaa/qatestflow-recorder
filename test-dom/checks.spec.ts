@@ -19,7 +19,7 @@ test.describe('count vs shadow DOM — do the finder and the counter agree?', ()
     await page.setContent('<div id="host"></div>')
     await page.evaluate(
       "const r = document.getElementById('host').attachShadow({ mode: 'open' });" +
-        "r.innerHTML = '<li class=\"row\">a</li><li class=\"row\">b</li><li class=\"row\">c</li>';"
+        'r.innerHTML = \'<li class="row">a</li><li class="row">b</li><li class="row">c</li>\';'
     )
     // The finder pierces shadow roots (deepQueryAll). If the counter doesn't,
     // a group check on the same element reports 0 while the click works.
@@ -34,8 +34,9 @@ test.describe('count vs shadow DOM — do the finder and the counter agree?', ()
 test.describe('page-level checks', () => {
   test('url-contains passes and fails with the actual url', async ({ page }) => {
     await page.goto('https://example.com/')
-    expect((await run(page, s({ type: 'assert', assertKind: 'url-contains', value: 'example' }))).ok)
-      .toBe(true)
+    expect(
+      (await run(page, s({ type: 'assert', assertKind: 'url-contains', value: 'example' }))).ok
+    ).toBe(true)
     const bad = await run(page, s({ type: 'assert', assertKind: 'url-contains', value: '/nope' }))
     expect(bad.ok).toBe(false)
     expect(bad.error).toContain('example.com')

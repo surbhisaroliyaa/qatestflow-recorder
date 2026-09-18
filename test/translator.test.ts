@@ -299,8 +299,9 @@ describe('the model may pick an element, never invent one', () => {
   })
 
   it('finds the array inside surrounding prose', () => {
-    expect(parseAiActions('Sure! Here you go:\n[{"action":"click","element":0}]\nHope that helps', 1))
-      .toHaveLength(1)
+    expect(
+      parseAiActions('Sure! Here you go:\n[{"action":"click","element":0}]\nHope that helps', 1)
+    ).toHaveLength(1)
   })
 
   it('returns nothing rather than throwing on unusable output', () => {

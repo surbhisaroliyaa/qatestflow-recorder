@@ -164,7 +164,8 @@ export function missingEnvMessage(
   if (envs.length) {
     const names = envs.map((n) => `{{env:${n}}}`).join(', ')
     const plural = envs.length === 1 ? '' : 's'
-    const hint = opts.fixHint ?? 'Add the value to the environment this run uses, or pick a different one.'
+    const hint =
+      opts.fixHint ?? 'Add the value to the environment this run uses, or pick a different one.'
     const why = opts.pinnedButMissing
       ? `This run is pinned to an environment that no longer exists, so none of its variables were applied. ${hint}`
       : hint

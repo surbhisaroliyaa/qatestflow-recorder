@@ -72,7 +72,10 @@ test.beforeAll(async () => {
     throw new Error('out/renderer is missing — run `npm run build` before `npm run test:dom`.')
   }
   server = createServer((req, res) => {
-    const rel = normalize(decodeURIComponent((req.url ?? '/').split('?')[0])).replace(/^([/\\])+/, '')
+    const rel = normalize(decodeURIComponent((req.url ?? '/').split('?')[0])).replace(
+      /^([/\\])+/,
+      ''
+    )
     const file = join(RENDERER, rel || 'index.html')
     if (!file.startsWith(RENDERER) || !existsSync(file)) {
       res.writeHead(404)

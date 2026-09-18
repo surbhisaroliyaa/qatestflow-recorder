@@ -339,7 +339,6 @@ test.describe('the exported spec passes when Playwright actually runs it', () =>
     expect(output, `expected all ${written.length} generated specs to run`).toContain(
       `${written.length} passed`
     )
-
   })
 
   // A gate nobody has watched fail is decoration. This runs the checkbox model
@@ -373,7 +372,11 @@ test.describe('the exported spec passes when Playwright actually runs it', () =>
   const matrix = (
     env: Record<string, string>
   ): {
-    flows: { name: string; steps: unknown[]; data: { columns: string[]; rows: Record<string, string>[] } }[]
+    flows: {
+      name: string
+      steps: unknown[]
+      data: { columns: string[]; rows: Record<string, string>[] }
+    }[]
     env: Record<string, string>
   } => ({
     flows: [
@@ -381,8 +384,20 @@ test.describe('the exported spec passes when Playwright actually runs it', () =>
         name: 'protected-matrix',
         steps: [
           s({ type: 'navigate', url: base }),
-          s({ type: 'type', selector: 'locator("#password")', value: '{{password}}', label: 'Password', secret: true }),
-          s({ type: 'assert', assertKind: 'value', selector: 'locator("#password")', value: '{{expected}}', label: 'Password' })
+          s({
+            type: 'type',
+            selector: 'locator("#password")',
+            value: '{{password}}',
+            label: 'Password',
+            secret: true
+          }),
+          s({
+            type: 'assert',
+            assertKind: 'value',
+            selector: 'locator("#password")',
+            value: '{{expected}}',
+            label: 'Password'
+          })
         ],
         data: {
           columns: ['password', 'expected'],

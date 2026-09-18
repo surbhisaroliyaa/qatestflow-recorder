@@ -7,13 +7,17 @@
 // hand-typed number that nobody re-typed. The counts now live between
 //   <!-- counts:start --> … <!-- counts:end -->
 // markers, are computed from the real suites, and CI refuses a stale doc.
+// The block sits inside <!-- prettier-ignore-start/end --> in each doc:
+// prettier rewraps the one long generated line, this tool writes it back, and
+// the two checks in CI would each fail on the other's output forever.
 import { execSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const run = (cmd) => execSync(cmd, { cwd: root, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+const run = (cmd) =>
+  execSync(cmd, { cwd: root, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
 
 // Unit tests: vitest's JSON report counts every test that exists.
 const unitJson = JSON.parse(run('npx vitest run --reporter=json --silent'))
@@ -52,4 +56,6 @@ if (check && stale.length) {
   console.error(`Stale test counts in: ${stale.join(', ')}. Run: node tools/doc-counts.mjs`)
   process.exit(1)
 }
-console.log(`unit=${unit} (${unitFiles} files)  dom=${dom} (${domFiles} files)  ${check ? 'docs are current' : 'docs updated'}`)
+console.log(
+  `unit=${unit} (${unitFiles} files)  dom=${dom} (${domFiles} files)  ${check ? 'docs are current' : 'docs updated'}`
+)

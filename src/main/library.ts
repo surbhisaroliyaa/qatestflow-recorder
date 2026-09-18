@@ -711,7 +711,9 @@ export async function saveBlock(input: { name: string; steps: unknown[] }): Prom
     createdAt: previous?.createdAt ?? now,
     updatedAt: now,
     // A block made from a login would otherwise carry its password in plaintext.
-    steps: (await stripSecrets(input.steps, { refsById: refsByStepId(previous?.steps) })) as unknown[]
+    steps: (await stripSecrets(input.steps, {
+      refsById: refsByStepId(previous?.steps)
+    })) as unknown[]
   }
   await writeFile(join(blocksDir(), fileName), JSON.stringify(block, null, 2), 'utf-8')
   return { fileName, name: block.name, stepCount: block.steps.length, updatedAt: block.updatedAt }

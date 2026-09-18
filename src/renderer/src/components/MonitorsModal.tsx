@@ -82,8 +82,8 @@ export function MonitorsModal({
           <p className="api-hint">
             A monitor re-runs a saved test on a schedule (headless) and pops a desktop alert when it
             fails — catching regressions between your manual runs.{' '}
-            <strong>It only runs while this app is open</strong> (there’s no background service), and
-            it needs Playwright installed (same as cross-browser).
+            <strong>It only runs while this app is open</strong> (there’s no background service),
+            and it needs Playwright installed (same as cross-browser).
           </p>
           {monRunningId && (
             <p className="api-hint" style={{ color: '#7fd39a' }}>
@@ -98,9 +98,9 @@ export function MonitorsModal({
               of quietly costing evidence. */}
           {batchRunning && (
             <p className="api-hint" style={{ color: '#e0b56b' }}>
-              ⚠ A batch is running. The page is hidden while this dialog is open — the run
-              continues normally, but a step that fails right now would save an empty failure
-              screenshot. Close this to bring the page back.
+              ⚠ A batch is running. The page is hidden while this dialog is open — the run continues
+              normally, but a step that fails right now would save an empty failure screenshot.
+              Close this to bring the page back.
             </p>
           )}
           {/* F32b: a failing run retries up to 3× before alerting (kills transient
@@ -157,7 +157,10 @@ export function MonitorsModal({
                 </option>
               ))}
             </select>
-            <label className="mon-alert-toggle" title="Fire a desktop notification when a run fails">
+            <label
+              className="mon-alert-toggle"
+              title="Fire a desktop notification when a run fails"
+            >
               <input
                 type="checkbox"
                 checked={monAlert}
@@ -207,158 +210,163 @@ export function MonitorsModal({
                 </span>
               </div>
               <ul className="mon-list">
-              {monitors.map((m) => {
-                const last = m.runs[0]
-                // One obvious status per monitor, so it's never a mystery whether
-                // it's running, healthy, broken, or off.
-                const running = monRunningId === m.id
-                const status = running
-                  ? { cls: 'running', label: '⏳ Running…' }
-                  : !m.enabled
-                    ? { cls: 'paused', label: '⏸ Paused' }
-                    : !last
-                      ? { cls: 'new', label: '• Never run' }
-                      : last.status === 'passed'
-                        ? { cls: 'pass', label: '✓ Passing' }
-                        : last.status === 'failed'
-                          ? { cls: 'fail', label: '✗ Failing' }
-                          : { cls: 'err', label: '⚠ Can’t run' }
-                // A monitor can outlive the environment it was pinned to. That used
-                // to be near-silent — grey text reading "a deleted env" — while the
-                // real consequence was severe: no pinned env means NO variables are
-                // applied at all (see the `pinned` lookup in doMonitorRun), so a
-                // test whose data rows use {{env:…}} logs in with an unresolved
-                // token and fails on whatever assertion happens to come first.
-                const envMissing = !!m.envId && !envState.environments.some((e) => e.id === m.envId)
-                return (
-                  <li key={m.id} className={`mon-card ${status.cls}`}>
-                    <div className="mon-card-head">
-                      <span className={`mon-status ${status.cls}`}>{status.label}</span>
-                      <span className="mon-title">{m.name}</span>
-                      <div className="mon-actions">
-                        <button
-                          className="mon-btn"
-                          onClick={async () =>
-                            setMonitors(await window.api.monitors.save({ ...m, enabled: !m.enabled }))
-                          }
-                          title={m.enabled ? 'Pause this monitor' : 'Resume this monitor'}
-                        >
-                          {m.enabled ? '⏸ pause' : '▶ resume'}
-                        </button>
-                        <button
-                          className="mon-btn primary"
-                          disabled={monRunningId !== null}
-                          title={
-                            monRunningId && !running
-                              ? 'Another monitor is running — one headless run at a time'
-                              : 'Run this test headless right now (~10–30s)'
-                          }
-                          onClick={() => runMonitorNow(m)}
-                        >
-                          {running ? '⏳ running…' : '▶ run now'}
-                        </button>
-                        <button
-                          className="mon-btn"
-                          onClick={() => setMonHistoryFor(monHistoryFor === m.id ? null : m.id)}
-                        >
-                          {monHistoryFor === m.id ? 'hide history' : `history (${m.runs.length})`}
-                        </button>
-                        <button
-                          className="mon-btn danger"
-                          onClick={async () => setMonitors(await window.api.monitors.delete(m.id))}
-                        >
-                          remove
-                        </button>
+                {monitors.map((m) => {
+                  const last = m.runs[0]
+                  // One obvious status per monitor, so it's never a mystery whether
+                  // it's running, healthy, broken, or off.
+                  const running = monRunningId === m.id
+                  const status = running
+                    ? { cls: 'running', label: '⏳ Running…' }
+                    : !m.enabled
+                      ? { cls: 'paused', label: '⏸ Paused' }
+                      : !last
+                        ? { cls: 'new', label: '• Never run' }
+                        : last.status === 'passed'
+                          ? { cls: 'pass', label: '✓ Passing' }
+                          : last.status === 'failed'
+                            ? { cls: 'fail', label: '✗ Failing' }
+                            : { cls: 'err', label: '⚠ Can’t run' }
+                  // A monitor can outlive the environment it was pinned to. That used
+                  // to be near-silent — grey text reading "a deleted env" — while the
+                  // real consequence was severe: no pinned env means NO variables are
+                  // applied at all (see the `pinned` lookup in doMonitorRun), so a
+                  // test whose data rows use {{env:…}} logs in with an unresolved
+                  // token and fails on whatever assertion happens to come first.
+                  const envMissing =
+                    !!m.envId && !envState.environments.some((e) => e.id === m.envId)
+                  return (
+                    <li key={m.id} className={`mon-card ${status.cls}`}>
+                      <div className="mon-card-head">
+                        <span className={`mon-status ${status.cls}`}>{status.label}</span>
+                        <span className="mon-title">{m.name}</span>
+                        <div className="mon-actions">
+                          <button
+                            className="mon-btn"
+                            onClick={async () =>
+                              setMonitors(
+                                await window.api.monitors.save({ ...m, enabled: !m.enabled })
+                              )
+                            }
+                            title={m.enabled ? 'Pause this monitor' : 'Resume this monitor'}
+                          >
+                            {m.enabled ? '⏸ pause' : '▶ resume'}
+                          </button>
+                          <button
+                            className="mon-btn primary"
+                            disabled={monRunningId !== null}
+                            title={
+                              monRunningId && !running
+                                ? 'Another monitor is running — one headless run at a time'
+                                : 'Run this test headless right now (~10–30s)'
+                            }
+                            onClick={() => runMonitorNow(m)}
+                          >
+                            {running ? '⏳ running…' : '▶ run now'}
+                          </button>
+                          <button
+                            className="mon-btn"
+                            onClick={() => setMonHistoryFor(monHistoryFor === m.id ? null : m.id)}
+                          >
+                            {monHistoryFor === m.id ? 'hide history' : `history (${m.runs.length})`}
+                          </button>
+                          <button
+                            className="mon-btn danger"
+                            onClick={async () =>
+                              setMonitors(await window.api.monitors.delete(m.id))
+                            }
+                          >
+                            remove
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                    <div className="mon-meta">
-                      {/* The schedule is EDITABLE here. It used to be plain text,
+                      <div className="mon-meta">
+                        {/* The schedule is EDITABLE here. It used to be plain text,
                           set once when the monitor was created and never again —
                           so changing a monitor's cadence meant deleting it and
                           rebuilding it, which threw away its whole run history.
                           Takes effect immediately: the scheduler computes "due"
                           as lastRunAt + intervalMin, so shortening the interval
                           on a monitor that ran a while ago makes it due at once. */}
-                      Runs{' '}
-                      <select
-                        className="mon-interval"
-                        value={m.intervalMin}
-                        title="How often this monitor re-runs (applies from its last run)"
-                        onChange={async (e) =>
-                          setMonitors(
-                            await window.api.monitors.save({
-                              ...m,
-                              intervalMin: Number(e.target.value)
-                            })
-                          )
-                        }
-                      >
-                        <option value={5}>every 5 min</option>
-                        <option value={15}>every 15 min</option>
-                        <option value={30}>every 30 min</option>
-                        <option value={60}>every hour</option>
-                        <option value={240}>every 4 hours</option>
-                      </select>{' '}
-                      · against{' '}
-                      {/* Also editable now. Pinning was set once at creation, so a
+                        Runs{' '}
+                        <select
+                          className="mon-interval"
+                          value={m.intervalMin}
+                          title="How often this monitor re-runs (applies from its last run)"
+                          onChange={async (e) =>
+                            setMonitors(
+                              await window.api.monitors.save({
+                                ...m,
+                                intervalMin: Number(e.target.value)
+                              })
+                            )
+                          }
+                        >
+                          <option value={5}>every 5 min</option>
+                          <option value={15}>every 15 min</option>
+                          <option value={30}>every 30 min</option>
+                          <option value={60}>every hour</option>
+                          <option value={240}>every 4 hours</option>
+                        </select>{' '}
+                        · against{' '}
+                        {/* Also editable now. Pinning was set once at creation, so a
                           monitor pointing at a deleted (or simply wrong) environment
                           could only be corrected by deleting and rebuilding it —
                           throwing away its whole run history to change one field. */}
-                      <select
-                        className={`mon-interval${envMissing ? ' missing' : ''}`}
-                        value={envMissing ? '__missing' : (m.envId ?? '')}
-                        title="Which environment's baseURL + variables this monitor runs against"
-                        onChange={async (e) =>
-                          setMonitors(
-                            await window.api.monitors.save({
-                              ...m,
-                              envId: e.target.value === '' ? null : e.target.value
-                            })
-                          )
-                        }
-                      >
-                        <option value="">recorded URLs</option>
-                        {envState.environments.map((e) => (
-                          <option key={e.id} value={e.id}>
-                            {e.name}
-                          </option>
-                        ))}
-                        {/* Kept selectable-looking so the dropdown shows the truth
+                        <select
+                          className={`mon-interval${envMissing ? ' missing' : ''}`}
+                          value={envMissing ? '__missing' : (m.envId ?? '')}
+                          title="Which environment's baseURL + variables this monitor runs against"
+                          onChange={async (e) =>
+                            setMonitors(
+                              await window.api.monitors.save({
+                                ...m,
+                                envId: e.target.value === '' ? null : e.target.value
+                              })
+                            )
+                          }
+                        >
+                          <option value="">recorded URLs</option>
+                          {envState.environments.map((e) => (
+                            <option key={e.id} value={e.id}>
+                              {e.name}
+                            </option>
+                          ))}
+                          {/* Kept selectable-looking so the dropdown shows the truth
                             rather than silently reading as "recorded URLs", which is
                             what it actually falls back to at run time. */}
-                        {envMissing && (
-                          <option value="__missing" disabled>
-                            ⚠ deleted environment
-                          </option>
-                        )}
-                      </select>
-                      {m.alertOnFail ? ' · 🔔 alerts on failure' : ''} ·{' '}
-                      {last
-                        ? `last run ${last.status} at ${new Date(last.at).toLocaleTimeString()}`
-                        : 'not run yet'}
-                    </div>
-                    {monHistoryFor === m.id && (
-                      <div className="mon-history">
-                        {m.runs.length === 0 ? (
-                          <div className="mon-history-empty">No runs yet — hit “run now”.</div>
-                        ) : (
-                          m.runs.map((r, i) => (
-                            <div key={i} className={`mon-history-row ${r.status}`}>
-                              <span className="mon-history-mark">
-                                {r.status === 'passed' ? '✓' : r.status === 'failed' ? '✗' : '⚠'}
-                              </span>
-                              <span className="mon-history-when">
-                                {new Date(r.at).toLocaleString()}
-                              </span>
-                              <span className="mon-history-detail">{r.detail || 'passed'}</span>
-                            </div>
-                          ))
-                        )}
+                          {envMissing && (
+                            <option value="__missing" disabled>
+                              ⚠ deleted environment
+                            </option>
+                          )}
+                        </select>
+                        {m.alertOnFail ? ' · 🔔 alerts on failure' : ''} ·{' '}
+                        {last
+                          ? `last run ${last.status} at ${new Date(last.at).toLocaleTimeString()}`
+                          : 'not run yet'}
                       </div>
-                    )}
-                  </li>
-                )
-              })}
+                      {monHistoryFor === m.id && (
+                        <div className="mon-history">
+                          {m.runs.length === 0 ? (
+                            <div className="mon-history-empty">No runs yet — hit “run now”.</div>
+                          ) : (
+                            m.runs.map((r, i) => (
+                              <div key={i} className={`mon-history-row ${r.status}`}>
+                                <span className="mon-history-mark">
+                                  {r.status === 'passed' ? '✓' : r.status === 'failed' ? '✗' : '⚠'}
+                                </span>
+                                <span className="mon-history-when">
+                                  {new Date(r.at).toLocaleString()}
+                                </span>
+                                <span className="mon-history-detail">{r.detail || 'passed'}</span>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  )
+                })}
               </ul>
             </>
           )}

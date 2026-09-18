@@ -43,7 +43,7 @@ export function DraftModal({
   setDraftOpen,
   setDraftStory
 }: DraftModalProps): React.JSX.Element | null {
-  if (!(draftOpen)) return null
+  if (!draftOpen) return null
   return (
     <div className="modal-backdrop" onClick={() => !draftBusy && setDraftOpen(false)}>
       <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
@@ -97,7 +97,8 @@ export function DraftModal({
             The AI turns your story into a draft: <strong>navigations</strong> and{' '}
             <strong>✅ checks</strong> run for real; <strong>⏸ actions</strong> are plain-English
             placeholders you ground by recording over them (there’s no live page to read selectors
-            from yet). Optionally point at the app’s local git repo to steer the draft from its diff.
+            from yet). Optionally point at the app’s local git repo to steer the draft from its
+            diff.
           </p>
           {draftNote && (
             <p
@@ -154,7 +155,11 @@ export function DraftModal({
               <button className="modal-btn" onClick={handleGenerateDraft} disabled={draftBusy}>
                 ↻ Regenerate
               </button>
-              <button className="modal-btn primary" onClick={handleInsertDraft} disabled={draftBusy}>
+              <button
+                className="modal-btn primary"
+                onClick={handleInsertDraft}
+                disabled={draftBusy}
+              >
                 ＋ Insert {draftResult.steps.length} steps
               </button>
             </>

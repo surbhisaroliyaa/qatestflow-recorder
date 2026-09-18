@@ -47,8 +47,7 @@ export function resolveDraftUrl(text: string, baseUrl?: string): { url: string; 
   //    the form" starts with "/" but is a SENTENCE, and taking it verbatim is
   //    how prose used to end up in the URL. Requiring a word boundary before
   //    the "/" also stops us grabbing the slash inside things like "and/or".
-  const path =
-    t.startsWith('/') && !/\s/.test(t) ? t : (t.match(/(?:^|\s)(\/[^\s)]+)/)?.[1] ?? '')
+  const path = t.startsWith('/') && !/\s/.test(t) ? t : (t.match(/(?:^|\s)(\/[^\s)]+)/)?.[1] ?? '')
   if (baseUrl) {
     try {
       const base = new URL(baseUrl)
@@ -60,9 +59,7 @@ export function resolveDraftUrl(text: string, baseUrl?: string): { url: string; 
       //    prose with no path at all -> the current site's root. Both are
       //    GUESSES: the story never actually named a target.
       const fallback =
-        t && !t.includes(' ')
-          ? base.origin + '/' + t.replace(/^\/+|\/+$/g, '')
-          : base.origin + '/'
+        t && !t.includes(' ') ? base.origin + '/' + t.replace(/^\/+|\/+$/g, '') : base.origin + '/'
       if (isHttpUrl(fallback)) return { url: fallback, guessed: true }
     } catch {
       /* unusable base — fall through */
@@ -76,7 +73,10 @@ export function resolveDraftUrl(text: string, baseUrl?: string): { url: string; 
 }
 
 /** One drafted intent as a recorder step. */
-export function stepFromDraft(d: DraftStep, baseUrl?: string): {
+export function stepFromDraft(
+  d: DraftStep,
+  baseUrl?: string
+): {
   step: Record<string, unknown>
   guessed: boolean
 } {

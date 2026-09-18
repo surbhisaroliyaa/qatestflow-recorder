@@ -1,11 +1,4 @@
-import {
-  useEffect,
-  useEffectEvent,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type FormEvent
-} from 'react'
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 // QF-004: keyboard focus containment for every modal — see modalA11y.ts.
 import { trapFocus } from './modalA11y'
 // QF-007/008: resizable step pane.
@@ -72,10 +65,7 @@ import {
 import { matchesTags } from './tags'
 import { headlessBlockers, blockerSummary, defaultWorkers, headlessCategory } from './headless'
 
-import {
-  EXAMPLE_URLS,
-  LOCALE_PRESETS,
-} from './uiLabels'
+import { EXAMPLE_URLS, LOCALE_PRESETS } from './uiLabels'
 import { SavedTestLibrary } from './components/SavedTestLibrary'
 import { PerfPanel } from './components/PerfPanel'
 import { A11yPanel } from './components/A11yPanel'
@@ -108,14 +98,7 @@ import { EnvManagerModal } from './components/EnvManagerModal'
 import { F40Modals } from './components/F40Modals'
 import { SuiteReport } from './components/SuiteReport'
 import type { HealableFail, HealedSave, SuiteRunEntry, SuiteRunState } from './suiteTypes'
-import {
-  assertNeedsValue,
-  clip,
-  formatBytes,
-  primaryCandidate,
-  stabilityClass
-} from './uiFormat'
-
+import { assertNeedsValue, clip, formatBytes, primaryCandidate, stabilityClass } from './uiFormat'
 
 interface LocaleResult {
   locale: string
@@ -259,9 +242,7 @@ function App(): React.JSX.Element {
   // A1 (scalable library): free-text search + a status filter, so a big library
   // (hundreds of tests) stays navigable. Compose with the F9 category drill-in.
   const [librarySearch, setLibrarySearch] = useState('')
-  const [libraryFilter, setLibraryFilter] = useState<'all' | 'failing' | 'passing' | 'flaky'>(
-    'all'
-  )
+  const [libraryFilter, setLibraryFilter] = useState<'all' | 'failing' | 'passing' | 'flaky'>('all')
   // A2 (scalable library): fileNames ticked for a bulk action (run / delete).
   const [selectedTests, setSelectedTests] = useState<Set<string>>(new Set())
   // Day 18 — auto-saved drafts (unsaved in-progress recordings). `draftIdRef`
@@ -412,13 +393,13 @@ function App(): React.JSX.Element {
   // F32 — scheduled monitors. The list, the dashboard modal, a busy-guard so two
   // headless runs never overlap, and the "promote a test" form. The scheduler
   // itself ticks in an effect further down (it reuses xbrowser.run).
-  const [monitors, setMonitors] = useState<Awaited<ReturnType<typeof window.api.monitors.list>>>(
-    []
-  )
+  const [monitors, setMonitors] = useState<Awaited<ReturnType<typeof window.api.monitors.list>>>([])
   const [monitorsOpen, setMonitorsOpen] = useState(false)
   const monitorBusyRef = useRef(false)
   // F32b: optional Slack/Discord/Teams webhook — alerts reach you off-machine.
-  const [monWebhook, setMonWebhook] = useState(() => localStorage.getItem('monitor.webhookUrl') || '')
+  const [monWebhook, setMonWebhook] = useState(
+    () => localStorage.getItem('monitor.webhookUrl') || ''
+  )
   const [monTestSel, setMonTestSel] = useState('') // fileName to promote
   const [monInterval, setMonInterval] = useState(15) // minutes
   const [monAlert, setMonAlert] = useState(true)
@@ -492,9 +473,7 @@ function App(): React.JSX.Element {
   // F17 (cross-browser): the runner modal — pick engines, run real Playwright,
   // show per-browser pass/fail. `xbInstalled` null = not checked yet.
   const [xbOpen, setXbOpen] = useState(false)
-  const [xbSel, setXbSel] = useState<Set<string>>(
-    new Set(['chromium', 'firefox', 'webkit'])
-  )
+  const [xbSel, setXbSel] = useState<Set<string>>(new Set(['chromium', 'firefox', 'webkit']))
   const [xbRunning, setXbRunning] = useState(false)
   const [xbInstalled, setXbInstalled] = useState<boolean | null>(null)
   // The app ships Playwright's RUNNER but not its ~400 MB of browser binaries,
@@ -578,7 +557,10 @@ function App(): React.JSX.Element {
   // Generation runs AFTER the modal closes (so the native browser we must show to
   // read the page doesn't flash up over it), so its progress/result shows in a
   // top-right toast instead of inside the modal.
-  const [aiToast, setAiToast] = useState<{ tone: 'progress' | 'ok' | 'warn' | 'fail'; msg: string } | null>(null)
+  const [aiToast, setAiToast] = useState<{
+    tone: 'progress' | 'ok' | 'warn' | 'fail'
+    msg: string
+  } | null>(null)
   // F27 (creates-data): which step is being labelled, and the draft label. Electron
   // does not implement window.prompt() — it shows nothing and returns null — so the
   // label has to be collected by a real modal like every other dialog here.
@@ -1151,7 +1133,18 @@ function App(): React.JSX.Element {
     // `tags` was missing: the draft SAVES them, but tagging an unsaved recording
     // didn't trigger a save, so the tag was lost if nothing else changed after
     // it (found by react-hooks/exhaustive-deps — QF-009).
-  }, [steps, testFileName, testName, baseURL, testSuite, storageState, viewport, deviceId, tags, dataRows])
+  }, [
+    steps,
+    testFileName,
+    testName,
+    baseURL,
+    testSuite,
+    storageState,
+    viewport,
+    deviceId,
+    tags,
+    dataRows
+  ])
 
   // Sync the URL bar whenever the embedded browser navigates.
   // Mark hasNavigated true so we switch from welcome -> chrome view.
@@ -1180,7 +1173,10 @@ function App(): React.JSX.Element {
   // can throw or come back empty and the pane must still open sensibly).
   const [paneWidth, setPaneWidth] = useState<number>(() => {
     try {
-      return clampPaneWidth(readStoredPaneWidth(localStorage.getItem('qaflow.paneWidth')), window.innerWidth)
+      return clampPaneWidth(
+        readStoredPaneWidth(localStorage.getItem('qaflow.paneWidth')),
+        window.innerWidth
+      )
     } catch {
       return PANE_DEFAULT
     }
@@ -1628,66 +1624,66 @@ function App(): React.JSX.Element {
   // bug (it renders under the native pane and the app looks frozen), so there
   // is no case where a modal is visible and this misses it.
   const anyOverlayOpen =
-      exportCode !== null ||
-        suiteSummaryOpen ||
-        dataPopupOpen ||
-        analysisOpen ||
-        traceView !== null ||
-        a11yPanelOpen ||
-        perfPanelOpen ||
-        historyOpen ||
-        envManagerOpen ||
-        edgeModalOpen ||
-        // F28: hide the browser behind the locale picker + the finished sweep report
-        // (but NOT while the sweep runs — capturePage/inspect need the page visible).
-        localeOpen ||
-        (localeRun !== null && !localeRun.running && localeReportOpen) ||
-        // F20: hide the browser only while the finished report modal is OPEN.
-        // While the batch RUNS, keep the browser visible (like a data-driven run)
-        // so you can watch each variant AND so capturePage() works — a hidden view
-        // is zero-sized and its failure screenshots come back empty. And once you
-        // close the report (report closed, run kept), the browser comes back.
-        (edgeRun !== null && !edgeRun.running && edgeReportOpen) ||
-        xbOpen ||
-        docOpen ||
-        // F25 guard: the run is BLOCKED awaiting this modal's answer, so the
-        // browser view must come down or the dialog is invisible underneath it
-        // and the replay hangs forever.
-        envWarn !== null ||
-        // F24 / F15 / F18: step editors are modals too. Any modal MISSING from
-        // this list renders underneath the native browser pane — the backdrop
-        // still eats clicks, so the app looks frozen. F15 re-capture and F18 step
-        // generation close their modal FIRST, then read the page with the browser
-        // shown normally (main leaves it shown) — no flash over the modal.
-        apiDraft !== null ||
-        snapDraft !== null ||
-        aiPromptOpen ||
-        // F21 / F27 / F31: the newest modals. Same rule as every entry above —
-        // without this the dialog renders under the native pane and the app just
-        // looks black and frozen.
-        bugPromptOpen ||
-        createsDataIndex !== null ||
-        acOpen ||
-        monitorsOpen || // F32 dashboard
-        coverageOpen || // F23 coverage map
-        draftOpen || // F22 draft-from-story
-        mockOpen || // F35 mock studio
-        jiraOpen || // F34 Jira ticket
-        // F40: the newest three. They're triggered from the LIBRARY (the welcome
-        // screen, where the browser is hidden anyway), so today they can't hit
-        // the under-the-pane bug — but they now render in BOTH views, and the
-        // comment above exists precisely because "it can't happen yet" is how
-        // this trap gets laid for the next feature.
-        secretMigration !== null ||
-        bundleResult !== null ||
-        importPlan !== null ||
-        // F39.1: while a parallel batch runs. Not a modal — the app stays fully
-        // usable — but the embedded browser is idle for the whole batch (it's a
-        // headless Playwright process), and a native pane paints straight over
-        // the running banner. Keeping it down for the duration costs nothing and
-        // is what guarantees the banner is actually visible.
-        parallelRunning ||
-        apiPanelIndex !== null
+    exportCode !== null ||
+    suiteSummaryOpen ||
+    dataPopupOpen ||
+    analysisOpen ||
+    traceView !== null ||
+    a11yPanelOpen ||
+    perfPanelOpen ||
+    historyOpen ||
+    envManagerOpen ||
+    edgeModalOpen ||
+    // F28: hide the browser behind the locale picker + the finished sweep report
+    // (but NOT while the sweep runs — capturePage/inspect need the page visible).
+    localeOpen ||
+    (localeRun !== null && !localeRun.running && localeReportOpen) ||
+    // F20: hide the browser only while the finished report modal is OPEN.
+    // While the batch RUNS, keep the browser visible (like a data-driven run)
+    // so you can watch each variant AND so capturePage() works — a hidden view
+    // is zero-sized and its failure screenshots come back empty. And once you
+    // close the report (report closed, run kept), the browser comes back.
+    (edgeRun !== null && !edgeRun.running && edgeReportOpen) ||
+    xbOpen ||
+    docOpen ||
+    // F25 guard: the run is BLOCKED awaiting this modal's answer, so the
+    // browser view must come down or the dialog is invisible underneath it
+    // and the replay hangs forever.
+    envWarn !== null ||
+    // F24 / F15 / F18: step editors are modals too. Any modal MISSING from
+    // this list renders underneath the native browser pane — the backdrop
+    // still eats clicks, so the app looks frozen. F15 re-capture and F18 step
+    // generation close their modal FIRST, then read the page with the browser
+    // shown normally (main leaves it shown) — no flash over the modal.
+    apiDraft !== null ||
+    snapDraft !== null ||
+    aiPromptOpen ||
+    // F21 / F27 / F31: the newest modals. Same rule as every entry above —
+    // without this the dialog renders under the native pane and the app just
+    // looks black and frozen.
+    bugPromptOpen ||
+    createsDataIndex !== null ||
+    acOpen ||
+    monitorsOpen || // F32 dashboard
+    coverageOpen || // F23 coverage map
+    draftOpen || // F22 draft-from-story
+    mockOpen || // F35 mock studio
+    jiraOpen || // F34 Jira ticket
+    // F40: the newest three. They're triggered from the LIBRARY (the welcome
+    // screen, where the browser is hidden anyway), so today they can't hit
+    // the under-the-pane bug — but they now render in BOTH views, and the
+    // comment above exists precisely because "it can't happen yet" is how
+    // this trap gets laid for the next feature.
+    secretMigration !== null ||
+    bundleResult !== null ||
+    importPlan !== null ||
+    // F39.1: while a parallel batch runs. Not a modal — the app stays fully
+    // usable — but the embedded browser is idle for the whole batch (it's a
+    // headless Playwright process), and a native pane paints straight over
+    // the running banner. Keeping it down for the duration costs nothing and
+    // is what guarantees the banner is actually visible.
+    parallelRunning ||
+    apiPanelIndex !== null
 
   // QF-004: hold focus inside whichever dialog is open, and hand it back when
   // it closes. `anyOverlayOpen` is the only dependency: the effect re-runs on
@@ -1733,8 +1729,7 @@ function App(): React.JSX.Element {
       } else if (p.status === 'done') {
         setNlBatchCount(null)
         setDoneIndices((prev) => new Set(prev).add(idx))
-      }
-      else if (p.status === 'error') setFailedIndex(idx)
+      } else if (p.status === 'error') setFailedIndex(idx)
       else if (p.status === 'skipped') {
         setSkippedIndices((prev) => new Set(prev).add(idx))
         setFailedIndex((prev) => (prev === idx ? null : prev))
@@ -1832,7 +1827,12 @@ function App(): React.JSX.Element {
   // it can't be undone). Only offered when not recording / replaying.
   const handleClearSteps = (): void => {
     if (steps.length === 0) return
-    if (!window.confirm(`Clear ${steps.length === 1 ? 'the 1 step' : `all ${steps.length} steps`} and start over?`)) return
+    if (
+      !window.confirm(
+        `Clear ${steps.length === 1 ? 'the 1 step' : `all ${steps.length} steps`} and start over?`
+      )
+    )
+      return
     editSteps([])
     // Day 20: clearing the steps drops the data table with them.
     setDataRows([])
@@ -2105,11 +2105,22 @@ function App(): React.JSX.Element {
     traceId?: string
     consoleErrors?: string[]
     networkErrors?: string[]
-    failures?: { index: number; error: string; screenshotPath?: string; apiEvidence?: ApiEvidence }[]
+    failures?: {
+      index: number
+      error: string
+      screenshotPath?: string
+      apiEvidence?: ApiEvidence
+    }[]
     category?: FailureCategory // F9 (Stage 2): auto-classified failure type
     aiHealed?: number // B: how many selectors auto-healed this run
     // Option 2: a found-but-not-confident heal, for review & accept in the report
-    healable?: { index: number; label: string; signals: string[]; score: number; step: RecorderStep }
+    healable?: {
+      index: number
+      label: string
+      signals: string[]
+      score: number
+      step: RecorderStep
+    }
   }> => {
     setFailedIndex(null)
     setReplayError(null)
@@ -2163,7 +2174,9 @@ function App(): React.JSX.Element {
       // something a QA should ever read, so strip it back to the message main
       // actually meant to send.
       const raw = err instanceof Error ? err.message : String(err)
-      const clean = raw.replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, '')
+      const clean = raw
+        .replace(/^Error invoking remote method '[^']+':\s*/, '')
+        .replace(/^Error:\s*/, '')
       result = { ok: false, error: clean }
     } finally {
       setIsReplaying(false)
@@ -2198,7 +2211,9 @@ function App(): React.JSX.Element {
         setLastScreenshotPath(result.screenshotPath ?? null)
         setLastConsoleErrors(result.consoleErrors ?? [])
         setLastNetworkErrors(result.networkErrors ?? [])
-        setLastFailures((result.failures ?? []).map((f) => ({ ...f, index: toDisplayIdx(f.index) })))
+        setLastFailures(
+          (result.failures ?? []).map((f) => ({ ...f, index: toDisplayIdx(f.index) }))
+        )
         setWhatChanged(result.whatChanged ?? null) // F8
       }
     }
@@ -2378,7 +2393,10 @@ function App(): React.JSX.Element {
   // and spliced into the test at the end, so the live run's indices never shift.
   const handleReplayAlongChecks = async (): Promise<void> => {
     if (isDataDriven && dataRows.length > 0) {
-      setAiToast({ tone: 'warn', msg: 'Ride-checks runs a single pass — use plain ▶ Replay for a data matrix.' })
+      setAiToast({
+        tone: 'warn',
+        msg: 'Ride-checks runs a single pass — use plain ▶ Replay for a data matrix.'
+      })
       window.setTimeout(() => setAiToast(null), 6000)
       return
     }
@@ -2446,7 +2464,8 @@ function App(): React.JSX.Element {
   const handleRideStop = (): void => {
     const pending = pendingClaimsRef.current
     if (checkOffer && pending.length) {
-      for (const claim of pending) rideChecksRef.current.push({ afterIndex: checkOffer.afterIndex, claim })
+      for (const claim of pending)
+        rideChecksRef.current.push({ afterIndex: checkOffer.afterIndex, claim })
     }
     pendingClaimsRef.current = []
     setRidePending([])
@@ -2517,7 +2536,8 @@ function App(): React.JSX.Element {
       let list = substituteSteps(flat, resolveRow(dataRows[i], envMap), envMap)
       // F25: re-point navigations at the active environment (creds already
       // resolved above via envMap, which main sourced from the active env).
-      if (activeEnv?.baseURL) list = retargetSteps(list, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
+      if (activeEnv?.baseURL)
+        list = retargetSteps(list, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
       // fileName null: don't stamp a run per row — record ONE aggregate below.
       const result = await runOnce(list, null, false)
       if (result.aborted) {
@@ -2607,7 +2627,13 @@ function App(): React.JSX.Element {
       listBase = await applyEnv(flat, baseURL || deriveBaseURL(flat), localeNoEnv)
     }
     setLocaleReportOpen(false)
-    setLocaleRun({ total: locales.length, current: 0, currentLabel: '', running: true, results: [] })
+    setLocaleRun({
+      total: locales.length,
+      current: 0,
+      currentLabel: '',
+      running: true,
+      results: []
+    })
     let baseTexts: Set<string> | null = null // the first locale's visible strings
     // Rebuilt, never mutated: the state updater below runs when React gets to
     // it, and a list still being pushed to could by then hold a LATER locale
@@ -2945,9 +2971,7 @@ function App(): React.JSX.Element {
       // using {{env:API_KEY}} therefore ran with the variable unset on every
       // engine. Unresolved names are surfaced the same way every other path does
       // rather than being substituted as ''.
-      const { values: resolvedEnv, missing } = await resolveEnvVars(
-        envVarNames(flat, dataRows)
-      )
+      const { values: resolvedEnv, missing } = await resolveEnvVars(envVarNames(flat, dataRows))
       unresolvedEnvRef.current = missing
       // Protected data cells: the spec reads process.env.PASSWORD_1 etc., so
       // hand it those names — not the internal `secret:<ref>` lookup keys.
@@ -3072,7 +3096,10 @@ function App(): React.JSX.Element {
         const { flat } = await buildRunPlan(data.steps as RecorderStep[])
         tests.push({
           name: data.name,
-          summary: flat.map((s) => stepText(s)).join('; ').slice(0, 600)
+          summary: flat
+            .map((s) => stepText(s))
+            .join('; ')
+            .slice(0, 600)
         })
       }
       const res = await window.api.ac.map(acs, tests)
@@ -3368,7 +3395,11 @@ function App(): React.JSX.Element {
         summary: jiraSummaryText,
         description: jiraDescText
       })
-      setJiraNote(res.ok ? `✓ Created ${res.key} — ${res.url}` : `⚠ ${res.error || 'Jira rejected the request.'}`)
+      setJiraNote(
+        res.ok
+          ? `✓ Created ${res.key} — ${res.url}`
+          : `⚠ ${res.error || 'Jira rejected the request.'}`
+      )
     } finally {
       setJiraBusy(false)
     }
@@ -3381,10 +3412,11 @@ function App(): React.JSX.Element {
       await window.api.jira.openCreate(jiraBaseUrl.trim())
       setJiraNote('✓ Ticket copied. Opened Jira’s create page — paste it into the description.')
     } else {
-      setJiraNote('✓ Ticket copied. Add your Jira site URL to open the create page, or paste it into Jira yourself.')
+      setJiraNote(
+        '✓ Ticket copied. Add your Jira site URL to open the create page, or paste it into Jira yourself.'
+      )
     }
   }
-
 
   // === Day 11: test library =========================================
   const handleOpenSavePanel = async (): Promise<void> => {
@@ -3777,7 +3809,9 @@ function App(): React.JSX.Element {
           const cellEnvAll: Record<string, string> = {}
           for (const s of [...safe]) {
             const env = secretCellEnv(s.rows, cellValues)
-            const clash = Object.entries(env).some(([k, v]) => k in cellEnvAll && cellEnvAll[k] !== v)
+            const clash = Object.entries(env).some(
+              ([k, v]) => k in cellEnvAll && cellEnvAll[k] !== v
+            )
             if (clash) {
               safe.splice(safe.indexOf(s), 1)
               sequentialTests.push(s.test)
@@ -3940,7 +3974,11 @@ function App(): React.JSX.Element {
             )
             let list = substituteSteps(flatSuite, resolveRow(suiteRows[r], envMap), envMap)
             if (activeEnv?.baseURL && !suiteNoEnv) {
-              list = retargetSteps(list, data.baseURL || deriveBaseURL(flatSuite), activeEnv.baseURL)
+              list = retargetSteps(
+                list,
+                data.baseURL || deriveBaseURL(flatSuite),
+                activeEnv.baseURL
+              )
             }
             // fileName null: don't stamp a run per row — record ONE aggregate below.
             const rr = await runOnce(list, null, false, data.storageState, data.har)
@@ -3998,9 +4036,7 @@ function App(): React.JSX.Element {
           category: result.category,
           healed: result.aiHealed,
           // Read from the ref: applyEnv set it while building THIS test's steps.
-          unresolvedEnv: unresolvedEnvRef.current.length
-            ? [...unresolvedEnvRef.current]
-            : undefined
+          unresolvedEnv: unresolvedEnvRef.current.length ? [...unresolvedEnvRef.current] : undefined
         }
         // B: this test's selectors auto-healed — capture the REPAIRED display
         // steps (block-aware, updated by the auto-heal events) so the report can
@@ -4117,7 +4153,8 @@ function App(): React.JSX.Element {
   }
   const handleAcceptAllHealable = async (): Promise<void> => {
     for (const hf of suiteRun?.healables ?? []) {
-      if (!hf.hasBlocks && !suiteRun?.accepted?.includes(hf.fileName)) await handleAcceptHealable(hf)
+      if (!hf.hasBlocks && !suiteRun?.accepted?.includes(hf.fileName))
+        await handleAcceptHealable(hf)
     }
   }
 
@@ -4245,9 +4282,7 @@ function App(): React.JSX.Element {
   const handleSaveCreatesData = (): void => {
     const label = createsDataDraft.trim()
     if (createsDataIndex === null || !label) return
-    editSteps(
-      steps.map((x, idx) => (idx === createsDataIndex ? { ...x, createsData: label } : x))
-    )
+    editSteps(steps.map((x, idx) => (idx === createsDataIndex ? { ...x, createsData: label } : x)))
     setCreatesDataIndex(null)
     setCreatesDataDraft('')
   }
@@ -4636,7 +4671,11 @@ function App(): React.JSX.Element {
           har
         )
         if (!res.installed) {
-          run = { at, status: 'error', detail: 'Playwright is not installed — monitor runs need it.' }
+          run = {
+            at,
+            status: 'error',
+            detail: 'Playwright is not installed — monitor runs need it.'
+          }
           break
         }
         if (!res.ran) {
@@ -4660,7 +4699,10 @@ function App(): React.JSX.Element {
       }
     }
     if (run.status === 'failed' && attempts > 1) {
-      run = { ...run, detail: `${run.detail || 'A step failed.'} (failed all ${attempts} attempts)` }
+      run = {
+        ...run,
+        detail: `${run.detail || 'A step failed.'} (failed all ${attempts} attempts)`
+      }
     }
     setMonitors(await window.api.monitors.recordRun(mon.id, run))
     if (run.status !== 'passed' && mon.alertOnFail) await fireMonitorAlert(mon, run)
@@ -4724,7 +4766,13 @@ function App(): React.JSX.Element {
         }
       }
       const result = await window.api.coverage.crawl()
-      setCoverageRun({ running: false, found: result.pages.length, result, coveredExact, coveredContains })
+      setCoverageRun({
+        running: false,
+        found: result.pages.length,
+        result,
+        coveredExact,
+        coveredContains
+      })
     } catch {
       setCoverageRun({
         running: false,
@@ -5222,7 +5270,9 @@ function App(): React.JSX.Element {
           guessed: res.guessed ?? []
         })
         setDraftNote(
-          res.note ? `⚠ ${res.note}` : `✓ Drafted ${plural(res.steps.length, 'step')} — review, then Insert.`
+          res.note
+            ? `⚠ ${res.note}`
+            : `✓ Drafted ${plural(res.steps.length, 'step')} — review, then Insert.`
         )
       } else {
         setDraftNote(`⚠ ${res.note || 'The AI produced no draft for that story.'}`)
@@ -5300,7 +5350,9 @@ function App(): React.JSX.Element {
       `// Mock: ${method} ${e.url}`,
       `await page.route('${pattern}', async (route) => {`,
       // Only fulfil the intended verb; let other methods on the same path pass.
-      method !== 'GET' ? `  if (route.request().method() !== '${method}') return route.fallback()` : null,
+      method !== 'GET'
+        ? `  if (route.request().method() !== '${method}') return route.fallback()`
+        : null,
       `  await route.fulfill({`,
       `    status: ${status},`,
       `    contentType: ${JSON.stringify(ct)},`,
@@ -5348,7 +5400,11 @@ function App(): React.JSX.Element {
     closeSnapEditor()
     if (!baselineId) return
     setSnapToast('busy')
-    const ok = await window.api.visual.recaptureBaseline(baselineId, maskSelectors, freezeAnimations)
+    const ok = await window.api.visual.recaptureBaseline(
+      baselineId,
+      maskSelectors,
+      freezeAnimations
+    )
     setSnapToast(ok ? 'ok' : 'fail')
     window.setTimeout(() => setSnapToast(null), 3200)
   }
@@ -6543,10 +6599,7 @@ function App(): React.JSX.Element {
                 </button>
                 {envSwitchOpen && (
                   <>
-                    <div
-                      className="env-switch-backdrop"
-                      onClick={() => setEnvSwitchOpen(false)}
-                    />
+                    <div className="env-switch-backdrop" onClick={() => setEnvSwitchOpen(false)} />
                     <div className="env-switch-menu" role="menu">
                       <button
                         type="button"
@@ -6809,8 +6862,7 @@ function App(): React.JSX.Element {
               report (verdicts + 📷 + 🎬) any time, even after restarting the app.
               A just-finished run on an UNSAVED test shows as a session-only row. */}
           {!edgeRun?.running &&
-            (edgeRunHistory.length > 0 ||
-              (!!edgeRun && !edgeViewingHistory && !testFileName)) && (
+            (edgeRunHistory.length > 0 || (!!edgeRun && !edgeViewingHistory && !testFileName)) && (
               <div className="edge-history">
                 <span className="edge-history-label">🧨 Edge runs</span>
                 {!!edgeRun && !edgeViewingHistory && !testFileName && (
@@ -7248,9 +7300,9 @@ function App(): React.JSX.Element {
                     }
                   })()}
                 </strong>{' '}
-                — say in plain English what should be true on this page (each becomes an AI check). Add
-                as many as you like; they run <em>after this page’s actions, before it navigates away</em>.
-                Then ▶ Continue.
+                — say in plain English what should be true on this page (each becomes an AI check).
+                Add as many as you like; they run{' '}
+                <em>after this page’s actions, before it navigates away</em>. Then ▶ Continue.
               </p>
               {ridePending.length > 0 && (
                 <ul className="ride-pending">
@@ -7337,9 +7389,9 @@ function App(): React.JSX.Element {
                 {unresolvedEnv.some((n) => collidesWithOsEnv(n)) && (
                   <>
                     {' '}
-                    Note: a name the operating system also defines (e.g.{' '}
-                    <code>USERNAME</code>) is <strong>never</strong> read from the OS — that would
-                    silently supply your account name instead of a test value.
+                    Note: a name the operating system also defines (e.g. <code>USERNAME</code>) is{' '}
+                    <strong>never</strong> read from the OS — that would silently supply your
+                    account name instead of a test value.
                   </>
                 )}
               </div>
@@ -7358,8 +7410,8 @@ function App(): React.JSX.Element {
               ))}
               <div className="branch-note-why">
                 That’s expected when a condition is false or a loop matches nothing — but any check
-                inside those steps was <strong>not performed</strong>, so this run doesn’t vouch
-                for it.
+                inside those steps was <strong>not performed</strong>, so this run doesn’t vouch for
+                it.
               </div>
             </div>
           )}
@@ -7405,8 +7457,8 @@ function App(): React.JSX.Element {
               <ul>
                 <li>
                   A step&apos;s selector broke (the app changed), so the tool re-found the element
-                  by <strong>name / role / text / position / look</strong>, re-ran the step to
-                  prove the fix works, and kept the run green. The 🤖 tag on each step shows{' '}
+                  by <strong>name / role / text / position / look</strong>, re-ran the step to prove
+                  the fix works, and kept the run green. The 🤖 tag on each step shows{' '}
                   <em>which</em> clues matched.
                 </li>
                 <li>
@@ -7875,7 +7927,9 @@ function App(): React.JSX.Element {
                               step.apiContract
                             )
                               .slice(0, 12)
-                              .join(', ')}${Object.keys(step.apiContract).length > 12 ? ', …' : ''}. The step fails if any is renamed, dropped, or changes type — even when the status is 200.`}
+                              .join(
+                                ', '
+                              )}${Object.keys(step.apiContract).length > 12 ? ', …' : ''}. The step fails if any is renamed, dropped, or changes type — even when the status is 200.`}
                           >
                             📐 {fieldCount(Object.keys(step.apiContract).length)}
                           </span>
@@ -8191,7 +8245,9 @@ function App(): React.JSX.Element {
                               ? `Creates data: ${step.createsData} — click to clear`
                               : 'Mark as "creates data": a suite flags tests that create data but have no teardown to clean it up'
                           }
-                          aria-label={step.createsData ? 'Clear creates-data marker' : 'Mark as creates data'}
+                          aria-label={
+                            step.createsData ? 'Clear creates-data marker' : 'Mark as creates data'
+                          }
                         >
                           🗃️
                         </button>
@@ -8305,10 +8361,10 @@ function App(): React.JSX.Element {
           const fields = fillableFields(edgeFlat)
           const count = countEdgeCases(edgeFlat, [...edgeFields], edgeGroups)
           // Only a real `assert` is a success check. A snapshot/a11y/perf step is NOT a
-    // pass/fail signal for "was the bad input accepted" — the exported negative suite
-    // says exactly this and negates `assert` steps only (playwrightExport.ts). Counting
-    // snapshots here let the verdict claim a certainty the evidence couldn't support.
-    const hasAssertion = edgeFlat.some((s) => s.type === 'assert')
+          // pass/fail signal for "was the bad input accepted" — the exported negative suite
+          // says exactly this and negates `assert` steps only (playwrightExport.ts). Counting
+          // snapshots here let the verdict claim a certainty the evidence couldn't support.
+          const hasAssertion = edgeFlat.some((s) => s.type === 'assert')
           return (
             <div className="modal-backdrop" onClick={() => setEdgeModalOpen(false)}>
               <div className="env-modal" onClick={(e) => e.stopPropagation()}>
@@ -8325,8 +8381,8 @@ function App(): React.JSX.Element {
                 {fields.length === 0 ? (
                   <div className="env-list">
                     <div className="env-empty">
-                      This test has no text input fields to explode. Record a flow that types into
-                      a form first (e.g. a login or signup).
+                      This test has no text input fields to explode. Record a flow that types into a
+                      form first (e.g. a login or signup).
                     </div>
                     <div className="modal-footer">
                       <button className="modal-btn" onClick={() => setEdgeModalOpen(false)}>
@@ -8370,8 +8426,8 @@ function App(): React.JSX.Element {
                       <p className="env-list-intro edge-judge-note">
                         {hasAssertion ? (
                           <>
-                            This test has a ✓ check, so that decides it: a variant whose check
-                            still passes was <strong>accepted</strong>; one that fails was{' '}
+                            This test has a ✓ check, so that decides it: a variant whose check still
+                            passes was <strong>accepted</strong>; one that fails was{' '}
                             <strong>rejected</strong>.
                           </>
                         ) : (
@@ -8384,7 +8440,10 @@ function App(): React.JSX.Element {
                           </>
                         )}
                       </p>
-                      <label className="env-field-label edge-judge-label" htmlFor="edge-success-url">
+                      <label
+                        className="env-field-label edge-judge-label"
+                        htmlFor="edge-success-url"
+                      >
                         Or set it explicitly — success = URL contains
                       </label>
                       <input
@@ -8504,8 +8563,8 @@ function App(): React.JSX.Element {
                   <div className="edge-warn edge-warn-block">
                     ⚠ No success check in this test, and the valid-input baseline didn&rsquo;t move
                     the page — so there is nothing to compare each variant against and accepted vs
-                    rejected <strong>cannot be determined</strong>. Nothing below is a finding. Add a
-                    ✓ check, or set a success rule in the 🧨 dialog, and re-run.
+                    rejected <strong>cannot be determined</strong>. Nothing below is a finding. Add
+                    a ✓ check, or set a success rule in the 🧨 dialog, and re-run.
                   </div>
                 )}
                 {basisNote && <div className="edge-basis-note">{basisNote}</div>}
@@ -8593,8 +8652,8 @@ function App(): React.JSX.Element {
 
                 <div className="modal-footer">
                   <span className="edge-foot-hint">
-                    ⚠ Accepted = the app took the bad input and still succeeded — investigate.
-                    ✓ Rejected = the app blocked it.
+                    ⚠ Accepted = the app took the bad input and still succeeded — investigate. ✓
+                    Rejected = the app blocked it.
                   </span>
                   {/* Export needs the flow's steps. Live runs always have them;
                       saved runs now persist them too, so it shows on both. (Only
@@ -8611,10 +8670,7 @@ function App(): React.JSX.Element {
                   <button className="modal-btn" onClick={handleCopyEdgeReport}>
                     Copy report
                   </button>
-                  <button
-                    className="modal-btn primary"
-                    onClick={() => setEdgeReportOpen(false)}
-                  >
+                  <button className="modal-btn primary" onClick={() => setEdgeReportOpen(false)}>
                     Close
                   </button>
                 </div>
@@ -8749,7 +8805,6 @@ function App(): React.JSX.Element {
         setExportXbrowser={setExportXbrowser}
         testName={testName}
       />
-
     </div>
   )
 }

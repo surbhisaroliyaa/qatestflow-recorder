@@ -4,9 +4,8 @@ import { describe, it, expect, vi } from 'vitest'
 // filesystem, but the module-level import has to resolve.
 vi.mock('electron', () => ({ app: { getPath: () => '/Users/test/Documents' } }))
 
-const { harNameForFile, safeRel, safeSegment, slugify, stepStats } = await import(
-  '../src/main/library'
-)
+const { harNameForFile, safeRel, safeSegment, slugify, stepStats } =
+  await import('../src/main/library')
 
 // =====================================================================
 // THE LIBRARY — where saved tests live on disk.

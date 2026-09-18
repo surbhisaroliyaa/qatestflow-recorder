@@ -147,7 +147,8 @@ function facts(v: unknown): Record<string, unknown> | undefined {
   return compact({
     tag,
     testId: str(f.testId, MAX_TEXT),
-    testIdAttr: f.testIdAttr === 'data-test' || f.testIdAttr === 'data-testid' ? f.testIdAttr : undefined,
+    testIdAttr:
+      f.testIdAttr === 'data-test' || f.testIdAttr === 'data-testid' ? f.testIdAttr : undefined,
     id: str(f.id, MAX_TEXT),
     name: str(f.name, MAX_TEXT),
     role: str(f.role, MAX_TEXT),

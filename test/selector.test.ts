@@ -121,8 +121,13 @@ describe('the human label', () => {
   })
 
   // demoqa's Hobbies boxes: <input id="hobbies-checkbox-1"> + <label for=…>Sports
-  it("names a control after its <label>, not its id", () => {
-    const box = facts({ tag: 'input', type: 'checkbox', id: 'hobbies-checkbox-1', labelText: 'Sports' })
+  it('names a control after its <label>, not its id', () => {
+    const box = facts({
+      tag: 'input',
+      type: 'checkbox',
+      id: 'hobbies-checkbox-1',
+      labelText: 'Sports'
+    })
     expect(labelFrom(box)).toBe('Sports')
   })
 
@@ -145,7 +150,11 @@ describe('the human label', () => {
   })
 
   it('adds no number when the unnamed control is the only one of its kind', () => {
-    const only = facts({ tag: 'input', type: 'checkbox', anchor: { css: 'form input', count: 1, index: 0 } })
+    const only = facts({
+      tag: 'input',
+      type: 'checkbox',
+      anchor: { css: 'form input', count: 1, index: 0 }
+    })
     expect(labelFrom(only)).toBe('checkbox')
     expect(labelFrom(facts({ tag: 'div' }))).toBe('div')
   })

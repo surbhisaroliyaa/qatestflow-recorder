@@ -49,7 +49,8 @@ export const secretCell = (ref: string): string => `{{secret:${ref}}}`
 /** Is this a value worth protecting? Empty is not a secret — and a data row
  *  that tests "Password is required" depends on its cell STAYING empty. A
  *  {{token}} is already a reference, not a value. */
-const isPlainValue = (v: unknown): v is string => typeof v === 'string' && v !== '' && !v.includes('{{')
+const isPlainValue = (v: unknown): v is string =>
+  typeof v === 'string' && v !== '' && !v.includes('{{')
 
 // ── password steps found by name ──────────────────────────────────────
 // A recording marks a `type="password"` field secret. A hand-built step, or
@@ -102,12 +103,10 @@ export function maskPasswordInputs(html: string): string {
 /** A step description that already went to disk with a password in it —
  *  `Type "secret_sauce" into Password` — with the value replaced by dots. */
 export function maskStepDescription(text: string): string {
-  return text.replace(
-    /^Type "(.*)" into (.*)$/s,
-    (whole, value: string, target: string) =>
-      value && value !== '••••••••' && PASSWORD_NAME.test(target)
-        ? `Type "••••••••" into ${target}`
-        : whole
+  return text.replace(/^Type "(.*)" into (.*)$/s, (whole, value: string, target: string) =>
+    value && value !== '••••••••' && PASSWORD_NAME.test(target)
+      ? `Type "••••••••" into ${target}`
+      : whole
   )
 }
 
@@ -301,9 +300,10 @@ export function withoutSecretKeys(env: Record<string, string>): Record<string, s
 
 /** The rows with each planned cell replaced by `{{env:NAME}}` — what a bundle
  *  (a file meant for git) carries. */
-export function placeholderRows(
-  rows: Record<string, string>[] | undefined
-): { rows: Record<string, string>[]; scrubbed: string[] } {
+export function placeholderRows(rows: Record<string, string>[] | undefined): {
+  rows: Record<string, string>[]
+  scrubbed: string[]
+} {
   if (!Array.isArray(rows) || !rows.length) return { rows: rows ?? [], scrubbed: [] }
   const plan = planSecretEnv(rows)
   const scrubbed = new Set<string>()

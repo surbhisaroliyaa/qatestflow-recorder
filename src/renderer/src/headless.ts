@@ -27,7 +27,9 @@ export interface HeadlessBlocker {
  * Why this test must NOT go down the parallel/headless path.
  * Empty array = safe to run headless.
  */
-export function headlessBlockers(steps: { type: string; assertKind?: string; waitKind?: string; disabled?: boolean }[]): HeadlessBlocker[] {
+export function headlessBlockers(
+  steps: { type: string; assertKind?: string; waitKind?: string; disabled?: boolean }[]
+): HeadlessBlocker[] {
   const counts = new Map<string, number>()
   const bump = (reason: string): void => {
     counts.set(reason, (counts.get(reason) ?? 0) + 1)
@@ -118,7 +120,9 @@ export function headlessCategory(error: string | undefined): FailureCategory {
   // "could not be reached" is our own API-step wording for the same thing —
   // without it, every unreachable-API failure read as `unknown`.
   if (
-    /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOENT|ERR_FILE_NOT_FOUND|net::/i.test(e) ||
+    /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ENOENT|ERR_FILE_NOT_FOUND|net::/i.test(
+      e
+    ) ||
     /could not be reached/i.test(e)
   ) {
     return 'environment'
@@ -127,7 +131,11 @@ export function headlessCategory(error: string | undefined): FailureCategory {
   // A value/state comparison that ran and lost — the element WAS found.
   // Checked before the timeout rule: Playwright reports a failed expect with a
   // timeout too, and the comparison is the more specific, more useful reading.
-  if (/toHaveText|toHaveValue|toHaveURL|toContainText|toHaveTitle|toHaveCount|toHaveAttribute|toBe\b|toContain\b/.test(e)) {
+  if (
+    /toHaveText|toHaveValue|toHaveURL|toContainText|toHaveTitle|toHaveCount|toHaveAttribute|toBe\b|toContain\b/.test(
+      e
+    )
+  ) {
     // …unless what it timed out on is the element never existing at all.
     if (/element\(s\) not found|resolved to 0 elements/i.test(e)) return 'stale-selector'
     return 'stale-data'

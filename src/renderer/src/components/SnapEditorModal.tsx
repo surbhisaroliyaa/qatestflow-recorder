@@ -50,7 +50,10 @@ export function SnapEditorModal({
               areas are painted over identically on both baseline and current, so they’re excluded.
             </span>
           </label>
-          <label className="api-field api-field-inline" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <label
+            className="api-field api-field-inline"
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+          >
             <input
               type="checkbox"
               checked={snapDraft.freezeAnimations !== false}
@@ -84,7 +87,11 @@ export function SnapEditorModal({
             bar. This also fails once more than N real pixels change — so localized regressions
             aren&apos;t diluted. Blank = 200.
           </p>
-          {snapStatus && <p className="api-hint" style={{ color: '#8ab4f8' }}>{snapStatus}</p>}
+          {snapStatus && (
+            <p className="api-hint" style={{ color: '#8ab4f8' }}>
+              {snapStatus}
+            </p>
+          )}
         </div>
         <div className="modal-footer">
           <button className="modal-btn" onClick={closeSnapEditor}>

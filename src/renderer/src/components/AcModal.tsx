@@ -31,7 +31,7 @@ export function AcModal({
   savedTests,
   setAcText
 }: AcModalProps): React.JSX.Element | null {
-  if (!(acOpen)) return null
+  if (!acOpen) return null
   return (
     <div className="modal-backdrop" onClick={closeAcChecklist}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -56,9 +56,9 @@ export function AcModal({
           </label>
           <p className="api-hint">
             The AI reads your {savedTests.length} saved test{savedTests.length === 1 ? '' : 's'} and
-            marks which cover each criterion — an <strong>uncovered AC is a real coverage gap</strong>.
-            It judges coverage (needs the Claude CLI), so sanity-check the matches. Your criteria are
-            saved between sessions.
+            marks which cover each criterion — an{' '}
+            <strong>uncovered AC is a real coverage gap</strong>. It judges coverage (needs the
+            Claude CLI), so sanity-check the matches. Your criteria are saved between sessions.
           </p>
           {acFailed && (
             <p className="api-hint" style={{ color: '#f0b232' }}>

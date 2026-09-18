@@ -9,7 +9,12 @@ import {
   siteFirstLines,
   stabilityClass
 } from '../src/renderer/src/uiFormat'
-import { ASSERT_KINDS, ASSERT_LABELS, CATEGORY_LABELS, CATEGORY_WHY } from '../src/renderer/src/uiLabels'
+import {
+  ASSERT_KINDS,
+  ASSERT_LABELS,
+  CATEGORY_LABELS,
+  CATEGORY_WHY
+} from '../src/renderer/src/uiLabels'
 
 // These lived inside App.tsx, where nothing could reach them without launching
 // Electron — so nothing ever did. Being testable is the point of moving them.
@@ -141,7 +146,17 @@ describe('primaryCandidate', () => {
 
 describe('assertNeedsValue', () => {
   it('is true for the kinds that compare against an expected value', () => {
-    for (const k of ['text-equals', 'text-contains', 'value', 'count', 'attribute', 'class', 'url-contains', 'title', 'nl']) {
+    for (const k of [
+      'text-equals',
+      'text-contains',
+      'value',
+      'count',
+      'attribute',
+      'class',
+      'url-contains',
+      'title',
+      'nl'
+    ]) {
       expect(assertNeedsValue(k as never), `${k} should need a value`).toBe(true)
     }
   })

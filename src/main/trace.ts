@@ -221,7 +221,10 @@ export function generateTraceHtml(
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] as string)
+  return s.replace(
+    /[&<>"]/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] as string
+  )
 }
 
 // F11: SHAREABLE RUN REPORT — a different artifact from generateTraceHtml above.
@@ -249,7 +252,8 @@ export function generateReportHtml(
   const pending = count('pending')
   const totalMs = steps.reduce((sum, s) => sum + (s.durationMs || 0), 0)
   const maxMs = Math.max(1, ...steps.map((s) => s.durationMs || 0))
-  const fmtMs = (ms: number): string => (ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's' : ms + 'ms')
+  const fmtMs = (ms: number): string =>
+    ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's' : ms + 'ms'
 
   // EVERY failing step (status 'error') — a multi-failure run (Continue mode
   // keeps going past a failure) lists them ALL in one consolidated callout, so
@@ -341,7 +345,9 @@ export function generateReportHtml(
           `<div class="ev-lbl">Page at the time — context only; the API call above did not involve this page</div>`
         )
       }
-      parts.push(`<img class="ev-shot" src="${src(s.screenshotFile)}" alt="Screenshot of step ${s.index + 1}">`)
+      parts.push(
+        `<img class="ev-shot" src="${src(s.screenshotFile)}" alt="Screenshot of step ${s.index + 1}">`
+      )
     }
     for (const [lbl, arr] of [
       ['Console', s.consoleErrors],

@@ -35,8 +35,9 @@ describe('a text check on a text-found element is circular', () => {
 
   it('ignores the css last-resort when deciding which hook is primary', () => {
     // css is the bare-tag fallback that sits under everything; it never decides.
-    expect(textCheckIsCircular([cand('css', 15), cand('text', 50)] as never[], kind('text-equals')))
-      .toBe(true)
+    expect(
+      textCheckIsCircular([cand('css', 15), cand('text', 50)] as never[], kind('text-equals'))
+    ).toBe(true)
   })
 
   it('handles a missing / empty ladder without throwing', () => {

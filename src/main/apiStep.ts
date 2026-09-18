@@ -112,7 +112,8 @@ export interface ApiStepResult {
 // like a credential must never leave this process in the clear. Masking is by
 // header NAME (Authorization, Cookie, X-API-Key…), so the header is still
 // visible — you can see the token was SENT without seeing the token.
-const SECRET_KEY = /^(authorization|cookie|set-cookie|proxy-authorization)$|(api[-_]?key|token|secret|password|passwd|auth)/i
+const SECRET_KEY =
+  /^(authorization|cookie|set-cookie|proxy-authorization)$|(api[-_]?key|token|secret|password|passwd|auth)/i
 const MASK = '••••••••'
 const BODY_LIMIT = 2000
 

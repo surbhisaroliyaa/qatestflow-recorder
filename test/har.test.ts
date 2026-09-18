@@ -174,12 +174,24 @@ describe('serving the recorded response back', () => {
 
   it('round-trips a body that is not plain ASCII', () => {
     const body = 'price: £9.99 — 日本語 🧪'
-    const e = buildEntry({ method: 'GET', url: 'https://s.test/', status: 200, body, base64: false })
+    const e = buildEntry({
+      method: 'GET',
+      url: 'https://s.test/',
+      status: 200,
+      body,
+      base64: false
+    })
     expect(Buffer.from(entryBodyBase64(e), 'base64').toString('utf8')).toBe(body)
   })
 
   it('serves an empty string for a response with no body', () => {
-    const e = buildEntry({ method: 'GET', url: 'https://s.test/', status: 204, body: '', base64: false })
+    const e = buildEntry({
+      method: 'GET',
+      url: 'https://s.test/',
+      status: 204,
+      body: '',
+      base64: false
+    })
     expect(entryBodyBase64(e)).toBe('')
   })
 })
@@ -216,12 +228,24 @@ describe('the entry it writes', () => {
   it('reports size in BYTES, not characters', () => {
     // A multi-byte body reported by character count understates the size and
     // the browser can truncate what it reads.
-    const e = buildEntry({ method: 'GET', url: 'https://s.test/', status: 200, body: '£££', base64: false })
+    const e = buildEntry({
+      method: 'GET',
+      url: 'https://s.test/',
+      status: 200,
+      body: '£££',
+      base64: false
+    })
     expect(e.response.content.size).toBe(6)
   })
 
   it('marks a base64 body so it is not re-encoded on the way out', () => {
-    const e = buildEntry({ method: 'GET', url: 'https://s.test/', status: 200, body: 'AAAA', base64: true })
+    const e = buildEntry({
+      method: 'GET',
+      url: 'https://s.test/',
+      status: 200,
+      body: 'AAAA',
+      base64: true
+    })
     expect(e.response.content.encoding).toBe('base64')
   })
 

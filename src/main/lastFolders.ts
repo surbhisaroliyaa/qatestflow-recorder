@@ -38,7 +38,11 @@ export async function lastFolder(key: DialogKey): Promise<string | undefined> {
  * picked FOLDER remembers itself, so the next dialog opens right there.
  * Best-effort: failing to remember must never fail the action itself.
  */
-export async function rememberFolder(key: DialogKey, picked: string, kind: 'file' | 'folder'): Promise<void> {
+export async function rememberFolder(
+  key: DialogKey,
+  picked: string,
+  kind: 'file' | 'folder'
+): Promise<void> {
   try {
     const store = await readStore()
     store[key] = kind === 'file' ? dirname(picked) : picked

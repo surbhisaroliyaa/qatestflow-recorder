@@ -267,8 +267,11 @@ export async function installBrowsers(
       resolve({
         ok: false,
         message:
-          stripAnsi(err).split(/[\r\n]+/).filter(Boolean).slice(-3).join(' ') ||
-          `The download failed (exit code ${code}).`
+          stripAnsi(err)
+            .split(/[\r\n]+/)
+            .filter(Boolean)
+            .slice(-3)
+            .join(' ') || `The download failed (exit code ${code}).`
       })
     })
   })
@@ -277,16 +280,18 @@ export async function installBrowsers(
 // The temp Playwright config for a run: one project per requested browser, all
 // headless, pointed at our temp spec. Kept minimal — the spec carries its own
 // test.use({ baseURL }).
-export function runConfig(browsers: BrowserName[], specDir: string, storageStatePath?: string): string {
+export function runConfig(
+  browsers: BrowserName[],
+  specDir: string,
+  storageStatePath?: string
+): string {
   const DEVICE: Record<BrowserName, string> = {
     chromium: 'Desktop Chrome',
     firefox: 'Desktop Firefox',
     webkit: 'Desktop Safari'
   }
   const projects = browsers
-    .map(
-      (b) => `    { name: '${b}', use: { ...devices['${DEVICE[b]}'] } }`
-    )
+    .map((b) => `    { name: '${b}', use: { ...devices['${DEVICE[b]}'] } }`)
     .join(',\n')
   // F32: a session-dependent test starts already logged in — point storageState at
   // the copied session file by ABSOLUTE path so there's no relative-resolution
@@ -457,8 +462,7 @@ export function resultsFromReport(
           id,
           ok: (prev?.ok ?? true) && ok,
           error:
-            prev?.error ??
-            (firstErr ? clip(stripAnsi(firstErr).replace(/\s+/g, ' ')) : undefined)
+            prev?.error ?? (firstErr ? clip(stripAnsi(firstErr).replace(/\s+/g, ' ')) : undefined)
         })
       }
     }
@@ -471,7 +475,9 @@ export function resultsFromReport(
       const where = e.location?.file
         ? ` (${e.location.file.split(/[\\/]/).pop()}${e.location.line ? `:${e.location.line}` : ''})`
         : ''
-      return `${stripAnsi(e.message ?? '').replace(/\s+/g, ' ').trim()}${where}`
+      return `${stripAnsi(e.message ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()}${where}`
     })
     .filter(Boolean)
 
@@ -496,7 +502,10 @@ export function resultsFromReport(
   // own error for that file when it gave us one.
   const errByFile = new Map<string, string>()
   for (const e of report.errors ?? []) {
-    const f = e.location?.file?.split(/[\\/]/).pop()?.replace(/\.spec\.ts$/, '')
+    const f = e.location?.file
+      ?.split(/[\\/]/)
+      .pop()
+      ?.replace(/\.spec\.ts$/, '')
     const id = f ? idBySlug.get(f) : undefined
     if (id && e.message) {
       errByFile.set(id, clip(stripAnsi(e.message).replace(/\s+/g, ' ')))
@@ -650,7 +659,11 @@ export default defineConfig({
     })
 
     // Pure mapping, extracted so it can be tested without spawning Playwright.
-    return resultsFromReport(json, idBySlug, specs.map((s) => s.id))
+    return resultsFromReport(
+      json,
+      idBySlug,
+      specs.map((s) => s.id)
+    )
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e)
     const needsInstall = /Executable doesn.t exist|playwright install/i.test(m)
@@ -699,11 +712,7 @@ function collectTests(
 ): { project: string; title: string; ok: boolean; error?: string }[] {
   const out: { project: string; title: string; ok: boolean; error?: string }[] = []
   const r = report as { suites?: unknown[] }
-  const walkSuite = (suite: {
-    specs?: unknown[]
-    suites?: unknown[]
-    title?: string
-  }): void => {
+  const walkSuite = (suite: { specs?: unknown[]; suites?: unknown[]; title?: string }): void => {
     for (const specRaw of suite.specs ?? []) {
       const spec = specRaw as { title?: string; tests?: unknown[] }
       for (const testRaw of spec.tests ?? []) {
@@ -891,7 +900,11 @@ export async function runCrossBrowser(
         ? (report as { errors: { message?: string }[] }).errors
         : []
     )
-      .map((e) => stripAnsi(String(e?.message ?? '')).replace(/\s+/g, ' ').trim())
+      .map((e) =>
+        stripAnsi(String(e?.message ?? ''))
+          .replace(/\s+/g, ' ')
+          .trim()
+      )
       .filter(Boolean)
 
     // Does a message actually say the binaries are missing? This is the ONLY
@@ -967,9 +980,7 @@ export async function runCrossBrowser(
       ran: false,
       results: [],
       needsBrowsers: needsInstall || undefined,
-      message: needsInstall
-        ? missingBrowsersMessage()
-        : `Cross-browser run failed: ${clip(m)}`
+      message: needsInstall ? missingBrowsersMessage() : `Cross-browser run failed: ${clip(m)}`
     }
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {})

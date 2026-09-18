@@ -55,12 +55,7 @@ import { mkdir, readFile, readdir, writeFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'node:crypto'
-import {
-  decodeStore,
-  encodeStore,
-  orphanedRefs,
-  type SecretMap
-} from '../shared/secretsCodec'
+import { decodeStore, encodeStore, orphanedRefs, type SecretMap } from '../shared/secretsCodec'
 import {
   maskPasswordInputs,
   maskStepDescription,
@@ -348,7 +343,11 @@ export async function migratePlaintextSecrets(
       await mkdir(backupDir, { recursive: true })
     }
     // `safe`, not `data`: see above. Structure preserved, values by ref.
-    await writeFile(join(backupDir, file.replace(/[\\/]/g, '__')), JSON.stringify(safe, null, 2), 'utf-8')
+    await writeFile(
+      join(backupDir, file.replace(/[\\/]/g, '__')),
+      JSON.stringify(safe, null, 2),
+      'utf-8'
+    )
     await writeTest(file, { ...safe, secretsVersion: SECRETS_FILE_VERSION })
     touched.push(file)
   }
@@ -568,8 +567,9 @@ export function placeholderSecrets(steps: unknown[]): unknown[] {
  * naming rule lives in secretCells.ts, shared with the spec exporter, so a
  * bundle and an export always ask for the same variables.
  */
-export function scrubDataRows(
-  rows: Record<string, string>[] | undefined
-): { rows: Record<string, string>[]; scrubbed: string[] } {
+export function scrubDataRows(rows: Record<string, string>[] | undefined): {
+  rows: Record<string, string>[]
+  scrubbed: string[]
+} {
   return placeholderRows(rows)
 }

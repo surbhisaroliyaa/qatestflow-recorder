@@ -58,11 +58,11 @@ export function SuiteReport({
 }: SuiteReportProps): React.JSX.Element {
   return (
     <>
-        {
-          /* Day 11.5 + B: the suite-run REPORT — only once the run has FINISHED
+      {
+        /* Day 11.5 + B: the suite-run REPORT — only once the run has FINISHED
              (suiteSummaryOpen). Without that gate it pops open mid-run and covers
              the live progress. */
-          suiteSummaryOpen &&
+        suiteSummaryOpen &&
           suiteRun &&
           (() => {
             const r = suiteRun.results
@@ -240,9 +240,8 @@ export function SuiteReport({
                     return (
                       <div className="edge-warn edge-warn-block">
                         ⚠ {byVar.size} environment {byVar.size === 1 ? 'variable' : 'variables'} had
-                        no value in this run — every step using{' '}
-                        {byVar.size === 1 ? 'it' : 'them'} typed an{' '}
-                        <strong>empty string</strong>, so a failure below may be about the
+                        no value in this run — every step using {byVar.size === 1 ? 'it' : 'them'}{' '}
+                        typed an <strong>empty string</strong>, so a failure below may be about the
                         environment rather than the test.
                         <ul className="env-missing-list">
                           {[...byVar.entries()].map(([v, tests]) => (
@@ -270,7 +269,9 @@ export function SuiteReport({
 
                   {/* B: heal review — persist every auto-healed selector in one click. */}
                   {healedSaves.length > 0 && (
-                    <div className={`blast-radius${suiteRun.healedSaved ? ' blast-radius-safe' : ''}`}>
+                    <div
+                      className={`blast-radius${suiteRun.healedSaved ? ' blast-radius-safe' : ''}`}
+                    >
                       {suiteRun.healedSaved ? (
                         <span className="blast-radius-head">
                           ✓ Saved {healedCount} repaired selector{healedCount > 1 ? 's' : ''} across{' '}
@@ -300,8 +301,8 @@ export function SuiteReport({
                     <div className="healable-review">
                       <div className="healable-head">
                         🔧 {suiteRun.healables!.length} failed test
-                        {suiteRun.healables!.length > 1 ? 's' : ''} could be self-healed — review before
-                        accepting (a low-confidence heal may target the wrong element):
+                        {suiteRun.healables!.length > 1 ? 's' : ''} could be self-healed — review
+                        before accepting (a low-confidence heal may target the wrong element):
                       </div>
                       <ul className="blast-list">
                         {suiteRun.healables!.map((hf) => {
@@ -438,7 +439,8 @@ export function SuiteReport({
                 </div>
               </div>
             )
-          })()}
+          })()
+      }
     </>
   )
 }

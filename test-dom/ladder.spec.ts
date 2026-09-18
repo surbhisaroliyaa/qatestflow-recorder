@@ -94,7 +94,7 @@ test.describe('the replay ladder', () => {
     await page.setContent('<div id="host"></div>')
     await page.evaluate(
       "const r = document.getElementById('host').attachShadow({ mode: 'open' });" +
-        "r.innerHTML = '<button id=\"deep\">Deep</button>';" +
+        'r.innerHTML = \'<button id="deep">Deep</button>\';' +
         "r.getElementById('deep').addEventListener('click', () => document.title = 'DEEP');"
     )
     await run(page, s({ type: 'click', candidates: [css('#deep')] }))
@@ -161,13 +161,11 @@ test.describe('actions', () => {
 })
 
 test.describe('checks', () => {
-  const check = async (
-    page: Page,
-    kind: string,
-    value?: string,
-    attr?: string
-  ): Promise<Result> =>
-    run(page, s({ type: 'assert', assertKind: kind, value, attrName: attr, candidates: [css('#t')] }))
+  const check = async (page: Page, kind: string, value?: string, attr?: string): Promise<Result> =>
+    run(
+      page,
+      s({ type: 'assert', assertKind: kind, value, attrName: attr, candidates: [css('#t')] })
+    )
 
   test('text-equals passes on a match and fails on a mismatch', async ({ page }) => {
     await page.setContent('<p id="t">Order complete</p>')

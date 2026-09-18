@@ -49,7 +49,9 @@ export function ApiEditorModal({
             <select
               className="api-method"
               value={apiMethod}
-              onChange={(e) => patchApiDraft({ apiMethod: e.target.value as RecorderStep['apiMethod'] })}
+              onChange={(e) =>
+                patchApiDraft({ apiMethod: e.target.value as RecorderStep['apiMethod'] })
+              }
             >
               {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((m) => (
                 <option key={m} value={m}>
@@ -187,8 +189,8 @@ export function ApiEditorModal({
               was silently dropped. */}
           <label className="api-field api-save-field">
             <span>
-              💾 Save from response — <strong>not a check</strong>. One{' '}
-              <code>name = path</code> per line, used later as <code>{'{{saved:name}}'}</code>
+              💾 Save from response — <strong>not a check</strong>. One <code>name = path</code> per
+              line, used later as <code>{'{{saved:name}}'}</code>
             </span>
             <textarea
               className="api-headers"
@@ -218,8 +220,8 @@ export function ApiEditorModal({
             </label>
             <label className="api-field">
               <span>
-                …or, if the API returns a <strong>token in the body</strong>: set localStorage —
-                one <code>key = value</code> per line
+                …or, if the API returns a <strong>token in the body</strong>: set localStorage — one{' '}
+                <code>key = value</code> per line
               </span>
               <textarea
                 className="api-headers"

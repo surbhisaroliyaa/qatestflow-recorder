@@ -23,9 +23,9 @@ export function AiPromptModal({
   aiPromptText,
   handleGenerateAiSteps,
   setAiPromptOpen,
-  setAiPromptText,
+  setAiPromptText
 }: AiPromptModalProps): React.JSX.Element | null {
-  if (!(aiPromptOpen)) return null
+  if (!aiPromptOpen) return null
   return (
     <div className="modal-backdrop" onClick={() => setAiPromptOpen(false)}>
       <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>

@@ -90,19 +90,21 @@ export function EnvManagerModal({
               />
             </label>
             <div className="env-field-help">
-              At run time, every navigation recorded under a test&rsquo;s own base URL is
-              re-pointed here &mdash; the saved test is never changed.
+              At run time, every navigation recorded under a test&rsquo;s own base URL is re-pointed
+              here &mdash; the saved test is never changed.
             </div>
 
             <div className="env-vars">
               <div className="env-vars-head">
                 <span className="env-field-label">Variables</span>
                 <span className="env-vars-hint">
-                  Referenced in steps as <code>{'{{env:NAME}}'}</code> &mdash; e.g. a login
-                  field. Each environment supplies its own values.
+                  Referenced in steps as <code>{'{{env:NAME}}'}</code> &mdash; e.g. a login field.
+                  Each environment supplies its own values.
                 </span>
               </div>
-              {envDraft.vars.length === 0 && <div className="env-vars-empty">No variables yet.</div>}
+              {envDraft.vars.length === 0 && (
+                <div className="env-vars-empty">No variables yet.</div>
+              )}
               {envDraft.vars.map((v, vi) => (
                 <div key={vi} className="env-var-row">
                   <input
@@ -134,10 +136,7 @@ export function EnvManagerModal({
                     }
                     spellCheck={false}
                   />
-                  <label
-                    className="env-var-secret"
-                    title="Mask this value on screen (a password)"
-                  >
+                  <label className="env-var-secret" title="Mask this value on screen (a password)">
                     <input
                       type="checkbox"
                       checked={!!v.secret}

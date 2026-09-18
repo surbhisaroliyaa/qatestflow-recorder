@@ -108,7 +108,11 @@ describe('the shareable report escapes what the site gave it', () => {
   it('still says the true thing about the run', () => {
     // Escaping must not cost the report its meaning.
     const html = generateReportHtml(
-      manifest({ ok: false, failedAt: 0, steps: [step({ status: 'error', error: 'Element not found' })] })
+      manifest({
+        ok: false,
+        failedAt: 0,
+        steps: [step({ status: 'error', error: 'Element not found' })]
+      })
     )
     expect(html).toContain('Element not found')
     expect(html).toContain('Checkout flow')
@@ -170,10 +174,9 @@ describe('what the report says about the run', () => {
   })
 
   it('embeds a screenshot given to it, rather than linking a path', () => {
-    const html = generateReportHtml(
-      manifest({ steps: [step({ screenshotFile: 'step-0.png' })] }),
-      { 'step-0.png': 'data:image/png;base64,AAAA' }
-    )
+    const html = generateReportHtml(manifest({ steps: [step({ screenshotFile: 'step-0.png' })] }), {
+      'step-0.png': 'data:image/png;base64,AAAA'
+    })
     expect(html).toContain('data:image/png;base64,AAAA')
   })
 
@@ -183,7 +186,9 @@ describe('what the report says about the run', () => {
 
   it('survives a step with no evidence of any kind', () => {
     expect(() =>
-      generateReportHtml(manifest({ steps: [step({ screenshotFile: undefined, error: undefined })] }))
+      generateReportHtml(
+        manifest({ steps: [step({ screenshotFile: undefined, error: undefined })] })
+      )
     ).not.toThrow()
   })
 })

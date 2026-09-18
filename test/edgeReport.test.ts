@@ -191,10 +191,18 @@ describe('buildEdgeReport', () => {
   })
 
   it('flags an ACCEPTED hostile input as needing review', () => {
-    const md = buildEdgeReport(run({ results: [
-      { case: { baseline: true, fieldLabel: '', edgeLabel: '', value: '', hint: '' }, ok: true },
-      variant({ ok: true })
-    ] }), 'Login')
+    const md = buildEdgeReport(
+      run({
+        results: [
+          {
+            case: { baseline: true, fieldLabel: '', edgeLabel: '', value: '', hint: '' },
+            ok: true
+          },
+          variant({ ok: true })
+        ]
+      }),
+      'Login'
+    )
     expect(md).toContain('⚠ Accepted (app took the bad input — review): 1')
     expect(md).toContain('⚠ ACCEPTED — **Password**')
   })
@@ -202,10 +210,17 @@ describe('buildEdgeReport', () => {
   it('does not print accepted/rejected counts when nothing could be judged', () => {
     // "0 rejected" beside "14 undetermined" reads as a finding; it isn't one.
     const md = buildEdgeReport(
-      run({ hasAssertion: false, results: [
-        { case: { baseline: true, fieldLabel: '', edgeLabel: '', value: '', hint: '' }, ok: true, finalUrl: 'https://x.test/' },
-        variant({ finalUrl: 'https://x.test/' })
-      ] }),
+      run({
+        hasAssertion: false,
+        results: [
+          {
+            case: { baseline: true, fieldLabel: '', edgeLabel: '', value: '', hint: '' },
+            ok: true,
+            finalUrl: 'https://x.test/'
+          },
+          variant({ finalUrl: 'https://x.test/' })
+        ]
+      }),
       'Login'
     )
     expect(md).toContain('? Undetermined: 1')
@@ -214,10 +229,15 @@ describe('buildEdgeReport', () => {
 
   it('says plainly when the baseline itself failed', () => {
     const md = buildEdgeReport(
-      run({ results: [
-        { case: { baseline: true, fieldLabel: '', edgeLabel: '', value: '', hint: '' }, ok: false },
-        variant()
-      ] }),
+      run({
+        results: [
+          {
+            case: { baseline: true, fieldLabel: '', edgeLabel: '', value: '', hint: '' },
+            ok: false
+          },
+          variant()
+        ]
+      }),
       'Login'
     )
     expect(md).toMatch(/Baseline \(happy path\) FAILED/)
@@ -234,10 +254,17 @@ describe('buildEdgeReport', () => {
 
   it('shows (empty) rather than a blank for an empty-string variant', () => {
     const md = buildEdgeReport(
-      run({ results: [
-        { case: { baseline: true, fieldLabel: '', edgeLabel: '', value: '', hint: '' }, ok: true },
-        variant({ case: { fieldLabel: 'Password', edgeLabel: 'empty', value: '', hint: 'blank' } })
-      ] }),
+      run({
+        results: [
+          {
+            case: { baseline: true, fieldLabel: '', edgeLabel: '', value: '', hint: '' },
+            ok: true
+          },
+          variant({
+            case: { fieldLabel: 'Password', edgeLabel: 'empty', value: '', hint: 'blank' }
+          })
+        ]
+      }),
       'Login'
     )
     expect(md).toContain('(empty)')

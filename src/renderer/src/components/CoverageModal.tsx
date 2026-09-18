@@ -27,7 +27,7 @@ export function CoverageModal({
   normCovPath,
   setCoverageOpen
 }: CoverageModalProps): React.JSX.Element | null {
-  if (!(coverageOpen)) return null
+  if (!coverageOpen) return null
   return (
     <div
       className="modal-backdrop"
@@ -52,7 +52,8 @@ export function CoverageModal({
           ) : !coverageRun?.result || coverageRun.result.pages.length === 0 ? (
             <p className="api-hint">
               Nothing to map. Open your app in the browser first (navigate, and log in if it needs a
-              session), then run 🗺️ Coverage from that page — it crawls outward from wherever you are.
+              session), then run 🗺️ Coverage from that page — it crawls outward from wherever you
+              are.
             </p>
           ) : (
             (() => {
@@ -93,9 +94,9 @@ export function CoverageModal({
                     Crawled <strong>{pages.length}</strong> page{pages.length === 1 ? '' : 's'} from{' '}
                     <code>{result.origin}</code>
                     {result.capped ? ' (stopped at the 40-page cap)' : ''}. A page counts as tested
-                    when a saved test <strong>navigates</strong> to it or <strong>asserts its URL</strong>
-                    — one reached only by clicking through can still show as a gap, which is a nudge to
-                    add an explicit check there.
+                    when a saved test <strong>navigates</strong> to it or{' '}
+                    <strong>asserts its URL</strong>— one reached only by clicking through can still
+                    show as a gap, which is a nudge to add an explicit check there.
                   </p>
                   <div className="ac-summary">
                     {coveredCount} of {pages.length} pages covered ({pct}%)

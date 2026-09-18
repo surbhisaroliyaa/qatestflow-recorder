@@ -122,9 +122,13 @@ describe('missingEnvNames', () => {
     // A monitor's pinned environment always wins — the resolver only knows the
     // ACTIVE environment plus the process, so it cannot see the pin.
     expect(
-      missingEnvNames(['SAUCE_PW'], { values: { SAUCE_PW: '' }, unresolved: ['SAUCE_PW'] }, {
-        SAUCE_PW: 'secret_sauce'
-      })
+      missingEnvNames(
+        ['SAUCE_PW'],
+        { values: { SAUCE_PW: '' }, unresolved: ['SAUCE_PW'] },
+        {
+          SAUCE_PW: 'secret_sauce'
+        }
+      )
     ).toEqual([])
   })
 

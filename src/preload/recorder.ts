@@ -54,7 +54,11 @@ const send = (channel: string, payload: Record<string, unknown>): void =>
 const observed = new Map<string, { doc: Document; handle: ObserverHandle }>()
 const pathKey = (path: ObserverFrameStep[] | null): string => (path ? JSON.stringify(path) : '')
 
-function observe(win: Window & typeof globalThis, doc: Document, path: ObserverFrameStep[] | null): void {
+function observe(
+  win: Window & typeof globalThis,
+  doc: Document,
+  path: ObserverFrameStep[] | null
+): void {
   const key = pathKey(path)
   const known = observed.get(key)
   if (known && known.doc === doc) return
@@ -150,7 +154,8 @@ function watchUploads(doc: Document, path: ObserverFrameStep[] | null): void {
     (event: Event) => {
       if (!event.isTrusted || !state.recording) return
       const el = event.target as HTMLInputElement | null
-      if (!el || el.tagName !== 'INPUT' || el.type !== 'file' || !el.files || !el.files.length) return
+      if (!el || el.tagName !== 'INPUT' || el.type !== 'file' || !el.files || !el.files.length)
+        return
       const files = Array.from(el.files)
       const paths: string[] = []
       for (const f of files) {

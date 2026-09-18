@@ -26,7 +26,9 @@ import {
 // =====================================================================
 
 /** An in-memory store standing in for the encrypted secrets.json. */
-function fakeSink(initial: Record<string, string> = {}): SecretSink & { map: Record<string, string> } {
+function fakeSink(
+  initial: Record<string, string> = {}
+): SecretSink & { map: Record<string, string> } {
   const map = { ...initial }
   let n = 0
   return {
@@ -54,17 +56,25 @@ describe('a password step nobody marked secret', () => {
 
   it('is recognised by its name', () => {
     expect(looksLikePasswordStep(unmarked)).toBe(true)
-    expect(looksLikePasswordStep(step({ type: 'type', label: 'x', selector: "locator('#pwd')", value: 'a' }))).toBe(true)
+    expect(
+      looksLikePasswordStep(
+        step({ type: 'type', label: 'x', selector: "locator('#pwd')", value: 'a' })
+      )
+    ).toBe(true)
     expect(looksLikePasswordStep(step({ type: 'type', label: 'Passwd', value: 'a' }))).toBe(true)
   })
 
   it('is not confused with an ordinary field, a click, or a value that is not a secret', () => {
-    expect(looksLikePasswordStep(step({ type: 'type', label: 'Username', value: 'standard_user' }))).toBe(false)
+    expect(
+      looksLikePasswordStep(step({ type: 'type', label: 'Username', value: 'standard_user' }))
+    ).toBe(false)
     expect(looksLikePasswordStep(step({ type: 'click', label: 'Password' }))).toBe(false)
     // Empty: "Password is required" tests depend on it staying empty.
     expect(looksLikePasswordStep(step({ type: 'type', label: 'Password', value: '' }))).toBe(false)
     // A token is already a reference, not a value.
-    expect(looksLikePasswordStep(step({ type: 'type', label: 'Password', value: '{{password}}' }))).toBe(false)
+    expect(
+      looksLikePasswordStep(step({ type: 'type', label: 'Password', value: '{{password}}' }))
+    ).toBe(false)
   })
 
   it('is moved into the store ONLY when the by-name pass is asked for', () => {
@@ -98,9 +108,13 @@ describe('stripping steps', () => {
     // The renderer never learns the ref, so every autosave re-sends plaintext.
     const sink = fakeSink()
     const first = stripStepSecrets([step({ id: 5, type: 'type', secret: true, value: 'pw' })], sink)
-    const again = stripStepSecrets([step({ id: 5, type: 'type', secret: true, value: 'pw' })], sink, {
-      refsById: refsByStepId(first.steps)
-    })
+    const again = stripStepSecrets(
+      [step({ id: 5, type: 'type', secret: true, value: 'pw' })],
+      sink,
+      {
+        refsById: refsByStepId(first.steps)
+      }
+    )
     expect((again.steps[0] as Record<string, unknown>).secretRef).toBe(
       (first.steps[0] as Record<string, unknown>).secretRef
     )
@@ -203,7 +217,12 @@ describe('what the exported spec reads for a sensitive cell', () => {
       sink
     ).rows!
     const plan = planSecretEnv(rows)
-    expect(plan.cells.map((c) => c.password)).toEqual(['PASSWORD_1', 'PASSWORD_2', 'PASSWORD_1', undefined])
+    expect(plan.cells.map((c) => c.password)).toEqual([
+      'PASSWORD_1',
+      'PASSWORD_2',
+      'PASSWORD_1',
+      undefined
+    ])
     // Filled from the store at run time — by ref, never by holding the value.
     expect(plan.sources.PASSWORD_1.ref).toBe(secretCellRef(rows[0].password))
     expect(sink.map[plan.sources.PASSWORD_2.ref!]).toBe('wrong_pass')
@@ -239,19 +258,32 @@ describe('describing a step never prints a password', () => {
   it('masks a flagged step, and an unflagged copy whose field is a password', () => {
     // A data-driven run describes a COPY with the row's password filled in.
     expect(isSecretForDisplay(step({ type: 'type', secret: true, value: 'x' }))).toBe(true)
-    expect(isSecretForDisplay(step({ type: 'type', label: 'Password', value: 'secret_sauce' }))).toBe(true)
-    expect(isSecretForDisplay(step({ type: 'type', label: 'Username', value: 'standard_user' }))).toBe(false)
+    expect(
+      isSecretForDisplay(step({ type: 'type', label: 'Password', value: 'secret_sauce' }))
+    ).toBe(true)
+    expect(
+      isSecretForDisplay(step({ type: 'type', label: 'Username', value: 'standard_user' }))
+    ).toBe(false)
   })
 
   it('shows an edge-case variant’s hostile value — that is the evidence', () => {
-    const variant = step({ type: 'type', label: 'Password', value: "' OR 1=1 --", revealValue: true })
+    const variant = step({
+      type: 'type',
+      label: 'Password',
+      value: "' OR 1=1 --",
+      revealValue: true
+    })
     expect(isSecretForDisplay(variant)).toBe(false)
     expect(looksLikePasswordStep(variant)).toBe(false)
   })
 
   it('repairs a description already written to disk', () => {
-    expect(maskStepDescription('Type "secret_sauce" into Password')).toBe('Type "••••••••" into Password')
-    expect(maskStepDescription('Type "standard_user" into Username')).toBe('Type "standard_user" into Username')
+    expect(maskStepDescription('Type "secret_sauce" into Password')).toBe(
+      'Type "••••••••" into Password'
+    )
+    expect(maskStepDescription('Type "standard_user" into Username')).toBe(
+      'Type "standard_user" into Username'
+    )
     expect(maskStepDescription('Click Login')).toBe('Click Login')
   })
 })
@@ -263,12 +295,17 @@ describe('a page snapshot in a trace', () => {
       '<input class="input_error form_input" placeholder="Password" type="password" data-test="password" id="password" value="secret_sauce">'
     expect(maskPasswordInputs(real)).not.toContain('secret_sauce')
     expect(maskPasswordInputs(real)).toContain('value=""')
-    expect(maskPasswordInputs("<INPUT value='x' TYPE='Password'>")).toBe("<INPUT value=\"\" TYPE='Password'>")
-    expect(maskPasswordInputs('<input type=password value=hunter2>')).toBe('<input type=password value="">')
+    expect(maskPasswordInputs("<INPUT value='x' TYPE='Password'>")).toBe(
+      '<INPUT value="" TYPE=\'Password\'>'
+    )
+    expect(maskPasswordInputs('<input type=password value=hunter2>')).toBe(
+      '<input type=password value="">'
+    )
   })
 
   it('leaves every other field and the rest of the page alone', () => {
-    const html = '<p>Password for all users: secret_sauce</p><input type="text" value="standard_user">'
+    const html =
+      '<p>Password for all users: secret_sauce</p><input type="text" value="standard_user">'
     expect(maskPasswordInputs(html)).toBe(html)
   })
 })

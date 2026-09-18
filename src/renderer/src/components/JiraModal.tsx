@@ -49,7 +49,7 @@ export function JiraModal({
   setJiraSummaryText,
   setJiraToken
 }: JiraModalProps): React.JSX.Element | null {
-  if (!(jiraOpen)) return null
+  if (!jiraOpen) return null
   return (
     <div className="modal-backdrop" onClick={() => !jiraBusy && setJiraOpen(false)}>
       <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>

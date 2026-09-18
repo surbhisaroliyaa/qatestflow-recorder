@@ -27,13 +27,17 @@ export function BugPromptModal({
   setBugPromptOpen,
   setBugReproText
 }: BugPromptModalProps): React.JSX.Element | null {
-  if (!(bugPromptOpen)) return null
+  if (!bugPromptOpen) return null
   return (
     <div className="modal-backdrop" onClick={() => setBugPromptOpen(false)}>
       <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">🐛 Bug check — this page</span>
-          <button className="modal-close" onClick={() => setBugPromptOpen(false)} aria-label="Close">
+          <button
+            className="modal-close"
+            onClick={() => setBugPromptOpen(false)}
+            aria-label="Close"
+          >
             ✕
           </button>
         </div>

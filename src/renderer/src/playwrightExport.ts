@@ -23,8 +23,7 @@ import { isSecretForDisplay, isSensitiveColumn, planSecretEnv } from '../../shar
 // they're never hard-coded (matches how the export reads process.env.NAME).
 export function generateCiWorkflow(secretNames: string[] = []): string {
   const envBlock = secretNames.length
-    ? '\n        env:\n' +
-      secretNames.map((n) => `          ${n}: \${{ secrets.${n} }}`).join('\n')
+    ? '\n        env:\n' + secretNames.map((n) => `          ${n}: \${{ secrets.${n} }}`).join('\n')
     : ''
   return `# GitHub Actions — run the exported Playwright tests on every push / PR.
 # Place this file at your repo root as .github/workflows/playwright.yml
@@ -346,9 +345,7 @@ export function anyApiChecks(steps: RecorderStep[]): boolean {
   return steps.some(
     (s) =>
       s.type === 'api' &&
-      (s.apiChecks ?? '')
-        .split('\n')
-        .some((l) => l.trim() && !l.trim().startsWith('#'))
+      (s.apiChecks ?? '').split('\n').some((l) => l.trim() && !l.trim().startsWith('#'))
   )
 }
 
@@ -498,7 +495,8 @@ function apiCheckLines(step: RecorderStep, ind: string, columns: string[] = []):
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'))
-  const contract = step.apiContract && Object.keys(step.apiContract).length ? step.apiContract : null
+  const contract =
+    step.apiContract && Object.keys(step.apiContract).length ? step.apiContract : null
   if (!raw.length && !contract) return ''
 
   // A line that doesn't parse is kept with an empty op, exactly as the app keeps it
@@ -510,7 +508,9 @@ function apiCheckLines(step: RecorderStep, ind: string, columns: string[] = []):
   })
 
   const needsBody =
-    !!contract || parsed.some((c) => !!c.op && !/^header:/i.test(c.path)) || parsed.some((c) => !c.op)
+    !!contract ||
+    parsed.some((c) => !!c.op && !/^header:/i.test(c.path)) ||
+    parsed.some((c) => !c.op)
   if (needsBody) lines.push(`${ind}const body = await res.json()`)
 
   if (parsed.length) {
@@ -847,7 +847,9 @@ export function stepText(step: RecorderStep): string {
     case 'api': {
       const method = step.apiMethod ?? 'GET'
       const status = (step.apiExpectStatus ?? '').trim() || '2xx'
-      const body = (step.apiExpectBody ?? '').trim() ? `, body contains "${step.apiExpectBody!.trim()}"` : ''
+      const body = (step.apiExpectBody ?? '').trim()
+        ? `, body contains "${step.apiExpectBody!.trim()}"`
+        : ''
       return `API ${method} ${step.url ?? ''} → expect ${status}${body}`
     }
     case 'click':
@@ -1226,7 +1228,9 @@ function actionFor(
     // it as Playwright's maxDiffPixels so the exported test matches the app. (The %
     // threshold maps to maxDiffPixelRatio.)
     const maxDiffPixels = Number(step.maxDiffPixels)
-    opts.push(`maxDiffPixels: ${Number.isFinite(maxDiffPixels) && maxDiffPixels >= 0 ? maxDiffPixels : 200}`)
+    opts.push(
+      `maxDiffPixels: ${Number.isFinite(maxDiffPixels) && maxDiffPixels >= 0 ? maxDiffPixels : 200}`
+    )
     const thresholdPct = parseFloat(step.value ?? '1')
     if (Number.isFinite(thresholdPct) && thresholdPct > 0) {
       opts.push(`maxDiffPixelRatio: ${+(thresholdPct / 100).toFixed(4)}`)
@@ -2178,8 +2182,7 @@ export function generatePageObjectTest(
   const tabOf = (step: RecorderStep): number => step.windowId ?? 0
   const frameKeyOf = (step: RecorderStep): string =>
     (step.frame ?? []).map((f) => f.name || f.url).join('>')
-  const keyOf = (step: RecorderStep): string =>
-    `${tabOf(step)}|${frameKeyOf(step)}|${exprOf(step)}`
+  const keyOf = (step: RecorderStep): string => `${tabOf(step)}|${frameKeyOf(step)}|${exprOf(step)}`
 
   // What IS each element? Decided by every action performed on it across the
   // WHOLE test — not by the one step we happen to name it from.
@@ -2642,7 +2645,8 @@ export function generatePageObjectTest(
     // next door rather than lower down the same file.
     for (const m of ctx.methods) {
       const returned = m.returns?.type
-      if (returned && returned !== 'Download') lines.push(`import { ${returned} } from './${returned}'`)
+      if (returned && returned !== 'Download')
+        lines.push(`import { ${returned} } from './${returned}'`)
     }
     lines.push('')
     lines.push(`export class ${ctx.className} {`)

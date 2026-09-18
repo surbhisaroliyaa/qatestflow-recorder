@@ -385,7 +385,13 @@ function classifyOne(ev: FailureEvidence): OneVerdict {
 // When a test fails at several steps, one headline verdict has to represent them
 // all. Prefer the most product-implicating / actionable read: a real app-bug
 // anywhere trumps a stale-test elsewhere, etc.
-const VERDICT_PRIORITY: FailureVerdict[] = ['app-bug', 'environment', 'timing', 'test-bug', 'unknown']
+const VERDICT_PRIORITY: FailureVerdict[] = [
+  'app-bug',
+  'environment',
+  'timing',
+  'test-bug',
+  'unknown'
+]
 function headlineVerdict(verdicts: FailureVerdict[]): FailureVerdict {
   for (const v of VERDICT_PRIORITY) if (verdicts.includes(v)) return v
   return 'unknown'
@@ -442,7 +448,13 @@ export function ruleBasedExplain(ev: FailureEvidence): FailureAnalysis {
 export function categorizeFailure(ev: FailureEvidence): FailureCategory {
   if (ev.failures && ev.failures.length > 1) {
     const parts = ev.failures.map((f) =>
-      classifyOne({ ...ev, stepIndex: f.index, stepText: f.stepText, error: f.error, selector: f.selector })
+      classifyOne({
+        ...ev,
+        stepIndex: f.index,
+        stepText: f.stepText,
+        error: f.error,
+        selector: f.selector
+      })
     )
     const v = headlineVerdict(parts.map((p) => p.verdict))
     return (parts.find((p) => p.verdict === v) ?? parts[0]).category
@@ -491,7 +503,8 @@ function buildPrompt(ev: FailureEvidence): string {
     lines.push(
       `This test failed at ${ev.failures!.length} steps. Analyze the WHOLE test and give ONE combined verdict + explanation that covers all of them:`,
       ...ev.failures!.map(
-        (f, i) => `  (${i + 1}) Step ${f.index + 1}: ${f.stepText}${f.selector ? ` [selector: ${f.selector}]` : ''} — Error: ${f.error}`
+        (f, i) =>
+          `  (${i + 1}) Step ${f.index + 1}: ${f.stepText}${f.selector ? ` [selector: ${f.selector}]` : ''} — Error: ${f.error}`
       ),
       ''
     )
@@ -583,7 +596,11 @@ function parseAiAnswer(text: string): FailureAnalysis | null {
 // Run one headless `claude -p` prompt; resolve to its stdout, or null on ANY
 // problem (CLI missing, non-zero exit, timeout, empty output). Shared by the
 // failure explainer and the F19 AI-assertion evaluator.
-function runClaude(prompt: string, cwd: string, timeoutMs = CLAUDE_TIMEOUT_MS): Promise<string | null> {
+function runClaude(
+  prompt: string,
+  cwd: string,
+  timeoutMs = CLAUDE_TIMEOUT_MS
+): Promise<string | null> {
   return new Promise((resolve) => {
     // COST SAFETY: even if an Anthropic API key exists in the machine's
     // environment, never let the CLI see it — with no key, `claude` can
@@ -898,11 +915,15 @@ function parseNlAnswer(text: string): { pass: boolean; reason: string } | null {
 }
 
 /** Pull "N. RESULT: … / REASON: …" blocks out of a batched answer, by number. */
-export function parseNlAnswers(text: string, count: number): ({ pass: boolean; reason: string } | null)[] {
+export function parseNlAnswers(
+  text: string,
+  count: number
+): ({ pass: boolean; reason: string } | null)[] {
   const out: ({ pass: boolean; reason: string } | null)[] = new Array(count).fill(null)
   // Split on a leading "<n>." / "<n>)" so each claim's block is isolated; a
   // REASON sentence can itself contain the word RESULT without confusing us.
-  const re = /(?:^|\n)\s*(\d+)[.)]\s*RESULT:\s*(PASS|FAIL)([\s\S]*?)(?=(?:\n\s*\d+[.)]\s*RESULT:)|$)/gi
+  const re =
+    /(?:^|\n)\s*(\d+)[.)]\s*RESULT:\s*(PASS|FAIL)([\s\S]*?)(?=(?:\n\s*\d+[.)]\s*RESULT:)|$)/gi
   let m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) {
     const idx = Number(m[1]) - 1
@@ -942,14 +963,16 @@ export async function evaluateNlAssertions(
       error: `AI check "${c}" could not run — Claude was unavailable. (This is an AI assertion; it needs the Claude CLI at replay time.)`
     }))
   }
-  const parsed =
-    cleaned.length === 1 ? [parseNlAnswer(out)] : parseNlAnswers(out, cleaned.length)
+  const parsed = cleaned.length === 1 ? [parseNlAnswer(out)] : parseNlAnswers(out, cleaned.length)
   return cleaned.map((c, i) => {
     if (!c) return { pass: false, error: 'AI check has no claim to verify — type what to check.' }
     const p = parsed[i]
     if (!p) return { pass: false, error: `AI check "${c}" got an unreadable response from Claude.` }
     if (p.pass) return { pass: true, error: '' }
-    return { pass: false, error: `AI check failed: "${c}" — ${p.reason || 'the page did not satisfy it.'}` }
+    return {
+      pass: false,
+      error: `AI check failed: "${c}" — ${p.reason || 'the page did not satisfy it.'}`
+    }
   })
 }
 
@@ -992,7 +1015,7 @@ function buildAiStepsPrompt(intent: string, elements: AiElement[]): string {
     .map((e) => `${e.index} — <${e.tag}${e.type ? ` type=${e.type}` : ''}> "${e.label}"`)
     .join('\n')
   return [
-    'You convert a QA tester\'s plain-English intent into concrete UI steps, using',
+    "You convert a QA tester's plain-English intent into concrete UI steps, using",
     'ONLY the interactive elements present on the CURRENT page (listed below).',
     'Never invent an element or a selector. If the intent needs something not in',
     'the list (e.g. a element that only appears on the NEXT page), stop there.',
@@ -1230,7 +1253,11 @@ export async function draftTestFromStory(
   if (out == null) return null // Claude unavailable — caller surfaces it
   const parsed = parseDraft(out)
   if (!parsed) {
-    return { title: '', steps: [], note: 'The AI didn’t return a usable draft — try rephrasing the story.' }
+    return {
+      title: '',
+      steps: [],
+      note: 'The AI didn’t return a usable draft — try rephrasing the story.'
+    }
   }
   const checks = parsed.steps.filter((s) => s.kind === 'check').length
   const note = checks

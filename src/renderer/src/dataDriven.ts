@@ -151,7 +151,8 @@ export function substituteSteps(
     // F24: resolve env/data tokens inside an API step's headers + body too — and
     // its assertions, so `name equals {{customer}}` actually checks the row's
     // customer instead of the literal text "{{customer}}".
-    if (typeof s.apiHeaders === 'string') next.apiHeaders = substituteText(s.apiHeaders, row, envMap)
+    if (typeof s.apiHeaders === 'string')
+      next.apiHeaders = substituteText(s.apiHeaders, row, envMap)
     if (typeof s.apiBody === 'string') next.apiBody = substituteText(s.apiBody, row, envMap)
     if (typeof s.apiChecks === 'string') next.apiChecks = substituteText(s.apiChecks, row, envMap)
     if (typeof s.apiExpectBody === 'string') {

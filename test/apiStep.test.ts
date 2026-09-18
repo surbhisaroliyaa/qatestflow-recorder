@@ -180,7 +180,9 @@ describe('did the response status pass?', () => {
 describe('the exported assertion agrees with the in-app rule', () => {
   const specFor = (expectStatus?: string): string =>
     generatePlaywrightTest(
-      [s({ type: 'api', apiMethod: 'GET', url: 'https://a.test/x', apiExpectStatus: expectStatus })],
+      [
+        s({ type: 'api', apiMethod: 'GET', url: 'https://a.test/x', apiExpectStatus: expectStatus })
+      ],
       { name: 'T' }
     )
 

@@ -11,9 +11,8 @@ vi.mock('electron', () => ({
   }
 }))
 
-const { pointAtAbsolute, resultsFromReport, runConfig, specSlug } = await import(
-  '../src/main/xbrowser'
-)
+const { pointAtAbsolute, resultsFromReport, runConfig, specSlug } =
+  await import('../src/main/xbrowser')
 
 // =====================================================================
 // F17 / F39 — the paths NOBODY WATCHES.
@@ -193,7 +192,9 @@ describe('mapping Playwright’s report back onto our tests', () => {
     // The bug. A config that won't load produces errors and no suites; claiming
     // every test failed is a fabricated result, and worse than the real error.
     const out = resultsFromReport(
-      report({ errors: [{ message: 'Cannot find module ./nope', location: { file: 'c.ts', line: 3 } }] }),
+      report({
+        errors: [{ message: 'Cannot find module ./nope', location: { file: 'c.ts', line: 3 } }]
+      }),
       slugs,
       ids
     )
@@ -212,7 +213,9 @@ describe('mapping Playwright’s report back onto our tests', () => {
     // One file, several test() blocks — one row failing must fail the test.
     const out = resultsFromReport(
       report({
-        suites: [suite('0-login.spec.ts', [{ status: 'passed' }, { status: 'failed', error: 'row 2' }])]
+        suites: [
+          suite('0-login.spec.ts', [{ status: 'passed' }, { status: 'failed', error: 'row 2' }])
+        ]
       }),
       slugs,
       ['login.json']

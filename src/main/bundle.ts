@@ -192,11 +192,7 @@ export async function exportBundle(
       await writeFile(join(destDir, 'acceptance-criteria.txt'), acceptanceCriteria, 'utf-8')
     }
 
-    await writeFile(
-      join(destDir, 'qaflow-bundle.json'),
-      JSON.stringify(manifest, null, 2),
-      'utf-8'
-    )
+    await writeFile(join(destDir, 'qaflow-bundle.json'), JSON.stringify(manifest, null, 2), 'utf-8')
     await writeFile(join(destDir, 'README.md'), readmeFor(manifest), 'utf-8')
     return { ok: true, path: destDir, manifest }
   } catch (e) {

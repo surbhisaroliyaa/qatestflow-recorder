@@ -75,12 +75,10 @@ describe('every injected snippet parses', () => {
       'class',
       'url-contains',
       'title'
-    ].map(
-      (assertKind): [string, ReplayStep] => [
-        `assert ${assertKind}`,
-        s({ type: 'assert', assertKind, value: 'x', attrName: 'href', candidates: CSS })
-      ]
-    )
+    ].map((assertKind): [string, ReplayStep] => [
+      `assert ${assertKind}`,
+      s({ type: 'assert', assertKind, value: 'x', attrName: 'href', candidates: CSS })
+    ])
   ]
 
   for (const [title, step] of steps) {
@@ -141,8 +139,9 @@ describe('a recorded value cannot break out of the injected snippet', () => {
     it(`survives ${title} in a selector and in the failure text`, () => {
       const hostile = [cand({ kind: 'text', score: 50, css: null, text: value })]
       expect(syntaxErrors(buildActionScript(s({ type: 'click', candidates: hostile })))).toEqual([])
-      expect(syntaxErrors(buildFailureMarkScript(s({ type: 'click', candidates: hostile }), value)))
-        .toEqual([])
+      expect(
+        syntaxErrors(buildFailureMarkScript(s({ type: 'click', candidates: hostile }), value))
+      ).toEqual([])
     })
   }
 
@@ -168,7 +167,10 @@ describe('the candidate ladder', () => {
     const script = buildActionScript(
       s({
         type: 'click',
-        candidates: [cand({ kind: 'id', score: 90, css: '#a' }), cand({ kind: 'text', score: 50, css: null, text: 'Go' })]
+        candidates: [
+          cand({ kind: 'id', score: 90, css: '#a' }),
+          cand({ kind: 'text', score: 50, css: null, text: 'Go' })
+        ]
       })
     )
     expect(script).toContain('"css":"#a"')

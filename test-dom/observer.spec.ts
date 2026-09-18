@@ -279,7 +279,10 @@ test.describe('what the observer notices', () => {
 
   test('a non-checkable input is untouched by the checkbox rule', async ({ page }) => {
     // Guard against the fix over-reaching into normal text entry.
-    await record(page, '<label><input id="email"><span>Email</span></label><button id="b">Go</button>')
+    await record(
+      page,
+      '<label><input id="email"><span>Email</span></label><button id="b">Go</button>'
+    )
     await page.fill('#email', 'qa@example.com')
     await page.click('#b')
     const typed = (await steps(page)).find((s) => s.type === 'type')
@@ -290,7 +293,7 @@ test.describe('what the observer notices', () => {
     await record(page, '<div id="host"></div>')
     await page.evaluate(
       "const r = document.getElementById('host').attachShadow({ mode: 'open' });" +
-        "r.innerHTML = '<button id=\"deep\" data-test=\"deep-btn\">Deep</button>';"
+        'r.innerHTML = \'<button id="deep" data-test="deep-btn">Deep</button>\';'
     )
     await page.locator('#host').locator('#deep').click()
     const [step] = await steps(page)
@@ -301,13 +304,19 @@ test.describe('what the observer notices', () => {
   test('installs only once even if created repeatedly for the same document', async ({ page }) => {
     // Duplicate listeners would record every click twice.
     await record(page, '<button id="b">Go</button>')
-    await page.evaluate(`window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`)
-    await page.evaluate(`window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`)
+    await page.evaluate(
+      `window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`
+    )
+    await page.evaluate(
+      `window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`
+    )
     await page.click('#b')
     expect(await steps(page)).toHaveLength(1)
   })
 
-  test('records nothing at all when recording is off, and resumes when switched on', async ({ page }) => {
+  test('records nothing at all when recording is off, and resumes when switched on', async ({
+    page
+  }) => {
     await record(page, '<button id="b">Go</button>', false)
     await page.click('#b')
     await page.waitForTimeout(200)
@@ -366,7 +375,9 @@ test.describe('the observer and the gate', () => {
     await page.setContent('<button id="b">Go</button>')
     await installFactory(page)
     const before = (await page.evaluate('Object.keys(window)')) as string[]
-    await page.evaluate(`window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`)
+    await page.evaluate(
+      `window.__qaCreate(window, document, { send: window.__qaSend, recording: true })`
+    )
     const after = (await page.evaluate('Object.keys(window)')) as string[]
     expect(after.filter((k) => !before.includes(k))).toEqual([])
   })
@@ -427,7 +438,12 @@ test.describe('telling identical elements apart', () => {
 // =====================================================================
 test.describe('what was recorded is what replay finds', () => {
   /** Click a real element, then replay the recorded step and report where it landed. */
-  async function roundTrip(page: Page, html: string, clickSelector: string, nth = 0): Promise<{
+  async function roundTrip(
+    page: Page,
+    html: string,
+    clickSelector: string,
+    nth = 0
+  ): Promise<{
     recordedOn: string
     replayedOn: string
   }> {

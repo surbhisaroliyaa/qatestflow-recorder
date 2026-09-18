@@ -74,18 +74,32 @@ function icns(entries) {
 
 writeFileSync(join(root, 'build', 'icon.png'), png[1024])
 writeFileSync(join(root, 'build', 'icon.ico'), ico([16, 24, 32, 48, 64, 128, 256]))
-writeFileSync(join(root, 'build', 'icon.icns'), icns([['ic07', 128], ['ic08', 256], ['ic09', 512], ['ic10', 1024]]))
+writeFileSync(
+  join(root, 'build', 'icon.icns'),
+  icns([
+    ['ic07', 128],
+    ['ic08', 256],
+    ['ic09', 512],
+    ['ic10', 1024]
+  ])
+)
 writeFileSync(join(root, 'resources', 'icon.png'), png[512])
 
 // Optional contact sheet, to look at every size side by side.
 const i = process.argv.indexOf('--preview')
 if (i > 0 && process.argv[i + 1]) {
   const sizes = [256, 64, 48, 32, 24, 16]
-  const cell = (bg) => `<div style="background:${bg};padding:18px;display:flex;gap:22px;align-items:flex-end">${sizes
-    .map((s) => `<div style="text-align:center;font:12px Segoe UI;color:#888"><img src="data:image/png;base64,${png[s].toString('base64')}" width="${s}" height="${s}"><br>${s}px</div>`)
-    .join('')}</div>`
+  const cell = (bg) =>
+    `<div style="background:${bg};padding:18px;display:flex;gap:22px;align-items:flex-end">${sizes
+      .map(
+        (s) =>
+          `<div style="text-align:center;font:12px Segoe UI;color:#888"><img src="data:image/png;base64,${png[s].toString('base64')}" width="${s}" height="${s}"><br>${s}px</div>`
+      )
+      .join('')}</div>`
   await page.setViewportSize({ width: 700, height: 400 })
-  await page.setContent(`<html><body style="margin:0">${cell('#f3f3f3')}${cell('#202020')}</body></html>`)
+  await page.setContent(
+    `<html><body style="margin:0">${cell('#f3f3f3')}${cell('#202020')}</body></html>`
+  )
   writeFileSync(process.argv[i + 1], await page.screenshot({ fullPage: true }))
 }
 

@@ -27,7 +27,7 @@ export function EnvWarnModal({
   setEnvWarnRemember,
   settleEnvWarn
 }: EnvWarnModalProps): React.JSX.Element | null {
-  if (!(envWarn)) return null
+  if (!envWarn) return null
   return (
     <div className="modal-backdrop">
       <div className="modal env-warn" onClick={(e) => e.stopPropagation()}>
@@ -92,9 +92,10 @@ export function EnvWarnModal({
               </div>
               <p className="env-warn-hint">
                 Fine for a third-party API (Stripe, a public endpoint). But if that host is{' '}
-                <strong>your own API</strong>, this run will read and write <strong>real
-                production data</strong> while everything else points at {activeEnv?.name} — add it
-                to the environment’s base URL, or edit the step to use a relative host.
+                <strong>your own API</strong>, this run will read and write{' '}
+                <strong>real production data</strong> while everything else points at{' '}
+                {activeEnv?.name} — add it to the environment’s base URL, or edit the step to use a
+                relative host.
               </p>
             </>
           )}

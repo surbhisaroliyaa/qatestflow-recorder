@@ -39,12 +39,14 @@ export function MockModal({
   setMockOpen,
   setMockStatus
 }: MockModalProps): React.JSX.Element | null {
-  if (!(mockOpen)) return null
+  if (!mockOpen) return null
   return (
     <div className="modal-backdrop" onClick={() => setMockOpen(false)}>
       <div className="modal api-editor" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span className="modal-title">🎭 Mock Studio — edit a captured response into a scenario</span>
+          <span className="modal-title">
+            🎭 Mock Studio — edit a captured response into a scenario
+          </span>
           <button className="modal-close" onClick={() => setMockOpen(false)} aria-label="Close">
             ✕
           </button>
@@ -58,10 +60,10 @@ export function MockModal({
           ) : (
             <>
               <p className="api-hint">
-                Pick a captured API call, edit its <strong>status</strong> and{' '}
-                <strong>body</strong> into the scenario you want to test (sold-out, a server error,
-                an empty list), then copy the Playwright mock. Paste it into your test to force that
-                exact response — no backend needed.
+                Pick a captured API call, edit its <strong>status</strong> and <strong>body</strong>{' '}
+                into the scenario you want to test (sold-out, a server error, an empty list), then
+                copy the Playwright mock. Paste it into your test to force that exact response — no
+                backend needed.
               </p>
               <div className="ac-summary">Captured responses ({mockEntries.length})</div>
               <ul className="ac-list mock-list">
@@ -73,7 +75,15 @@ export function MockModal({
                   >
                     <span className={`mock-verb verb-${e.method.toLowerCase()}`}>{e.method}</span>
                     <span className="ac-text">
-                      <strong>{(() => { try { return new URL(e.url).pathname } catch { return e.url } })()}</strong>
+                      <strong>
+                        {(() => {
+                          try {
+                            return new URL(e.url).pathname
+                          } catch {
+                            return e.url
+                          }
+                        })()}
+                      </strong>
                       <span className="mon-sub">
                         {e.status} {e.statusText} · {e.mimeType || '—'}
                         {e.resourceType ? ` · ${e.resourceType}` : ''}
@@ -94,16 +104,35 @@ export function MockModal({
                       />
                     </label>
                     <div className="mock-quick">
-                      <button className="modal-btn" onClick={() => { setMockStatus('500'); setMockBody('{"error":"Internal Server Error"}') }}>
+                      <button
+                        className="modal-btn"
+                        onClick={() => {
+                          setMockStatus('500')
+                          setMockBody('{"error":"Internal Server Error"}')
+                        }}
+                      >
                         Force 500
                       </button>
-                      <button className="modal-btn" onClick={() => { setMockStatus('404'); setMockBody('{"error":"Not Found"}') }}>
+                      <button
+                        className="modal-btn"
+                        onClick={() => {
+                          setMockStatus('404')
+                          setMockBody('{"error":"Not Found"}')
+                        }}
+                      >
                         Force 404
                       </button>
                       <button className="modal-btn" onClick={() => setMockBody('[]')}>
                         Empty list []
                       </button>
-                      <button className="modal-btn" onClick={() => { const e = mockEntries[mockSel]; setMockStatus(String(e.status)); setMockBody(e.body) }}>
+                      <button
+                        className="modal-btn"
+                        onClick={() => {
+                          const e = mockEntries[mockSel]
+                          setMockStatus(String(e.status))
+                          setMockBody(e.body)
+                        }}
+                      >
                         ↺ Reset
                       </button>
                     </div>
@@ -119,13 +148,18 @@ export function MockModal({
                     />
                   </label>
                   <div className="ac-summary">Playwright mock (paste into your test)</div>
-                  <pre className="mock-snippet"><code>{mockSnippet()}</code></pre>
+                  <pre className="mock-snippet">
+                    <code>{mockSnippet()}</code>
+                  </pre>
                 </div>
               )}
             </>
           )}
           {mockNote && mockEntries.length > 0 && (
-            <p className="api-hint" style={{ color: mockNote.startsWith('✓') ? '#7ee787' : '#f0b232' }}>
+            <p
+              className="api-hint"
+              style={{ color: mockNote.startsWith('✓') ? '#7ee787' : '#f0b232' }}
+            >
               {mockNote}
             </p>
           )}

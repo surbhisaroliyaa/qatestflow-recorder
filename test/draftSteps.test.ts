@@ -149,7 +149,10 @@ describe('the draft as steps', () => {
   })
 
   it('keeps the model’s own note and adds to it, rather than replacing it', () => {
-    const out = stepsFromDraft(draft([{ kind: 'navigate', text: 'vague' }], 'Story was thin.'), BASE)
+    const out = stepsFromDraft(
+      draft([{ kind: 'navigate', text: 'vague' }], 'Story was thin.'),
+      BASE
+    )
     expect(out.note).toContain('Story was thin.')
     expect(out.note).toContain('Go to')
   })

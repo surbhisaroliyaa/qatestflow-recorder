@@ -134,11 +134,7 @@ const article = (t: string): string =>
   t === 'null' ? t : /^[aeiou]/i.test(t) ? `an ${t}` : `a ${t}`
 
 // Run one check. Returns null when it passes, or WHY it failed.
-function runCheck(
-  check: CheckLine,
-  body: unknown,
-  headers: Record<string, string>
-): string | null {
+function runCheck(check: CheckLine, body: unknown, headers: Record<string, string>): string | null {
   const { path, op, expected } = check
 
   // A line that didn't parse — report it instead of quietly not running it.
@@ -205,7 +201,9 @@ function runCheck(
       if (absent) {
         return `"${path}" is not in the response — a not-equals check can't pass on a field that isn't there (did you mean "${path} not-exists", or misspell the field?)`
       }
-      return String(value) !== expected ? null : `"${path}" is "${expected}" — expected it not to be`
+      return String(value) !== expected
+        ? null
+        : `"${path}" is "${expected}" — expected it not to be`
 
     case 'contains':
       if (absent) return `"${path}" is not in the response`
@@ -224,7 +222,9 @@ function runCheck(
     // The one way to assert a field is GONE — e.g. "password not-exists" on a
     // user response. There was no way to say this before.
     case 'not-exists':
-      return absent ? null : `"${path}" IS in the response (${show(value)}) — expected it to be absent`
+      return absent
+        ? null
+        : `"${path}" IS in the response (${show(value)}) — expected it to be absent`
 
     case 'gt':
     case 'lt': {
@@ -234,14 +234,20 @@ function runCheck(
       // past an isFinite guard. That made `total gt -1` PASS on {"total": null}.
       // Reject the non-numeric TYPES up front; a numeric string ("100") is still
       // fine, because plenty of real APIs send numbers that way.
-      if (value === null || typeof value === 'boolean' || typeof value === 'object' || value === '') {
+      if (
+        value === null ||
+        typeof value === 'boolean' ||
+        typeof value === 'object' ||
+        value === ''
+      ) {
         return `"${path}" is ${show(value)}, which is not a number`
       }
       const n = Number(value)
       const target = Number(expected)
       if (!Number.isFinite(n)) return `"${path}" is ${show(value)}, which is not a number`
       if (!Number.isFinite(target)) return `"${expected}" is not a number`
-      if (op === 'gt') return n > target ? null : `"${path}" is ${n}, expected greater than ${target}`
+      if (op === 'gt')
+        return n > target ? null : `"${path}" is ${n}, expected greater than ${target}`
       return n < target ? null : `"${path}" is ${n}, expected less than ${target}`
     }
 
@@ -253,7 +259,8 @@ function runCheck(
       const n = value.length
       const target = Number(expected)
       if (!Number.isFinite(target)) return `"${expected}" is not a number`
-      if (op === 'count-eq') return n === target ? null : `"${path}" has ${n} items, expected ${target}`
+      if (op === 'count-eq')
+        return n === target ? null : `"${path}" has ${n} items, expected ${target}`
       if (op === 'count-gt') {
         return n > target ? null : `"${path}" has ${n} items, expected more than ${target}`
       }
@@ -269,9 +276,7 @@ function runCheck(
       // typeof null is "object", which would report the useless "is an object,
       // expected a number". Name null as null — it's the likeliest culprit.
       const actual = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
-      return actual === want
-        ? null
-        : `"${path}" is ${article(actual)}, expected ${article(want)}`
+      return actual === want ? null : `"${path}" is ${article(actual)}, expected ${article(want)}`
     }
 
     default:

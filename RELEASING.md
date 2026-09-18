@@ -29,15 +29,15 @@ Edit the SVG, regenerate, and commit the generated files with it.
 
 ## Code signing (Windows)
 
-The installer is currently **unsigned**, so Windows shows *"Windows protected your PC"* /
-*"Unknown publisher"* on install. To sign, buy a code-signing certificate from a certificate
+The installer is currently **unsigned**, so Windows shows _"Windows protected your PC"_ /
+_"Unknown publisher"_ on install. To sign, buy a code-signing certificate from a certificate
 authority (a standard OV certificate as a `.pfx` file, or an EV certificate), then set two
 environment variables before `npm run build:win`:
 
-| Variable | Value |
-|---|---|
-| `CSC_LINK` | path to the `.pfx` file (or its base64 contents) |
-| `CSC_KEY_PASSWORD` | the certificate's password |
+| Variable           | Value                                            |
+| ------------------ | ------------------------------------------------ |
+| `CSC_LINK`         | path to the `.pfx` file (or its base64 contents) |
+| `CSC_KEY_PASSWORD` | the certificate's password                       |
 
 electron-builder signs the app and installer automatically when they are set — no config change.
 Never commit the certificate or its password.

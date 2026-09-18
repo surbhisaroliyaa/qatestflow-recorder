@@ -37,12 +37,20 @@ const PAGE1 = `<!doctype html><html lang="en"><head><title>Smoke 1</title></head
 </body></html>`
 const FRAME = `<!doctype html><html lang="en"><body><button id="inner" data-test="inner-btn">Inside frame</button></body></html>`
 const TOUCHED = `<!doctype html><html lang="en"><body><button id="tbtn" data-test="touched-btn">Touched button</button></body></html>`
-const PAGE2 =`<!doctype html><html lang="en"><head><title>Smoke 2</title></head><body style="font:16px sans-serif">
+const PAGE2 = `<!doctype html><html lang="en"><head><title>Smoke 2</title></head><body style="font:16px sans-serif">
   <h1>Second page</h1><button id="done" data-test="done-btn">Done</button></body></html>`
 
 const server = createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-  res.end(req.url === '/touched.html' ? TOUCHED : req.url === '/frame.html' ? FRAME : req.url === '/page2.html' ? PAGE2 : PAGE1)
+  res.end(
+    req.url === '/touched.html'
+      ? TOUCHED
+      : req.url === '/frame.html'
+        ? FRAME
+        : req.url === '/page2.html'
+          ? PAGE2
+          : PAGE1
+  )
 }).listen(0, '127.0.0.1')
 await new Promise((r) => server.once('listening', r))
 const base = `http://127.0.0.1:${server.address().port}/`
@@ -63,19 +71,40 @@ try {
   // --- helpers that act on the VISIBLE page view, from the main process ---
   const viewEval = (js) =>
     app.evaluate(async ({ BrowserWindow }, code) => {
-      const v = BrowserWindow.getAllWindows()[0].contentView.children.find((c) => c.getBounds().width > 0)
+      const v = BrowserWindow.getAllWindows()[0].contentView.children.find(
+        (c) => c.getBounds().width > 0
+      )
       return v.webContents.executeJavaScript(code)
     }, js)
   const clickAt = (x, y) =>
-    app.evaluate(({ BrowserWindow }, p) => {
-      const v = BrowserWindow.getAllWindows()[0].contentView.children.find((c) => c.getBounds().width > 0)
-      v.webContents.focus()
-      v.webContents.sendInputEvent({ type: 'mouseDown', x: p.x, y: p.y, button: 'left', clickCount: 1 })
-      v.webContents.sendInputEvent({ type: 'mouseUp', x: p.x, y: p.y, button: 'left', clickCount: 1 })
-    }, { x, y })
+    app.evaluate(
+      ({ BrowserWindow }, p) => {
+        const v = BrowserWindow.getAllWindows()[0].contentView.children.find(
+          (c) => c.getBounds().width > 0
+        )
+        v.webContents.focus()
+        v.webContents.sendInputEvent({
+          type: 'mouseDown',
+          x: p.x,
+          y: p.y,
+          button: 'left',
+          clickCount: 1
+        })
+        v.webContents.sendInputEvent({
+          type: 'mouseUp',
+          x: p.x,
+          y: p.y,
+          button: 'left',
+          clickCount: 1
+        })
+      },
+      { x, y }
+    )
   const typeText = (text) =>
     app.evaluate(({ BrowserWindow }, t) => {
-      const v = BrowserWindow.getAllWindows()[0].contentView.children.find((c) => c.getBounds().width > 0)
+      const v = BrowserWindow.getAllWindows()[0].contentView.children.find(
+        (c) => c.getBounds().width > 0
+      )
       for (const ch of t) v.webContents.sendInputEvent({ type: 'char', keyCode: ch })
     }, text)
   const centre = async (selector, inFrame) =>
@@ -90,7 +119,9 @@ try {
   await app.evaluate(({ ipcMain }) => {
     globalThis.__smokeSpy = []
     ipcMain.on('recorder:event', (e, p) =>
-      globalThis.__smokeSpy.push(`${e.senderFrame ? e.senderFrame.url : '?'} → ${p && p.type} ${p && p.facts ? p.facts.text || p.facts.id || '' : ''}`)
+      globalThis.__smokeSpy.push(
+        `${e.senderFrame ? e.senderFrame.url : '?'} → ${p && p.type} ${p && p.facts ? p.facts.text || p.facts.id || '' : ''}`
+      )
     )
   })
 
@@ -98,39 +129,71 @@ try {
   await ui.locator('.record-btn').click()
   await sleep(700)
 
-  let p = await centre('#go'); await clickAt(p.x, p.y); await sleep(400)
-  p = await centre('#name'); await clickAt(p.x, p.y); await sleep(200)
-  await typeText('Surbhi'); await sleep(200)
-  p = await centre('label[for=agree]'); await clickAt(p.x, p.y); await sleep(400)   // commits the typing (blur) + ticks
-  p = await centre('#inner', true); await clickAt(p.x, p.y); await sleep(500)
-  p = await centre('#wbtn', 'written'); await clickAt(p.x, p.y); await sleep(500)   // adopted frame
-  p = await centre('#tbtn', 'touched'); await clickAt(p.x, p.y); await sleep(500)   // adopted src frame (no preload)
+  let p = await centre('#go')
+  await clickAt(p.x, p.y)
+  await sleep(400)
+  p = await centre('#name')
+  await clickAt(p.x, p.y)
+  await sleep(200)
+  await typeText('Surbhi')
+  await sleep(200)
+  p = await centre('label[for=agree]')
+  await clickAt(p.x, p.y)
+  await sleep(400) // commits the typing (blur) + ticks
+  p = await centre('#inner', true)
+  await clickAt(p.x, p.y)
+  await sleep(500)
+  p = await centre('#wbtn', 'written')
+  await clickAt(p.x, p.y)
+  await sleep(500) // adopted frame
+  p = await centre('#tbtn', 'touched')
+  await clickAt(p.x, p.y)
+  await sleep(500) // adopted src frame (no preload)
   // A page that FORGES a click must not become a step…
-  await viewEval(`document.getElementById('go').click(); true`); await sleep(400)
+  await viewEval(`document.getElementById('go').click(); true`)
+  await sleep(400)
   // …nor one that imitates the OLD recorder message format (page-world postMessage).
   await viewEval(`window.top.postMessage({ __qaflow: true, nonce: 'guess', channel: 'recorder:event',
-    payload: { type: 'click', facts: { tag: 'button', text: 'FORGED BY PAGE' } } }, '*'); true`); await sleep(400)
+    payload: { type: 'click', facts: { tag: 'button', text: 'FORGED BY PAGE' } } }, '*'); true`)
+  await sleep(400)
   // prompt(): the page-world shim draws its own box; answer it like a user.
-  p = await centre('#ask'); await clickAt(p.x, p.y); await sleep(600)
-  const box = await viewEval(`(() => { const i = document.querySelector('input[data-qaflow-ui]'); if (!i) return null;
+  p = await centre('#ask')
+  await clickAt(p.x, p.y)
+  await sleep(600)
+  const box =
+    await viewEval(`(() => { const i = document.querySelector('input[data-qaflow-ui]'); if (!i) return null;
     const r = i.getBoundingClientRect(); return { x: Math.round(r.left + 20), y: Math.round(r.top + r.height / 2) } })()`)
   if (box) {
-    await clickAt(box.x, box.y); await sleep(150)
-    await viewEval(`(() => { const i = document.querySelector('input[data-qaflow-ui]'); i.select(); return true })()`)
-    await typeText('Delhi'); await sleep(150)
-    const ok = await viewEval(`(() => { const b = [...document.querySelectorAll('button[data-qaflow-ui]')].find((x) => x.textContent === 'OK');
+    await clickAt(box.x, box.y)
+    await sleep(150)
+    await viewEval(
+      `(() => { const i = document.querySelector('input[data-qaflow-ui]'); i.select(); return true })()`
+    )
+    await typeText('Delhi')
+    await sleep(150)
+    const ok =
+      await viewEval(`(() => { const b = [...document.querySelectorAll('button[data-qaflow-ui]')].find((x) => x.textContent === 'OK');
       const r = b.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } })()`)
-    await clickAt(ok.x, ok.y); await sleep(500)
+    await clickAt(ok.x, ok.y)
+    await sleep(500)
   } else report.problems.push('prompt(): the in-page prompt box never appeared')
-  p = await centre('#next'); await clickAt(p.x, p.y); await sleep(2000)             // navigation
-  p = await centre('#done'); await clickAt(p.x, p.y); await sleep(600)             // after navigation
+  p = await centre('#next')
+  await clickAt(p.x, p.y)
+  await sleep(2000) // navigation
+  p = await centre('#done')
+  await clickAt(p.x, p.y)
+  await sleep(600) // after navigation
 
   await ui.locator('.record-btn').click()
   await sleep(500)
 
-  report.steps = await ui.locator('.step-item').evaluateAll((els) =>
-    els.map((e) => (e.querySelector('.step-text') ?? e).textContent.replace(/\s+/g, ' ').trim().slice(0, 70))
-  )
+  report.steps = await ui
+    .locator('.step-item')
+    .evaluateAll((els) =>
+      els.map((e) =>
+        (e.querySelector('.step-text') ?? e).textContent.replace(/\s+/g, ' ').trim().slice(0, 70)
+      )
+    )
   const want = [
     [/Click Go button/i, 'click on the page'],
     [/Type "Surbhi"/i, 'typing'],
@@ -142,12 +205,16 @@ try {
     [/Next page/i, 'click on the link'],
     [/Done/i, 'click AFTER the page navigated']
   ]
-  for (const [re, what] of want) if (!report.steps.some((s) => re.test(s))) report.problems.push(`missing: ${what}`)
+  for (const [re, what] of want)
+    if (!report.steps.some((s) => re.test(s))) report.problems.push(`missing: ${what}`)
   if (report.problems.length) report.mainReceived = await app.evaluate(() => globalThis.__smokeSpy)
   const goClicks = report.steps.filter((s) => /Click Go button/i.test(s)).length
-  if (goClicks > 1) report.problems.push(`a page-forged click was recorded (${goClicks} "Click Go button" steps)`)
-  if (report.steps.some((s) => /"on"/.test(s))) report.problems.push('checkbox recorded as typing "on" (QF-001 regression)')
-  if (report.steps.some((s) => /FORGED/i.test(s))) report.problems.push('a page-imitated recorder message became a step')
+  if (goClicks > 1)
+    report.problems.push(`a page-forged click was recorded (${goClicks} "Click Go button" steps)`)
+  if (report.steps.some((s) => /"on"/.test(s)))
+    report.problems.push('checkbox recorded as typing "on" (QF-001 regression)')
+  if (report.steps.some((s) => /FORGED/i.test(s)))
+    report.problems.push('a page-imitated recorder message became a step')
 
   // The exported code shows which FRAME each step was filed under.
   await ui.locator('.export-btn').click()
@@ -173,7 +240,12 @@ try {
       .catch(() => '')
     if (banner) break
     // A failed step pauses for recovery rather than ending the run.
-    if (await ui.locator('.recovery-panel, .recovery').count().catch(() => 0)) {
+    if (
+      await ui
+        .locator('.recovery-panel, .recovery')
+        .count()
+        .catch(() => 0)
+    ) {
       const failed = await ui
         .locator('.step-item.failed')
         .first()

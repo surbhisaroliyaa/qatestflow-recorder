@@ -8,9 +8,7 @@ import { collidesWithOsEnv } from '../../shared/osEnvNames'
 // the artefact people paste into a ticket and act on.
 // =====================================================================
 
-export const generateSuiteReport = (
-  suiteRun: SuiteRunState | null,
-): string => {
+export const generateSuiteReport = (suiteRun: SuiteRunState | null): string => {
   if (!suiteRun) return ''
   const r = suiteRun.results
   const passed = r.filter((x) => x.status === 'passed').length
@@ -36,7 +34,9 @@ export const generateSuiteReport = (
       // report is read by someone who can't hover a chip to find out why an
       // "app bug" was called an app bug.
       const why = CATEGORY_WHY[c as FailureCategory]
-      lines.push(`- **${CATEGORY_LABELS[c as FailureCategory] ?? c}: ${n}**${why ? ` — ${why}` : ''}`)
+      lines.push(
+        `- **${CATEGORY_LABELS[c as FailureCategory] ?? c}: ${n}**${why ? ` — ${why}` : ''}`
+      )
     }
     lines.push('')
   }
@@ -58,9 +58,7 @@ export const generateSuiteReport = (
       for (const [v, tests] of byVar) {
         lines.push(
           `- \`{{env:${v}}}\` — ${tests.length} test${tests.length === 1 ? '' : 's'}: ${tests.join(', ')}` +
-            (collidesWithOsEnv(v)
-              ? ' _(never read from the OS, which defines this name too)_'
-              : '')
+            (collidesWithOsEnv(v) ? ' _(never read from the OS, which defines this name too)_' : '')
         )
       }
       lines.push('')
@@ -93,8 +91,7 @@ export const generateSuiteReport = (
     ]
       .filter(Boolean)
       .join(' · ')
-    const section =
-      (nameCounts.get(x.name) ?? 0) > 1 ? sectionOf(x.fileName) : ''
+    const section = (nameCounts.get(x.name) ?? 0) > 1 ? sectionOf(x.fileName) : ''
     lines.push(
       `- ${icon} **${x.name}**${section ? ` \`(${section})\`` : ''}${tags ? ` — ${tags}` : ''}` +
         (x.status === 'failed' && x.error ? `\n  - ${x.error}` : '')

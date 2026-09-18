@@ -84,7 +84,11 @@ function attrChanges(before: Record<string, string>, after: Record<string, strin
 
 const CAP = 25 // never flood the panel — cap each list
 
-export function diffSnapshots(green: PageSnapshot, now: PageSnapshot, baselineAt?: string): DomDiff {
+export function diffSnapshots(
+  green: PageSnapshot,
+  now: PageSnapshot,
+  baselineAt?: string
+): DomDiff {
   const greenLines = new Set(green.lines)
   const nowLines = new Set(now.lines)
   const textRemoved = green.lines.filter((l) => !nowLines.has(l)).slice(0, CAP)
@@ -140,9 +144,7 @@ export function diffSnapshots(green: PageSnapshot, now: PageSnapshot, baselineAt
       elementsRemoved.push(elDesc(r))
     }
   }
-  const elementsAdded: string[] = addedEls
-    .filter((_, i) => !addedUsed.has(i))
-    .map((e) => elDesc(e))
+  const elementsAdded: string[] = addedEls.filter((_, i) => !addedUsed.has(i)).map((e) => elDesc(e))
 
   const urlChanged = green.url !== now.url ? { from: green.url, to: now.url } : undefined
 

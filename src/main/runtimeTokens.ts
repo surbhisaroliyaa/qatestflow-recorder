@@ -48,8 +48,7 @@ const DYNAMIC: Record<string, () => string> = {
   randomInt: () => String(Math.floor(Math.random() * 1_000_000))
 }
 
-export const savedNameOf = (token: string): string =>
-  token.trim().slice(SAVED_PREFIX.length).trim()
+export const savedNameOf = (token: string): string => token.trim().slice(SAVED_PREFIX.length).trim()
 
 // Is this a token main resolves at run time (rather than the renderer up-front)?
 // MIRROR: dataDriven.ts has the same predicate — it must NOT treat these as data

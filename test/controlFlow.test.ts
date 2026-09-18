@@ -29,13 +29,7 @@ describe('analyzeControlFlow — well-formed blocks', () => {
   })
 
   it('handles nesting', () => {
-    const map = analyzeControlFlow([
-      s('repeat'),
-      s('if'),
-      s('click'),
-      s('endIf'),
-      s('endRepeat')
-    ])
+    const map = analyzeControlFlow([s('repeat'), s('if'), s('click'), s('endIf'), s('endRepeat')])
     expect(map.errors).toEqual([])
     expect(map.depth).toEqual([0, 1, 2, 1, 0])
   })

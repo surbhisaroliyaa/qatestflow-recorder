@@ -42,9 +42,10 @@ describe('a password must never travel', () => {
   it('leaves an ordinary typed value alone', () => {
     // Only steps FLAGGED secret are placeholdered; scrubbing everything would
     // ship a test that types nothing.
-    const [out] = placeholderSecrets([
-      s({ type: 'type', value: 'standard_user' })
-    ]) as Record<string, unknown>[]
+    const [out] = placeholderSecrets([s({ type: 'type', value: 'standard_user' })]) as Record<
+      string,
+      unknown
+    >[]
     expect(out.value).toBe('standard_user')
   })
 
@@ -78,8 +79,20 @@ describe('a data table must travel WITHOUT its credentials', () => {
   })
 
   it('recognises the many ways a column gets named', () => {
-    for (const col of ['pass', 'passwd', 'Password', 'pwd', 'apiKey', 'api_key', 'token',
-      'secret', 'cardNumber', 'cvv', 'ssn', 'authToken']) {
+    for (const col of [
+      'pass',
+      'passwd',
+      'Password',
+      'pwd',
+      'apiKey',
+      'api_key',
+      'token',
+      'secret',
+      'cardNumber',
+      'cvv',
+      'ssn',
+      'authToken'
+    ]) {
       const out = scrubDataRows([{ [col]: 'LIVE-VALUE' }])
       expect(out.scrubbed, col).toContain(col)
       expect(JSON.stringify(out.rows), col).not.toContain('LIVE-VALUE')
