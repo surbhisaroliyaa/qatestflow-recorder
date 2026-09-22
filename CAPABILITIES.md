@@ -34,7 +34,9 @@ Test files: `test/` = unit (`npm test`), `test-dom/` = browser (`npm run test:do
 | A tested page cannot forge steps or reach app internals        | 🧪            | The recorder runs in each frame's isolated world and sends over IPC the page can't reach; page-scripted clicks/changes are ignored. `test/observerSource.test.ts`, `test/recorderMessages.test.ts`, `test-dom/observer.spec.ts`, and `tools/e2e-smoke.mjs` — which in the real, sandboxed app also tries a page-scripted click and an imitation of the old recorder message, and requires both to be ignored. Hand-test pending. |
 | Script-written iframes (rich-text editors, widgets)            | 🧪            | `tools/e2e-smoke.mjs` records **and replays** a click inside one                                                                                                                                                                                                                                                                                                                                                                 |
 | Electron sandbox on for the app window and the page under test | 🧪            | `tools/check-preload-sandbox.mjs` (CI), `tools/e2e-smoke.mjs`                                                                                                                                                                                                                                                                                                                                                                    |
-| Drag-and-drop, scroll, comment step types                      | ❌            | —                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Drag and drop (HTML5 **and** pointer/slider)                   | 🧪            | `test-dom/observer.spec.ts`, `test-dom/ladder.spec.ts`, `test-dom/exported-spec.spec.ts`                                                                                                                                                                                                                                                                                                                                         |
+| Scroll steps (element / top / bottom / offset)                 | 🧪            | `test-dom/observer.spec.ts`, `test-dom/ladder.spec.ts`, `test-dom/exported-spec.spec.ts`                                                                                                                                                                                                                                                                                                                                         |
+| 💬 Note / section-heading steps                                | 🧪            | `test/playwrightExport.test.ts`, `test-dom/exported-spec.spec.ts`                                                                                                                                                                                                                                                                                                                                                                |
 
 ## Replay and resilience
 
@@ -57,23 +59,23 @@ Test files: `test/` = unit (`npm test`), `test-dom/` = browser (`npm run test:do
 | Page Object export                                                             | ✅ 2026-09-18 | same gate, both styles; `test/__snapshots__/*.pom.spec.ts`                                                          |
 | Data-driven export, passwords per distinct value (`PASSWORD_1`, `PASSWORD_2`…) | ✅ 2026-09-18 | hand-test A3; `test-dom/exported-spec.spec.ts` (protected-matrix, with a teeth test)                                |
 | CI workflow file (GitHub Actions)                                              | 🧪            | `test/playwrightExport.test.ts`                                                                                     |
-| YAML / JSON test round-trip                                                    | ❌            | —                                                                                                                   |
+| YAML / JSON test round-trip                                                    | 🧪            | `test/testFormat.test.ts` — export, hand-edit, import, run                                                          |
 
 ## Test management and running
 
-| Capability                                            | Status              | Evidence                                                                 |
-| ----------------------------------------------------- | ------------------- | ------------------------------------------------------------------------ |
-| Library, suites, tags, search                         | ✅ Aug 2026         | integration rounds; `test/library.test.ts`                               |
-| Version history and rollback                          | 🧪                  | `test/library.test.ts`                                                   |
-| Data-driven runs (per-row data tables)                | ✅ 2026-09-18       | hand-test A2 (6-row negative login); `test/dataDriven.test.ts`           |
-| Environments and `{{env:…}}` variables                | 🧪                  | `test/runInputs.test.ts`, `test/osEnvNames.test.ts`                      |
-| Parallel suite runs (headless Playwright)             | 🧪                  | `test/headless.test.ts`                                                  |
-| Cross-browser runs                                    | 🧪                  | `test/xbrowser.test.ts`                                                  |
-| Monitors (scheduled runs)                             | ⚠️                  | Aug 2026 rounds. **Only while the app is open** — no background service. |
-| Shareable bundles (git-committable)                   | 🧪                  | `test/bundle.test.ts`                                                    |
-| Projects above suites                                 | ❌                  | —                                                                        |
-| General CLI runner, GitLab template, results postback | ❌                  | —                                                                        |
-| 100+ test suites without stalling                     | ❌ not demonstrated | —                                                                        |
+| Capability                                          | Status        | Evidence                                                                 |
+| --------------------------------------------------- | ------------- | ------------------------------------------------------------------------ |
+| Library, suites, tags, search                       | ✅ Aug 2026   | integration rounds; `test/library.test.ts`                               |
+| Version history and rollback                        | 🧪            | `test/library.test.ts`                                                   |
+| Data-driven runs (per-row data tables)              | ✅ 2026-09-18 | hand-test A2 (6-row negative login); `test/dataDriven.test.ts`           |
+| Environments and `{{env:…}}` variables              | 🧪            | `test/runInputs.test.ts`, `test/osEnvNames.test.ts`                      |
+| Parallel suite runs (headless Playwright)           | 🧪            | `test/headless.test.ts`                                                  |
+| Cross-browser runs                                  | 🧪            | `test/xbrowser.test.ts`                                                  |
+| Monitors (scheduled runs)                           | ⚠️            | Aug 2026 rounds. **Only while the app is open** — no background service. |
+| Shareable bundles (git-committable)                 | 🧪            | `test/bundle.test.ts`                                                    |
+| Projects above suites                               | 🧪            | `test/library.test.ts`, `test/scale.test.ts`                             |
+| General CLI runner, GitLab issues, results postback | 🧪            | `test/cli.test.ts`, `test/postback.test.ts`                              |
+| 100+ test suites without stalling                   | 🧪            | `test/scale.test.ts` — a real 240-test library on disk                   |
 
 ## Evidence and reporting
 
@@ -83,7 +85,7 @@ Test files: `test/` = unit (`npm test`), `test-dom/` = browser (`npm run test:do
 | HTML / Markdown / Jira-style reports                                 | 🧪            | `test/edgeReport.test.ts`, `test/livingDocs.test.ts`             |
 | AI failure explanation (with rules fallback)                         | 🧪            | `test/translator.test.ts`                                        |
 | Page-load errors shown in the app (URL, reason, Retry, Copy details) | 🧪            | `test/phase3Layout.test.ts`; checked in the built app 2026-09-18 |
-| Video recordings                                                     | ❌            | —                                                                |
+| Video recordings (.webm of a run)                                    | 🧪            | `test/video.test.ts`; needs a hand-test on the built app         |
 | Hosted share links                                                   | ❌            | —                                                                |
 
 ## Security and privacy

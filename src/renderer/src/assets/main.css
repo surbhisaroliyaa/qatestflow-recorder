@@ -6713,3 +6713,113 @@ body {
 .modal:focus-visible {
   outline: none;
 }
+
+/* Phase 4 — the portable-import report.
+   A prose modal, where every other modal in this app shows code or a list, so
+   it needs a readable body: the parse error (with its line number) or the
+   warnings, which are the things that parsed and still will not work. */
+.modal-body {
+  padding: 16px;
+  overflow: auto;
+  color: #d8d8d8;
+  font-size: 13px;
+  line-height: 1.55;
+  user-select: text;
+}
+
+.modal-body p {
+  margin: 0 0 10px;
+}
+
+.warn-title {
+  color: #d29922;
+  font-weight: 700;
+}
+
+.warn-list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.warn-list li {
+  margin-bottom: 8px;
+  color: #d8d8d8;
+}
+
+.warn-note {
+  color: #999;
+}
+
+/* Phase 4 — the evidence-privacy policy screen.
+   A settings form rather than a code view: checkboxes with real explanations
+   under them, because each one changes what leaves this machine. */
+.privacy-summary {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #22301f;
+  border: 1px solid #2f4a2c;
+  color: #7ee787;
+}
+
+.privacy-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 12px 0;
+  cursor: pointer;
+}
+
+.privacy-row input {
+  margin-top: 3px;
+  flex: none;
+}
+
+.privacy-hint {
+  color: #999;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.privacy-label {
+  display: block;
+  margin: 14px 0 6px;
+  font-weight: 700;
+  color: #e0e0e0;
+}
+
+.privacy-text {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #d8d8d8;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.privacy-text:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
+
+/* Phase 4 — "runs when closed" on a monitor row. Inline with the rest of the
+   row's meta line, so it reads as one more fact about the monitor rather than
+   as a separate control panel. */
+.mon-bg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.mon-bg input {
+  margin: 0;
+}
+
+.mon-bg:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

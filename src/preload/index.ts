@@ -1,6 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+// Phase 4: the evidence-privacy policy, structurally typed here like every
+// other shape in this file — the preload stays independent of the renderer's
+// and main's own type declarations.
+interface PrivacyShape {
+  builtins: boolean
+  patterns: string
+  maskSelectors: string
+  captureDom: boolean
+}
+
 // Custom APIs exposed to the React renderer as window.api
 const api = {
   browser: {
@@ -120,6 +130,50 @@ const api = {
         ciWorkflow,
         configFile
       ),
+
+    // Phase 4: the portable YAML/JSON form of a test. Export writes a file the
+    // user picks; import reads one back, with any warnings the parse produced.
+    exportPortable: (
+      test: Record<string, unknown>,
+      steps: Record<string, unknown>[],
+      format: 'yaml' | 'json'
+    ): Promise<string | null> => ipcRenderer.invoke('portable:export', test, steps, format),
+
+    importPortable: (): Promise<{
+      name: string
+      baseURL?: string
+      tags?: string[]
+      dataRows?: Record<string, string>[]
+      // `unknown[]` here, like every other step-carrying call in this file —
+      // the preload is deliberately ignorant of the RecorderStep type, which
+      // the renderer owns (see the note at the top of this file).
+      steps: unknown[]
+      warnings: string[]
+      path: string
+    } | null> => ipcRenderer.invoke('portable:import'),
+
+    // Phase 4 (run video): main asks this window to record, because
+    // MediaRecorder only exists in a renderer. See src/main/video.ts.
+    onVideoStart: (
+      callback: (req: { sourceId: string; maxMs: number; fps: number }) => void
+    ): (() => void) => {
+      const listener = (
+        _event: unknown,
+        req: { sourceId: string; maxMs: number; fps: number }
+      ): void => callback(req)
+      ipcRenderer.on('recorder:video-start', listener)
+      return () => ipcRenderer.removeListener('recorder:video-start', listener)
+    },
+    // Whether recording actually began. A false is not an error to report — it
+    // means this run simply will not have a video.
+    videoStarted: (ok: boolean): void => ipcRenderer.send('recorder:video-started', ok),
+    // The policy says this run's video is not wanted: stop without keeping it,
+    // so the bytes never leave the renderer.
+    onVideoCancel: (callback: () => void): (() => void) => {
+      const listener = (): void => callback()
+      ipcRenderer.on('recorder:video-cancel', listener)
+      return () => ipcRenderer.removeListener('recorder:video-cancel', listener)
+    },
 
     // Day 16(+): pick a different file for an upload step. Shows an OS open
     // dialog; resolves to the chosen file's stored path, or null if cancelled.
@@ -547,7 +601,11 @@ const api = {
       captureHar?: boolean // F1: bank the captured network with this test
     }): Promise<unknown> => ipcRenderer.invoke('library:save', input),
     list: (): Promise<unknown[]> => ipcRenderer.invoke('library:list'),
-    listSuites: (): Promise<string[]> => ipcRenderer.invoke('library:listSuites'),
+    listSuites: (project?: string): Promise<string[]> =>
+      ipcRenderer.invoke('library:listSuites', project),
+    // Phase 4: the projects (folders of suites) the library already has.
+    listProjects: (): Promise<string[]> => ipcRenderer.invoke('library:listProjects'),
+
     load: (fileName: string): Promise<unknown> => ipcRenderer.invoke('library:load', fileName),
     remove: (fileName: string): Promise<void> => ipcRenderer.invoke('library:delete', fileName),
     recordRun: (fileName: string, run: unknown): Promise<void> =>
@@ -605,9 +663,56 @@ const api = {
     openFile: (id: string, file: string): Promise<void> =>
       ipcRenderer.invoke('trace:openFile', id, file),
     export: (id: string): Promise<string | null> => ipcRenderer.invoke('trace:export', id),
+    // Copy this run's .webm somewhere permanent — the trace folder prunes.
+    saveVideo: (id: string): Promise<string | null> => ipcRenderer.invoke('trace:saveVideo', id),
     // Save a whole-run HTML report (pass or fail) — the "📄 report" button.
     exportReport: (id: string): Promise<string | null> =>
       ipcRenderer.invoke('trace:exportReport', id)
+  },
+
+  // Phase 4: the evidence-privacy policy — what may be written to disk when a
+  // run leaves evidence behind. See src/shared/evidencePrivacy.ts.
+  privacy: {
+    get: (): Promise<PrivacyShape> => ipcRenderer.invoke('privacy:get'),
+    save: (settings: PrivacyShape): Promise<PrivacyShape> =>
+      ipcRenderer.invoke('privacy:save', settings)
+  },
+
+  // Phase 4: keep a monitor running with the app CLOSED, via the OS scheduler.
+  // See src/main/scheduler.ts for why it is the OS scheduler and not a service.
+  scheduler: {
+    enable: (
+      monitorId: string,
+      testName: string,
+      intervalMin: number
+    ): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('scheduler:enable', monitorId, testName, intervalMin),
+    disable: (monitorId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('scheduler:disable', monitorId),
+    list: (): Promise<{ available: boolean; message?: string; tasks: string[] }> =>
+      ipcRenderer.invoke('scheduler:list')
+  },
+
+  // Phase 4: tell something downstream that a run finished, as JSON a machine
+  // can branch on — and file a failure as a GitLab issue, mirroring F34's Jira.
+  integrations: {
+    get: (): Promise<unknown> => ipcRenderer.invoke('integrations:get'),
+    save: (settings: unknown): Promise<unknown> =>
+      ipcRenderer.invoke('integrations:save', settings),
+    postback: (
+      settings: { when: string; url: string; headers: string },
+      run: Record<string, unknown>
+    ): Promise<{ ok: boolean; skipped?: boolean; status?: number; error?: string }> =>
+      ipcRenderer.invoke('postback:send', settings, run),
+    gitlabIssue: (cfg: {
+      baseUrl: string
+      token: string
+      projectId: string
+      title: string
+      description: string
+      labels?: string
+    }): Promise<{ ok: boolean; iid?: number; url?: string; error?: string }> =>
+      ipcRenderer.invoke('gitlab:createIssue', cfg)
   }
 }
 

@@ -6,7 +6,9 @@ import {
   WebContentsView,
   dialog,
   nativeImage,
-  Notification
+  Notification,
+  // Phase 4: finds this window as a capture source for the run video.
+  desktopCapturer
 } from 'electron'
 import {
   listMonitors,
@@ -42,6 +44,68 @@ import { collidesWithOsEnv } from '../shared/osEnvNames'
 import { portableBasename } from '../shared/portablePath'
 // QF-002: the page → Electron trust boundary. Main re-validates rather than
 // trusting the relay preload to have done it.
+// Phase 4: the command line — argument parsing, selection and reporters all
+// live in cli.ts so they are unit-testable without launching anything.
+import {
+  describeMissingEnv,
+  exitCodeFor,
+  formatReport,
+  HELP_TEXT,
+  missingEnvRefs,
+  parseArgs,
+  selectTests,
+  summarize,
+  type CliOptions,
+  type CliTestResult
+} from './cli'
+import { loadPrivacy, savePrivacy } from './privacy'
+import {
+  DEFAULT_PRIVACY,
+  redact,
+  redactAll,
+  selectorList,
+  type PrivacySettings
+} from '../shared/evidencePrivacy'
+// Phase 4: neutralises the scripts in a saved DOM snapshot so opening the
+// file shows what was captured, not a re-run of the live page.
+import { makeInert } from '../shared/domSnapshot'
+import {
+  buildCreateTask,
+  buildDeleteTask,
+  buildQueryTasks,
+  parseTaskList,
+  schedulerAvailable,
+  taskName,
+  unavailableMessage
+} from './scheduler'
+import { saveVideo, shouldKeepVideo, videoPath, VIDEO_DEFAULTS, type VideoMode } from './video'
+// The CLI generates specs with the SAME exporter the Export button uses, so
+// there is never a second implementation to drift out of step with it.
+import { generatePlaywrightTest } from '../renderer/src/playwrightExport'
+// The CLI runs without a renderer, so it has to derive the data columns the
+// same way the renderer does. Importing the renderer's own function rather than
+// re-deriving them here is deliberate: two derivations would drift, and this
+// bug WAS that drift — the CLI passed an empty column list.
+import { dataColumns } from '../renderer/src/dataDriven'
+import { deviceById } from '../renderer/src/devices'
+import { loadIntegrations, saveIntegrations, type IntegrationSettings } from './integrations'
+// Phase 4: the machine-readable "a run finished" notification, and GitLab.
+import {
+  buildRunPayload,
+  gitlabConfigError,
+  gitlabIssuesUrl,
+  isRetryable,
+  parseHeaders,
+  postbackUrlError,
+  shouldPost,
+  type GitLabConfig,
+  type PostbackSettings,
+  type RunSummary
+} from '../shared/postback'
+// Phase 4: the human-facing YAML/JSON form of a test — see testFormat.ts.
+import { parsePortableTest, testToPortable, toPortableJson, toYaml } from '../shared/testFormat'
+// QF-002: the page → Electron trust boundary. Main re-validates rather than
+// trusting the relay preload to have done it.
 import { validateElementFacts, validatePageMessage } from '../shared/recorderMessages'
 import { maskPasswordInputs, secretCellRef } from '../shared/secretCells'
 // QF-006: Electron 43+ opens a dialog with no defaultPath in Downloads.
@@ -66,6 +130,7 @@ import {
   saveTest,
   listTests,
   listSuites,
+  listProjects,
   loadTest,
   deleteTest,
   recordRun,
@@ -1514,6 +1579,14 @@ function createWindow(): void {
         value?: string
         secret?: boolean
         key?: string
+        // Phase 4: a drag's DROP TARGET, which gets its own selector ladder
+        // built by the same engine as the source's.
+        targetFacts?: ElementFacts
+        scrollKind?: 'element' | 'bottom' | 'top' | 'position'
+        loadedMore?: boolean
+        scrollDir?: 'up' | 'down'
+        dragKind?: 'html5' | 'mouse'
+        dragFrom?: string
         // QF-002: the frame path RELATIVE to the sending frame — empty for the
         // frame itself, or an adopted script-written child's path. The sending
         // frame itself comes from Electron (event.senderFrame), never the page.
@@ -1526,16 +1599,32 @@ function createWindow(): void {
       const clean = validatePageMessage('recorder:event', raw) as typeof raw | null
       if (!clean) return
       raw = clean
-      const { primary, candidates } = buildSelectors(raw.facts)
+      // Phase 4: a page-level scroll (top / bottom / a pixel offset) has no
+      // element, so there is no ladder to build and no element to name.
+      const hasElement = !!raw.facts
+      const { primary, candidates } = hasElement
+        ? buildSelectors(raw.facts)
+        : { primary: undefined, candidates: undefined }
+      // Phase 4: the drop target's ladder, built by the same engine — a drag
+      // self-heals on BOTH ends or it isn't really self-healing.
+      const target = raw.targetFacts ? buildSelectors(raw.targetFacts) : null
       sendStep(
         {
           type: raw.type,
-          label: labelFrom(raw.facts),
+          label: hasElement ? labelFrom(raw.facts) : undefined,
           value: raw.value,
           secret: raw.secret,
           key: raw.key,
+          scrollKind: raw.scrollKind,
+          loadedMore: raw.loadedMore,
+          scrollDir: raw.scrollDir,
+          dragKind: raw.dragKind,
+          dragFrom: raw.dragFrom,
           selector: primary,
           candidates,
+          targetSelector: target?.primary,
+          targetCandidates: target?.candidates,
+          targetLabel: raw.targetFacts ? labelFrom(raw.targetFacts) : undefined,
           frame: frameOfEvent(event.senderFrame, raw.frame)
         },
         recWindowIdOfWC(event.sender)
@@ -2114,7 +2203,13 @@ function createWindow(): void {
       steps: ReplayStep[],
       interactive?: boolean,
       storageState?: string,
-      traceOpts?: { mode: 'always' | 'failure' | 'off'; stepTexts?: string[]; testName?: string },
+      traceOpts?: {
+        mode: 'always' | 'failure' | 'off'
+        stepTexts?: string[]
+        testName?: string
+        // Phase 4: also record a .webm of the run, kept under the same policy.
+        video?: 'always' | 'failure' | 'off'
+      },
       // F1: serve responses from this HAR. A test's saved `har` filename, or the
       // sentinel '__last' to use the just-captured (unsaved) HAR. Absent = live.
       harFile?: string,
@@ -2132,6 +2227,10 @@ function createWindow(): void {
       failedAt?: number
       error?: string
       traceId?: string
+      // Phase 4: how long the run took, for the postback.
+      durationMs?: number
+      // Phase 4: the run video's filename inside that trace's folder.
+      videoFile?: string
       screenshotPath?: string
       aborted?: boolean
       consoleErrors?: string[]
@@ -2255,12 +2354,90 @@ function createWindow(): void {
       // retry overwrites rather than duplicates. We persist the bundle in
       // finish() only if the policy says so (always, or — like Playwright's
       // retain-on-failure — only when the run failed).
+      // Phase 4: when this run began, so the result can report how long it
+      // took. Timed here because main owns the run; the renderer would also be
+      // measuring IPC round trips.
+      const runStartedAt = Date.now()
+      // Phase 4: the evidence-privacy policy for THIS run, read once at the
+      // start. Read once rather than per step so the whole run's evidence is
+      // redacted consistently — a policy changed mid-run would otherwise
+      // produce a trace that is half redacted, which is worse than either.
+      let privacy: PrivacySettings = { ...DEFAULT_PRIVACY }
+      try {
+        privacy = await loadPrivacy()
+      } catch {
+        // Failing OPEN on purpose — see loadPrivacy.
+      }
+      // Phase 4 / Round 8 (her call 2026-09-22): the step TITLE is the surface
+      // actually read — `Type "standard_user" into Username` heads every row of
+      // the run recording. Patterns reached the page HTML, the console and the
+      // network but not this, so a policy that WAS working looked completely
+      // dead. Redacted here, in one place, because both writers below (the live
+      // capture and the ordered rebuild at the end) need the same sentence and
+      // have drifted apart once already.
+      //
+      // Deliberately NOT applied to the copy handed to categorizeFailure: that
+      // classifier reads the wording to pick a failure category and never writes
+      // it to disk, so redacting it would blind the classifier to protect a
+      // string that was never going to be saved.
+      const stepTitle = (i: number, fallback: string): string =>
+        redact(traceOpts?.stepTexts?.[i] ?? fallback, privacy)
       const traceMode = traceOpts?.mode ?? 'off'
       const traceEnabled = traceMode !== 'off'
       // One stable id for the whole run, so a trace saved at the failure PAUSE
       // and re-saved at the end (after retries) lands in the same folder.
       const traceRunId = traceEnabled ? `trace-${Date.now()}` : ''
       let tracePersisted = false
+
+      // === Run VIDEO (Phase 4) =========================================
+      // A .webm of the whole run, saved beside the trace. The filmstrip shows
+      // what each step looked like; the video shows what happened BETWEEN
+      // them — the modal that flashed, the element that moved mid-click, the
+      // redirect that bounced twice. None of those are true at the instant a
+      // step starts or ends, so no screenshot can contain them.
+      //
+      // It rides on the trace: a video only exists for a run that kept a
+      // trace, lives in that trace's folder, and is deleted by the same prune.
+      // That avoids a second retention policy, a second folder and a second
+      // way to fill someone's disk.
+      //
+      // Every failure here is silent by design — see src/main/video.ts.
+      const videoMode: VideoMode = traceEnabled ? (traceOpts?.video ?? 'off') : 'off'
+      let videoRecording = false
+      if (videoMode !== 'off') {
+        try {
+          const sources = await desktopCapturer.getSources({
+            types: ['window'],
+            thumbnailSize: { width: 0, height: 0 }
+          })
+          // Our own window, matched by its native handle rather than its title —
+          // a title match would break the moment the window is renamed, and
+          // would happily pick a DIFFERENT window with a similar name.
+          const own = sources.find((s) => s.id.endsWith(String(mainWindow.getMediaSourceId())))
+          const sourceId = own?.id ?? mainWindow.getMediaSourceId()
+          videoRecording = await new Promise<boolean>((resolve) => {
+            const channel = 'recorder:video-started'
+            const onStarted = (_e: unknown, ok: boolean): void => {
+              ipcMain.removeListener(channel, onStarted)
+              resolve(ok)
+            }
+            ipcMain.once(channel, onStarted)
+            mainWindow.webContents.send('recorder:video-start', {
+              sourceId,
+              maxMs: VIDEO_DEFAULTS.maxMs,
+              fps: VIDEO_DEFAULTS.fps
+            })
+            // If the renderer never answers, the run proceeds without a video
+            // rather than waiting on it. The run is the point; the video isn't.
+            setTimeout(() => {
+              ipcMain.removeListener(channel, onStarted)
+              resolve(false)
+            }, 3000)
+          })
+        } catch {
+          videoRecording = false
+        }
+      }
       const traceStepMap = new Map<number, TraceStepRecord>()
       const traceAssets = new Map<string, Buffer>() // filename -> bytes (overwrite-safe)
       const stripStepTag = (line: string): string => line.replace(/^\[step \d+\]\s*/, '')
@@ -2284,12 +2461,24 @@ function createWindow(): void {
         const rec: TraceStepRecord = {
           index: i,
           type: list[i]?.type ?? 'step',
-          text: traceOpts?.stepTexts?.[i] ?? list[i]?.type ?? `Step ${num}`,
+          text: stepTitle(i, list[i]?.type ?? `Step ${num}`),
           status,
           durationMs: Math.max(0, Date.now() - startMs),
-          error,
-          consoleErrors: consoleErrors.slice(traceConsoleCursor).map(stripStepTag),
-          networkErrors: networkErrors.slice(traceNetworkCursor).map(stripStepTag),
+          // Phase 4 (evidence privacy): console lines, network lines and the
+          // failure message are where real data most often turns up — a failed
+          // request URL with an email in the query string, a server error
+          // echoing back the record it choked on. The policy is applied HERE,
+          // at capture, so nothing unredacted is ever written to disk and then
+          // cleaned up afterwards.
+          error: error === undefined ? undefined : redact(error, privacy),
+          consoleErrors: redactAll(
+            consoleErrors.slice(traceConsoleCursor).map(stripStepTag),
+            privacy
+          ),
+          networkErrors: redactAll(
+            networkErrors.slice(traceNetworkCursor).map(stripStepTag),
+            privacy
+          ),
           apiEvidence
         }
         // Skipped steps never ran — record the row, but no page shot.
@@ -2302,6 +2491,29 @@ function createWindow(): void {
           } catch {
             // url unavailable — fine
           }
+          // Phase 4: paint over the regions the policy names BEFORE the
+          // capture, and take them off again after. Covering them in the image
+          // afterwards would need an image library; covering them in the page
+          // needs one line of CSS and is exact, because the browser knows where
+          // the elements actually are.
+          //
+          // A capture supplied by the caller (preImage — the annotated failure
+          // shot) is already taken, so masking cannot be applied to it. That is
+          // stated here rather than left as a silent gap: the failure shot is
+          // the one a user is most likely to paste into a ticket.
+          const masks = selectorList(privacy.maskSelectors)
+          let maskKey: string | null = null
+          if (masks.length && !preImage) {
+            try {
+              maskKey = await currentWC.insertCSS(
+                `${masks.join(',')} { visibility: hidden !important; background: #444 !important; }`,
+                { cssOrigin: 'user' }
+              )
+            } catch {
+              // A malformed selector — capture the page unmasked rather than
+              // not at all. The settings screen flags bad selectors separately.
+            }
+          }
           try {
             const image = preImage ?? (await currentWC.capturePage())
             rec.screenshotFile = `step-${num}.png`
@@ -2311,15 +2523,38 @@ function createWindow(): void {
           } catch {
             // capture can fail if the page is gone — keep the row without a shot
           }
+          // Take the mask back off, whatever happened above: leaving it on
+          // would hide those elements from the RUN ITSELF, and the next step
+          // that clicks one would fail for a reason that has nothing to do
+          // with the app under test. This is why the key is kept.
+          if (maskKey) {
+            try {
+              await currentWC.removeInsertedCSS(maskKey)
+            } catch {
+              // The page navigated, which drops inserted CSS anyway.
+            }
+          }
+          // Phase 4: the page HTML is the single biggest carrier of real data
+          // in the whole evidence set — it IS the record, not a picture of one.
+          // Turning it off REMOVES the exposure rather than reducing it, which
+          // is why it gets its own switch rather than being folded into the
+          // pattern list.
           try {
-            const raw = await currentWC.executeJavaScript(
-              'document.documentElement.outerHTML',
-              true
-            )
+            const raw = privacy.captureDom
+              ? await currentWC.executeJavaScript('document.documentElement.outerHTML', true)
+              : null
             if (typeof raw === 'string') {
               // A site that mirrors a field's value into its value ATTRIBUTE
               // (React does) put the typed password in this file. Blank it.
-              const html = maskPasswordInputs(raw)
+              // maskPasswordInputs first — it is STRUCTURAL, blanking the
+              // value attribute of password inputs — then the text policy over
+              // the result. The two are not alternatives: one knows about HTML,
+              // the other knows about shapes.
+              // makeInert LAST of the three: the site's own scripts would
+              // otherwise run on open, mount over the captured DOM and show a
+              // blank page — throwing away the very evidence the two calls
+              // before it just finished protecting.
+              const html = makeInert(redact(maskPasswordInputs(raw), privacy))
               // Raw outerHTML has no base, so its relative CSS/img/script paths
               // 404 and the snapshot renders broken. Inject a <base href> (the
               // page's URL) so those resolve against the real site, and a
@@ -2355,7 +2590,7 @@ function createWindow(): void {
           const orderedSteps: TraceStepRecord[] = []
           for (let idx = 0; idx < list.length; idx++) {
             const captured = traceStepMap.get(idx)
-            const stepText = traceOpts?.stepTexts?.[idx] ?? list[idx].type
+            const stepText = stepTitle(idx, list[idx].type)
             if (list[idx].disabled) {
               orderedSteps.push(
                 captured ?? {
@@ -2795,6 +3030,10 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
         traceId?: string
+        // Phase 4: how long the run took, for the postback.
+        durationMs?: number
+        // Phase 4: the run video, if one was recorded AND the policy kept it.
+        videoFile?: string
         failures?: {
           index: number
           error: string
@@ -2827,6 +3066,10 @@ function createWindow(): void {
         consoleErrors?: string[]
         networkErrors?: string[]
         traceId?: string
+        // Phase 4: how long the run took, for the postback.
+        durationMs?: number
+        // Phase 4: the run video, if one was recorded AND the policy kept it.
+        videoFile?: string
         failures?: {
           index: number
           error: string
@@ -2883,14 +3126,46 @@ function createWindow(): void {
           }
         }
         isReplaying = false
+        outcome.durationMs = Date.now() - runStartedAt
         // Day 18: keep the trace per the policy — always, or (retain-on-failure)
         // only when the run failed. An aborted run (Home mid-pause) is moot, so
         // skip it.
+        // Phase 4: stop the video BEFORE the trace is persisted, so the file
+        // can be written into the same folder the trace is about to occupy —
+        // and stop it even when we're going to throw the bytes away, because
+        // a MediaRecorder left running holds a capture stream open for the
+        // rest of the session.
+        let videoBytes: Buffer | null = null
+        if (videoRecording) {
+          const keep = shouldKeepVideo(videoMode, outcome)
+          try {
+            if (keep) {
+              const buf = (await Promise.race([
+                mainWindow.webContents.executeJavaScript(
+                  'window.__qaflowStopRunVideo && window.__qaflowStopRunVideo()',
+                  true
+                ),
+                wait(8000).then(() => null)
+              ])) as ArrayBuffer | null
+              if (buf) videoBytes = Buffer.from(new Uint8Array(buf))
+            } else {
+              mainWindow.webContents.send('recorder:video-cancel')
+            }
+          } catch {
+            // No video for this run. Never a reason to fail it.
+          }
+          videoRecording = false
+        }
+
         if (traceEnabled && !outcome.aborted) {
           if (traceMode === 'always' || !outcome.ok) {
             await persistTrace(outcome.ok, outcome.failedAt) // overwrite final state
             if (tracePersisted) {
               outcome.traceId = traceRunId
+              if (videoBytes) {
+                const file = await saveVideo(traceDir(traceRunId), videoBytes)
+                if (file) outcome.videoFile = file
+              }
               // F20 (Option 2): never prune a recording a saved edge run owns.
               await pruneTraces(40, await protectedEdgeTraceIds())
             }
@@ -3930,6 +4205,37 @@ function createWindow(): void {
               const seconds = Math.max(0, parseFloat(step.value ?? '0') || 0)
               await wait(seconds * 1000)
             }
+          } else if (step.type === 'comment') {
+            // Phase 4: a human note. It has no element, runs nothing and can
+            // never fail — it exists to give a long flow section headings and to
+            // carry the "why" behind the steps under it. It still takes a row in
+            // the run (and in the trace), so the report reads in sections too.
+          } else if (step.type === 'scroll' && step.scrollKind !== 'element') {
+            // Phase 4: a PAGE-level scroll — top, bottom, or an absolute offset.
+            // No element, so it never enters the element path below.
+            //
+            // The scroll is followed by a short settle wait on purpose: the whole
+            // point of a recorded scroll is the work it triggers (lazy images,
+            // the next page of an infinite list), and that work is asynchronous.
+            // Returning the instant the scroll position changed would hand the
+            // next step a page that hasn't loaded what this step existed to load.
+            const y =
+              step.scrollKind === 'top'
+                ? '0'
+                : step.scrollKind === 'bottom'
+                  ? 'document.documentElement.scrollHeight'
+                  : String(Math.max(0, parseInt(step.value ?? '0', 10) || 0))
+            const frameForScroll = await resolveFrame(currentWC, step.frame)
+            if (!frameForScroll) {
+              throw new Error(
+                'Could not find the iframe for this step (it never appeared on the page)'
+              )
+            }
+            await frameForScroll.executeJavaScript(
+              `window.scrollTo({ top: ${y}, behavior: 'instant' }); true`,
+              true
+            )
+            await wait(400)
           } else if (step.type === 'dialog') {
             // Day 16: a native dialog is answered by PRE-ARMING the page before
             // the step that triggers it (see armNextDialog below) — by the time
@@ -4252,8 +4558,14 @@ function createWindow(): void {
             // settle, re-resolve the frame (the old handle is now stale), and
             // retry. Asserts/finders are read-only + idempotent, so re-running
             // just yields the real answer instead of a cryptic Electron error.
-            let result: { ok: boolean; error?: string; hoverAt?: { x: number; y: number } } | null =
-              null
+            type ActionResult = {
+              ok: boolean
+              error?: string
+              hoverAt?: { x: number; y: number }
+              // Phase 4: a pointer drag's start and end points, in CSS pixels.
+              dragAt?: { from: { x: number; y: number }; to: { x: number; y: number } }
+            }
+            let result: ActionResult | null = null
             const execDeadline = Date.now() + 10000
             for (;;) {
               // Don't fire into a page that's still mid-navigation.
@@ -4270,11 +4582,10 @@ function createWindow(): void {
               // UNEXPECTED dialog auto-accepts rather than hanging the run.
               await armNextDialog(targetFrame, list[i + 1])
               try {
-                result = (await targetFrame.executeJavaScript(buildActionScript(step), true)) as {
-                  ok: boolean
-                  error?: string
-                  hoverAt?: { x: number; y: number }
-                } | null
+                result = (await targetFrame.executeJavaScript(
+                  buildActionScript(step),
+                  true
+                )) as ActionResult | null
                 break
               } catch (execErr) {
                 const m = execErr instanceof Error ? execErr.message : String(execErr)
@@ -4306,6 +4617,68 @@ function createWindow(): void {
               if (!moved) {
                 currentWC.sendInputEvent({ type: 'mouseMove', x, y })
               }
+              await wait(150)
+            }
+            // Phase 4: a pointer drag. The page script located both ends; the
+            // gesture itself has to be REAL input, because the libraries this
+            // exists for (sliders, react-dnd, sortable.js) are watching
+            // pointerdown/move/up and ignore anything synthesized in the page.
+            //
+            // The movement is stepped rather than jumped: a single move from
+            // start to finish looks like a teleport, and drag libraries that
+            // track velocity or require a movement threshold to "arm" the drag
+            // routinely ignore it. Real hands move in increments, so we do too.
+            if (result.dragAt) {
+              const { from, to } = result.dragAt
+              const pt = (p: { x: number; y: number }): { x: number; y: number } => ({
+                x: Math.round(p.x),
+                y: Math.round(p.y)
+              })
+              const a = pt(from)
+              const b = pt(to)
+              const STEPS = 12
+              const send = async (
+                type: 'mouseDown' | 'mouseMove' | 'mouseUp',
+                x: number,
+                y: number
+              ): Promise<void> => {
+                if (cdpReady) {
+                  try {
+                    await cdp.sendCommand('Input.dispatchMouseEvent', {
+                      type:
+                        type === 'mouseDown'
+                          ? 'mousePressed'
+                          : type === 'mouseUp'
+                            ? 'mouseReleased'
+                            : 'mouseMoved',
+                      x,
+                      y,
+                      button: 'left',
+                      buttons: 1,
+                      clickCount: type === 'mouseMove' ? 0 : 1
+                    })
+                    return
+                  } catch {
+                    // CDP hiccup — fall through to the weaker fallback
+                  }
+                }
+                currentWC.sendInputEvent(
+                  type === 'mouseMove'
+                    ? { type, x, y }
+                    : { type, x, y, button: 'left', clickCount: 1 }
+                )
+              }
+              await send('mouseMove', a.x, a.y)
+              await send('mouseDown', a.x, a.y)
+              for (let s = 1; s <= STEPS; s++) {
+                await send(
+                  'mouseMove',
+                  Math.round(a.x + ((b.x - a.x) * s) / STEPS),
+                  Math.round(a.y + ((b.y - a.y) * s) / STEPS)
+                )
+                await wait(16)
+              }
+              await send('mouseUp', b.x, b.y)
               await wait(150)
             }
           }
@@ -4709,6 +5082,9 @@ function createWindow(): void {
         name: string
         baseURL: string
         suite: string
+        // Phase 4: the PROJECT above the suite. Absent = save exactly where
+        // tests have always been saved, so no existing library is disturbed.
+        project?: string
         steps: unknown[]
         storageState?: string
         viewport?: { width: number; height: number }
@@ -5219,7 +5595,203 @@ function createWindow(): void {
     const err = await shell.openPath(path)
     if (err) shell.showItemInFolder(path) // fall back if the folder won't open
   })
-  ipcMain.handle('library:listSuites', () => listSuites())
+  ipcMain.handle('library:listSuites', (_e, project?: string) => listSuites(project ?? ''))
+  // Phase 4: the projects (folders holding suites) the library already has.
+  ipcMain.handle('library:listProjects', () => listProjects())
+
+  // === Phase 4: evidence privacy ====================================
+  // What is allowed to reach the evidence on disk. Stored in userData, not the
+  // shared Tests folder — a policy naming the things you consider sensitive
+  // must not itself be committed. See src/main/privacy.ts.
+  // === Phase 4: postback + GitLab ===================================
+  //
+  // The app already had ONE outbound notification: a monitor failure posted to
+  // a chat webhook, as prose. These two are the general case the audit asked
+  // for — a machine-readable result for anything downstream that is waiting on
+  // the run, and a failure filed in GitLab the way F34 files one in Jira.
+  //
+  // Delivery reports its outcome and retries only what might fix itself: a
+  // postback that silently doesn't arrive is worse than none, because the whole
+  // point is that something is waiting for it. See src/shared/postback.ts.
+  ipcMain.handle(
+    'postback:send',
+    async (
+      _event,
+      settings: PostbackSettings,
+      run: RunSummary
+    ): Promise<{ ok: boolean; skipped?: boolean; status?: number; error?: string }> => {
+      if (!shouldPost(settings?.when ?? 'off', run.ok)) return { ok: true, skipped: true }
+      const urlError = postbackUrlError(settings.url)
+      if (urlError) return { ok: false, error: urlError }
+
+      const body = JSON.stringify(buildRunPayload(run))
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...parseHeaders(settings.headers ?? '')
+      }
+      // Three attempts with a widening gap. Enough to ride out a restart or a
+      // rate limit; short enough that a finished run isn't held open for long.
+      let lastError = ''
+      let lastStatus: number | null = null
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await wait(attempt * 1000)
+        try {
+          const res = await fetch(settings.url.trim(), { method: 'POST', headers, body })
+          lastStatus = res.status
+          if (res.ok) return { ok: true, status: res.status }
+          lastError = `The receiver returned ${res.status} ${res.statusText}`.trim()
+          if (!isRetryable(res.status)) break
+        } catch (e) {
+          lastStatus = null
+          lastError = reachError(e, settings.url)
+        }
+      }
+      return { ok: false, status: lastStatus ?? undefined, error: lastError }
+    }
+  )
+
+  // File a failure as a GitLab issue — the mirror of jira:createIssue above.
+  ipcMain.handle(
+    'gitlab:createIssue',
+    async (
+      _event,
+      cfg: GitLabConfig & { title: string; description: string; labels?: string }
+    ): Promise<{ ok: boolean; iid?: number; url?: string; error?: string }> => {
+      const configError = gitlabConfigError(cfg)
+      if (configError) return { ok: false, error: configError }
+      try {
+        const res = await fetch(gitlabIssuesUrl(cfg), {
+          method: 'POST',
+          headers: {
+            // PRIVATE-TOKEN is GitLab's own header for personal and project
+            // access tokens; Bearer only works for OAuth tokens, and using the
+            // wrong one fails as a bare 401 that names nothing.
+            'PRIVATE-TOKEN': cfg.token.trim(),
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            title: (cfg.title || 'Test failure').slice(0, 240),
+            description: cfg.description,
+            labels: cfg.labels || undefined
+          })
+        })
+        const text = await res.text()
+        if (!res.ok) {
+          let msg = `GitLab returned ${res.status} ${res.statusText}`.trim()
+          if (res.status === 404) {
+            // The overwhelmingly common cause, and the one the raw 404 hides: a
+            // token without api scope gets a 404 rather than a 403, so it reads
+            // as "that project does not exist" when the project is fine.
+            msg +=
+              ' — check the project id/path, and that the token has "api" scope (GitLab answers 404, not 403, for a token that cannot see the project).'
+          } else {
+            try {
+              const j = JSON.parse(text) as { message?: unknown; error?: unknown }
+              const detail = j.message ?? j.error
+              if (detail) {
+                msg += ` — ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`
+              }
+            } catch {
+              if (text) msg += ` — ${text.slice(0, 200)}`
+            }
+          }
+          return { ok: false, error: msg }
+        }
+        const created = JSON.parse(text) as { iid?: number; web_url?: string }
+        return { ok: true, iid: created.iid, url: created.web_url }
+      } catch (e) {
+        return { ok: false, error: reachError(e, cfg.baseUrl) }
+      }
+    }
+  )
+
+  ipcMain.handle('integrations:get', () => loadIntegrations())
+  ipcMain.handle('integrations:save', (_e, s: IntegrationSettings) => saveIntegrations(s))
+  // === Phase 4: the durable background runner ========================
+  //
+  // monitors.ts says, in its first comment, that monitors only fire while the
+  // app is open. These close that: the OS scheduler invokes this app's own CLI,
+  // so a monitor keeps running after the window is shut, across reboots and
+  // logouts, without this app inventing a background service to maintain.
+  //
+  // See src/main/scheduler.ts for why it is done this way.
+  const runSchtasks = (plan: {
+    exe: string
+    args: string[]
+  }): Promise<{ ok: boolean; out: string; error?: string }> =>
+    new Promise((resolve) => {
+      execFile(plan.exe, plan.args, { windowsHide: true }, (err, stdout, stderr) => {
+        if (err) {
+          resolve({ ok: false, out: stdout ?? '', error: (stderr || err.message).trim() })
+          return
+        }
+        resolve({ ok: true, out: stdout ?? '' })
+      })
+    })
+
+  ipcMain.handle(
+    'scheduler:enable',
+    async (
+      _event,
+      monitorId: string,
+      testName: string,
+      intervalMin: number
+    ): Promise<{ ok: boolean; error?: string }> => {
+      if (!schedulerAvailable()) return { ok: false, error: unavailableMessage() }
+      // The report goes beside the library, in a folder the user can find —
+      // a scheduled run whose result lands somewhere undiscoverable has not
+      // really reported anything.
+      const reportDir = join(libraryDir(), '_reports')
+      await mkdir(reportDir, { recursive: true })
+      const plan = buildCreateTask(
+        { monitorId, testName, intervalMin },
+        // app.getPath('exe') is the INSTALLED executable. In development it is
+        // electron.exe, which would schedule a task that opens a bare Electron —
+        // so scheduling is refused in dev rather than creating a broken task.
+        app.getPath('exe'),
+        join(reportDir, `${taskName(monitorId)}.xml`)
+      )
+      if (!app.isPackaged) {
+        return {
+          ok: false,
+          error:
+            'Background runs can only be scheduled from the installed app — in development the executable is Electron itself, and the task would not run your tests.'
+        }
+      }
+      const res = await runSchtasks(plan)
+      return res.ok ? { ok: true } : { ok: false, error: res.error }
+    }
+  )
+
+  ipcMain.handle(
+    'scheduler:disable',
+    async (_event, monitorId: string): Promise<{ ok: boolean; error?: string }> => {
+      if (!schedulerAvailable()) return { ok: false, error: unavailableMessage() }
+      const res = await runSchtasks(buildDeleteTask(monitorId))
+      // Deleting a task that is not there is a success, not a failure: the
+      // desired state (no scheduled run) is exactly what we have.
+      if (!res.ok && /cannot find|does not exist/i.test(res.error ?? '')) return { ok: true }
+      return res.ok ? { ok: true } : { ok: false, error: res.error }
+    }
+  )
+
+  // Which monitors currently have a REAL scheduled task. Read from the OS
+  // rather than from our own store on purpose: the user can delete a task in
+  // Task Scheduler, and a checkbox that kept claiming "scheduled" because our
+  // file said so would be lying about the state of their machine.
+  ipcMain.handle(
+    'scheduler:list',
+    async (): Promise<{ available: boolean; message?: string; tasks: string[] }> => {
+      if (!schedulerAvailable()) {
+        return { available: false, message: unavailableMessage(), tasks: [] }
+      }
+      const res = await runSchtasks(buildQueryTasks())
+      return { available: true, tasks: res.ok ? parseTaskList(res.out) : [] }
+    }
+  )
+
+  ipcMain.handle('privacy:get', () => loadPrivacy())
+  ipcMain.handle('privacy:save', (_e, settings: PrivacySettings) => savePrivacy(settings))
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))
   // QF-003: deleting a test must also delete its stored password. Without this,
   // "I deleted that test" was untrue of the part that mattered most — the
@@ -5532,6 +6104,41 @@ function createWindow(): void {
     if (!/^trace-[a-zA-Z0-9_-]+$/.test(id) || !/^[a-zA-Z0-9_.-]+$/.test(file)) return
     shell.openPath(join(traceDir(id), file))
   })
+  // Save the run VIDEO somewhere it will survive.
+  //
+  // The .webm lives inside the trace folder, and traces prune to the newest 40
+  // — so the artifact most worth attaching to a bug report is also the one
+  // that quietly deletes itself after forty more runs. The "Save recording"
+  // export below cannot carry it: that is deliberately ONE self-contained
+  // .html, and a video embedded as a data URL would dwarf the rest of it.
+  //
+  // Hence its own button. Returns the destination path, or null if the user
+  // cancelled or there was no video to save.
+  ipcMain.handle('trace:saveVideo', async (_event, id: string): Promise<string | null> => {
+    if (typeof id !== 'string' || !isSafeTraceId(id)) return null
+    const src = videoPath(traceDir(id))
+    // Checked BEFORE the save dialog: asking someone where to put a file and
+    // only then admitting there isn't one is a small betrayal of their time.
+    if (!existsSync(src)) return null
+    const manifest = await loadTrace(id)
+    const slug = (manifest?.testName || id).replace(/[^a-zA-Z0-9-_]+/g, '-').slice(0, 60)
+    const picked = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save run video',
+      defaultPath: `video-${slug}.webm`,
+      filters: [{ name: 'WebM video', extensions: ['webm'] }]
+    })
+    if (picked.canceled || !picked.filePath) return null
+    try {
+      await copyFile(src, picked.filePath)
+      // Reveal rather than open: opening would launch the player and start
+      // playing it again, which is not what "save" asked for.
+      shell.showItemInFolder(picked.filePath)
+      return picked.filePath
+    } catch {
+      return null
+    }
+  })
+
   // Copy the whole recording to a folder the user picks (so it survives pruning
   // and can be shared), then reveal it. Returns the destination path or null.
   ipcMain.handle('trace:export', async (_event, id: string): Promise<string | null> => {
@@ -5858,6 +6465,85 @@ function createWindow(): void {
     }
   )
 
+  // === Phase 4: the portable test format (YAML / JSON round trip) =====
+  //
+  // The saved JSON is a machine format — every step carries its full ranked
+  // selector ladder, so a twelve-step login is four hundred lines and a pull
+  // request that changes one button is an unreadable wall. These two handlers
+  // are the human-facing form of the same model: export it, edit it in any
+  // text editor, import it back, run it.
+  //
+  // Main owns the disk here for the same reason it does everywhere else — the
+  // renderer never sees a path it didn't get from a dialog the user drove.
+  ipcMain.handle(
+    'portable:export',
+    async (
+      _event,
+      test: Record<string, unknown>,
+      steps: Record<string, unknown>[],
+      format: 'yaml' | 'json'
+    ): Promise<string | null> => {
+      const portable = testToPortable(test, steps)
+      const ext = format === 'json' ? 'json' : 'yaml'
+      const slug =
+        String(test.name ?? 'test')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '') || 'test'
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: 'Export test as a portable file',
+        defaultPath: `${slug}.${ext}`,
+        filters: [
+          format === 'json'
+            ? { name: 'JSON', extensions: ['json'] }
+            : { name: 'YAML', extensions: ['yaml', 'yml'] }
+        ]
+      })
+      if (result.canceled || !result.filePath) return null
+      const text = format === 'json' ? toPortableJson(portable) : toYaml(portable)
+      await writeFile(result.filePath, text, 'utf-8')
+      return result.filePath
+    }
+  )
+
+  ipcMain.handle(
+    'portable:import',
+    async (): Promise<{
+      name: string
+      baseURL?: string
+      tags?: string[]
+      dataRows?: Record<string, string>[]
+      steps: Record<string, unknown>[]
+      warnings: string[]
+      path: string
+    } | null> => {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: 'Import a test file',
+        properties: ['openFile'],
+        filters: [
+          { name: 'Test files', extensions: ['yaml', 'yml', 'json'] },
+          { name: 'All files', extensions: ['*'] }
+        ]
+      })
+      if (result.canceled || !result.filePaths.length) return null
+      const path = result.filePaths[0]
+      const source = await readFile(path, 'utf-8')
+      // A parse failure throws with a LINE NUMBER; let it travel to the
+      // renderer as the message, because "something went wrong" is not a
+      // usable answer about a four-hundred-line file the user hand-edited.
+      const { test, steps, warnings } = parsePortableTest(source, path)
+      return {
+        name: test.name,
+        baseURL: test.baseURL,
+        tags: test.tags,
+        dataRows: test.dataRows,
+        steps,
+        warnings,
+        path
+      }
+    }
+  )
+
   // Save a generated bug report as a .md file the user picks a place for.
   // Same pattern as recorder:export — main owns the disk.
   ipcMain.handle(
@@ -6077,7 +6763,245 @@ function createWindow(): void {
   )
 }
 
-app.whenReady().then(() => {
+// =====================================================================
+// Phase 4 — running from the command line, with no window.
+// =====================================================================
+// The same executable the user double-clicks also runs tests headlessly for a
+// pipeline. When a command is present we never call createWindow(): a build
+// agent that opened a window would sit there until the job timed out.
+//
+// The tests themselves run through the SAME headless Playwright path the
+// in-app parallel runner uses (runSuiteParallel), and the specs come from the
+// SAME exporter the Export button uses. That sharing is the point: a CLI that
+// ran tests its own way would be a second implementation to keep in step, and
+// the first time it drifted, "it passes locally but fails in CI" would be the
+// tool's fault rather than the app's.
+// =====================================================================
+
+/** Arguments belonging to US, with the executable (and, in dev, the script
+ *  path) stripped. Kept out of cli.ts so that module stays pure and testable. */
+function ownArgs(): string[] {
+  const argv = process.argv.slice(1)
+  // In development the first argument is the app path electron was handed.
+  // In a packaged app there is no such argument, because argv[0] IS the app.
+  return app.isPackaged ? argv : argv.slice(1)
+}
+
+/**
+ * Make a closed output pipe a non-event.
+ *
+ * `… | head -20` is the normal way to look at a long listing, and it is fatal
+ * without this. `head` exits once it has its twenty lines and closes the read
+ * end; our next write fails with EPIPE — and Node delivers a stream write error
+ * ASYNCHRONOUSLY, as an 'error' event, NOT as a synchronous throw. So the
+ * try/catch inside cliOut cannot see it: it became an uncaught exception, and
+ * Electron's default handler answered with a GUI ERROR DIALOG.
+ *
+ * On a build agent that is the worst outcome available — a modal box on a
+ * machine with nobody to click it, so the pipeline hangs rather than fails. A
+ * command-line tool must never open a window, and a reader that stopped reading
+ * is not an error in the first place.
+ */
+function silenceBrokenPipe(): void {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', () => {
+      // The reader went away. There is nothing to report and nowhere to report
+      // it to; the exit code and --out still carry the result.
+    })
+  }
+}
+
+/** Write a line of output. On Windows a packaged Electron app is a GUI-subsystem
+ *  binary, so this may not reach the terminal that launched it — which is why
+ *  --out exists and the help text says so. */
+function cliOut(text: string): void {
+  try {
+    process.stdout.write(text)
+  } catch {
+    // A SYNCHRONOUS failure (a destroyed stream). The asynchronous one — a
+    // closed pipe — is handled by silenceBrokenPipe above, because this catch
+    // provably never sees it.
+  }
+}
+
+async function runCli(opts: CliOptions): Promise<number> {
+  if (opts.command === 'help') {
+    cliOut(HELP_TEXT)
+    return 0
+  }
+
+  const summaries = await listTests()
+  const selected = selectTests(
+    summaries.map((t) => ({
+      fileName: t.fileName,
+      name: t.name,
+      suite: t.suite,
+      project: t.project,
+      tags: t.tags
+    })),
+    opts
+  )
+
+  if (opts.command === 'list') {
+    cliOut(selected.map((t) => `${t.fileName}\t${t.name}`).join('\n') + '\n')
+    cliOut(`${selected.length} test${selected.length === 1 ? '' : 's'}\n`)
+    // Listing nothing is still a successful listing — it is `run` that must
+    // refuse to call an empty selection a pass.
+    return 0
+  }
+
+  if (!selected.length) {
+    cliOut('No tests matched. Nothing was run.\n')
+    // Exit 2, never 0: a green pipeline that ran no tests is worse than a red
+    // one, because nobody looks at it again.
+    return 2
+  }
+
+  // Build a spec per test with the real exporter, exactly as the Export button
+  // would. A test the exporter can't render (a multi-tab or dialog flow, which
+  // the page-object path refuses) still exports inline, so nothing is silently
+  // dropped here.
+  const env = await activeEnvironment()
+  const envVars: Record<string, string> = {}
+  for (const v of env?.vars ?? []) if (v.name) envVars[v.name] = v.value
+  if (env?.baseURL) envVars.BASE_URL = env.baseURL
+
+  const specs: ParallelSpec[] = []
+  const unrunnable: CliTestResult[] = []
+  for (const t of selected) {
+    const test = await loadTest(t.fileName)
+    if (!test) {
+      unrunnable.push({
+        name: t.name,
+        fileName: t.fileName,
+        ok: false,
+        durationMs: 0,
+        error: 'The test file could not be read.'
+      })
+      continue
+    }
+    // NOT resolveSecrets()ed, deliberately. Putting the real password back on
+    // the step would achieve nothing: the exporter replaces any secret step with
+    // `process.env.PASSWORD` one line later, precisely so a generated spec is
+    // safe to commit. The password reaches the run through the ENVIRONMENT
+    // instead — and the missingEnvRefs check below refuses the run when it is
+    // not there, rather than typing '' and blaming a later step.
+    const steps = (test.steps ?? []) as Parameters<typeof generatePlaywrightTest>[0]
+    const code = generatePlaywrightTest(steps, {
+      name: test.name,
+      baseURL: test.baseURL,
+      // F36: without this a test recorded at iPhone 13 runs DESKTOP-sized from
+      // the CLI. That is worse than a failure — it can go green while never
+      // having tested the layout it exists to test. Same call App.tsx makes.
+      device: deviceById(test.deviceId),
+      // F38: the spec's own tag annotations, so a spec the CLI wrote and a spec
+      // the Export button wrote are the same file.
+      tags: test.tags,
+      // A data-driven test's `{{username}}` only compiles to `data.username` if
+      // "username" is in this list — the exporter checks `columns.includes(name)`
+      // before it will treat a token as a row reference. This used to be `[]`,
+      // so every token fell through to a literal and the CLI typed the eleven
+      // characters "{{username}}" into the field. The run then failed on the
+      // assertion AFTER the login, which is a long way from the real cause.
+      data: test.dataRows?.length ? { columns: dataColumns(steps), rows: test.dataRows } : undefined
+    })
+    specs.push({
+      id: t.fileName,
+      name: t.name,
+      code,
+      sessionPath: test.storageState
+        ? join(libraryDir(), '_sessions', test.storageState)
+        : undefined,
+      harPath: test.har ? join(libraryDir(), '_hars', test.har) : undefined
+    })
+  }
+
+  // Refuse rather than run blind. An unset PASSWORD does not fail the spec — it
+  // fills the field with '' and the failure surfaces steps later as a timeout on
+  // something unrelated. Same principle as exit 2 for "no tests matched": the
+  // tool knows it cannot do the job, so it says so instead of producing a
+  // result that looks like an answer.
+  const missing = missingEnvRefs(
+    specs.map((sp) => ({ name: sp.name, code: sp.code })),
+    { ...process.env, ...envVars }
+  )
+  if (missing.length) {
+    cliOut(describeMissingEnv(missing))
+    return 2
+  }
+
+  const startedAt = Date.now()
+  const run = await runSuiteParallel(specs, opts.workers, envVars)
+  if (!run.installed || !run.ran) {
+    // Playwright itself is missing or could not start. That is not a test
+    // failure — reporting it as one would have someone hunting a bug in their
+    // app — so it exits 2, the "could not run" code.
+    cliOut(`${run.message ?? 'The test runner could not start.'}\n`)
+    return 2
+  }
+
+  const results: CliTestResult[] = [
+    ...unrunnable,
+    ...run.results.map((r) => ({
+      name: specs.find((s) => s.id === r.id)?.name ?? r.id,
+      fileName: r.id,
+      ok: r.ok,
+      // The parallel runner reports pass/fail per test, not per-test timing.
+      // Reporting 0 here rather than inventing a number: a JUnit file with
+      // made-up durations is worse than one with honest zeros, because a CI
+      // dashboard will happily chart the fiction.
+      durationMs: 0,
+      error: r.error
+    }))
+  ]
+  const report = summarize(results, Date.now() - startedAt)
+  const text = formatReport(report, opts.reporter)
+  if (opts.out) {
+    try {
+      await writeFile(opts.out, text, 'utf-8')
+      cliOut(`Report written to ${opts.out}\n`)
+    } catch (e) {
+      // The tests ran; only the report failed to save. Say so and still report
+      // the real outcome rather than losing the run over a bad path.
+      cliOut(`Could not write ${opts.out}: ${(e as Error).message}\n`)
+      cliOut(text)
+    }
+  } else {
+    cliOut(text)
+  }
+  return exitCodeFor(report, opts)
+}
+
+app.whenReady().then(async () => {
+  // Phase 4: a command on the command line means "run and exit". This is
+  // checked BEFORE anything opens: a build agent that opened a window would
+  // sit there until the job timed out, which is the worst way for a CI
+  // integration to fail because it looks like a hang, not an error.
+  // Before ANY output: a closed pipe must not become a GUI error dialog.
+  // See silenceBrokenPipe — this has to run ahead of the bad-option path
+  // below, which is itself a cliOut call.
+  silenceBrokenPipe()
+  let cliOpts: CliOptions | null = null
+  try {
+    cliOpts = parseArgs(ownArgs())
+  } catch (e) {
+    // A bad option fails loudly rather than falling through and opening the
+    // app — a typo'd filter that quietly ran everything would be worse.
+    cliOut(`${(e as Error).message}\n`)
+    app.exit(2)
+    return
+  }
+  if (cliOpts) {
+    let code = 2
+    try {
+      code = await runCli(cliOpts)
+    } catch (e) {
+      cliOut(`The run failed to start: ${(e as Error).message}\n`)
+    }
+    app.exit(code)
+    return
+  }
+
   electronApp.setAppUserModelId('com.qatestflow.recorder')
 
   app.on('browser-window-created', (_, window) => {

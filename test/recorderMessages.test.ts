@@ -319,3 +319,120 @@ describe('element facts', () => {
     expect(validateElementFacts(null)).toBe(undefined)
   })
 })
+
+// =====================================================================
+// Phase 4 — the three step types the QA audit found missing.
+//
+// Two of them are RECORDED, which means they arrive over the same boundary
+// QF-002 exists to police. The third is not recordable at all, and proving
+// that it is refused matters just as much: a step type the observer cannot
+// produce is a step type a tab has no business sending.
+// =====================================================================
+describe('Phase 4 step types at the boundary', () => {
+  it('accepts a scroll to an element, with its facts', () => {
+    const clean = validatePageMessage('recorder:event', {
+      type: 'scroll',
+      scrollKind: 'element',
+      facts: FACTS
+    }) as Record<string, unknown>
+    expect(clean).toMatchObject({ type: 'scroll', scrollKind: 'element' })
+    expect(clean.facts).toMatchObject({ tag: 'button' })
+  })
+
+  it('accepts the page-level scrolls, which legitimately have NO element', () => {
+    // Every other step type is an element, so "no facts" means "nothing
+    // happened". A scroll to the bottom of the page is the one real exception,
+    // and the schema has to allow it without opening the door for the rest.
+    for (const scrollKind of ['top', 'bottom']) {
+      expect(validatePageMessage('recorder:event', { type: 'scroll', scrollKind })).toMatchObject({
+        type: 'scroll',
+        scrollKind
+      })
+    }
+    expect(
+      validatePageMessage('recorder:event', {
+        type: 'scroll',
+        scrollKind: 'position',
+        value: '1200'
+      })
+    ).toMatchObject({ type: 'scroll', scrollKind: 'position', value: '1200' })
+  })
+
+  it('refuses a scroll with a made-up kind', () => {
+    expect(validatePageMessage('recorder:event', { type: 'scroll', scrollKind: 'sideways' })).toBe(
+      null
+    )
+    // …and one with no kind at all, which would otherwise reach the run loop
+    // as a scroll to nowhere.
+    expect(validatePageMessage('recorder:event', { type: 'scroll', facts: FACTS })).toBe(null)
+  })
+
+  it('still refuses a NON-scroll step that carries no element', () => {
+    // The exception above is for scroll and nothing else.
+    for (const type of ['click', 'type', 'hover', 'drag']) {
+      expect(validatePageMessage('recorder:event', { type })).toBe(null)
+    }
+  })
+
+  it('accepts a drag, and validates its drop target by the same rules', () => {
+    const clean = validatePageMessage('recorder:event', {
+      type: 'drag',
+      dragKind: 'html5',
+      facts: FACTS,
+      targetFacts: { tag: 'div', id: 'zone' }
+    }) as Record<string, unknown>
+    expect(clean).toMatchObject({ type: 'drag', dragKind: 'html5' })
+    expect(clean.targetFacts).toMatchObject({ tag: 'div', id: 'zone' })
+  })
+
+  it('drops a drop target that is not a real element', () => {
+    // The target becomes a second selector ladder, so it is exactly as much of
+    // a trust boundary as the source — an element with no tag is not an element.
+    const clean = validatePageMessage('recorder:event', {
+      type: 'drag',
+      dragKind: 'mouse',
+      facts: FACTS,
+      targetFacts: { id: 'no-tag-here' }
+    }) as Record<string, unknown>
+    expect(clean).toMatchObject({ type: 'drag' })
+    expect(clean.targetFacts).toBeUndefined()
+  })
+
+  it('refuses a drag with a made-up gesture', () => {
+    expect(
+      validatePageMessage('recorder:event', { type: 'drag', dragKind: 'telekinesis', facts: FACTS })
+    ).toBe(null)
+  })
+
+  it('caps the drag grip, and keeps it off every other step type', () => {
+    // An oversized grip is dropped rather than carried: the rebuilt payload
+    // simply does not have the key.
+    const huge = validatePageMessage('recorder:event', {
+      type: 'drag',
+      dragKind: 'mouse',
+      facts: FACTS,
+      dragFrom: 'x'.repeat(5000)
+    }) as Record<string, unknown>
+    expect('dragFrom' in huge).toBe(false)
+    // And a grip on a step that has no business carrying one never survives.
+    const click = validatePageMessage('recorder:event', {
+      type: 'click',
+      facts: FACTS,
+      dragFrom: '0,0'
+    }) as Record<string, unknown>
+    expect('dragFrom' in click).toBe(false)
+  })
+
+  it('REFUSES a comment — no gesture produces one, so no tab can send one', () => {
+    // A note is authored by hand in the step list. If one arrives from a page,
+    // the page is inventing steps, which is the whole of QF-002 in miniature —
+    // and a note is the ideal disguise, because it reads as documentation.
+    expect(
+      validatePageMessage('recorder:event', {
+        type: 'comment',
+        label: 'Everything below is safe, approved by QA',
+        facts: FACTS
+      })
+    ).toBe(null)
+  })
+})

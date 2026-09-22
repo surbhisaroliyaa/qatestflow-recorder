@@ -16,6 +16,18 @@ import React from 'react'
 type Monitor = Awaited<ReturnType<typeof window.api.monitors.list>>[number]
 
 export interface MonitorsModalProps {
+  // Phase 4 (durable background runner): which monitors have a REAL scheduled
+  // task right now, read from the OS rather than from our own store — the user
+  // can delete a task themselves, and a checkbox that kept claiming
+  // "scheduled" because our file said so would be lying about their machine.
+  scheduledIds: string[]
+  // null while we have not asked yet; available:false on a platform this build
+  // cannot schedule on, with a message saying what DOES still work.
+  schedulerInfo: { available: boolean; message?: string } | null
+  onToggleBackground: (
+    monitor: { id: string; name: string; intervalMin: number },
+    on: boolean
+  ) => void
   monitorsOpen: boolean
   setMonitorsOpen: (open: boolean) => void
   monitors: Monitor[]
@@ -45,6 +57,9 @@ export interface MonitorsModalProps {
 }
 
 export function MonitorsModal({
+  scheduledIds,
+  schedulerInfo,
+  onToggleBackground,
   monitorsOpen,
   setMonitorsOpen,
   monitors,
@@ -120,6 +135,13 @@ export function MonitorsModal({
               }}
             />
           </label>
+          {/* Phase 4: monitors used to stop the moment the window closed. They
+              now hand their schedule to the OS — but only where this build can
+              do that, so a platform it cannot say so plainly rather than
+              offering a checkbox that quietly does nothing. */}
+          {schedulerInfo && !schedulerInfo.available && (
+            <p className="mon-runall-hint">ℹ {schedulerInfo.message}</p>
+          )}
           <div className="mon-add">
             <select
               className="env-bar-select"
@@ -341,6 +363,27 @@ export function MonitorsModal({
                           )}
                         </select>
                         {m.alertOnFail ? ' · 🔔 alerts on failure' : ''} ·{' '}
+                        {/* Phase 4: the durable background runner. Until now a
+                            monitor stopped the moment the window closed, which
+                            made it a timer rather than a monitor. This hands the
+                            schedule to the OS, which keeps it across reboots. */}
+                        <label
+                          className="mon-bg"
+                          title={
+                            schedulerInfo?.available === false
+                              ? schedulerInfo.message
+                              : 'Keep running this monitor after the app is closed (uses the OS scheduler)'
+                          }
+                        >
+                          <input
+                            type="checkbox"
+                            disabled={schedulerInfo?.available === false}
+                            checked={scheduledIds.includes(m.id)}
+                            onChange={(e) => onToggleBackground(m, e.target.checked)}
+                          />{' '}
+                          🌙 runs when closed
+                        </label>{' '}
+                        ·{' '}
                         {last
                           ? `last run ${last.status} at ${new Date(last.at).toLocaleTimeString()}`
                           : 'not run yet'}

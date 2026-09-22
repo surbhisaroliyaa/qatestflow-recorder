@@ -4,6 +4,10 @@
     "electron.vite.config.*",
     "src/main/**/*",
     "src/preload/**/*",
+    "src/preload/*.d.ts",
+    "src/renderer/src/playwrightExport.ts",
+    "src/renderer/src/dataDriven.ts",
+    "src/renderer/src/devices.ts",
     "src/shared/**/*"
   ],
   "compilerOptions": {

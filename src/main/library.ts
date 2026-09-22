@@ -13,6 +13,7 @@
 
 import { app } from 'electron'
 import { mkdir, readdir, readFile, writeFile, unlink } from 'fs/promises'
+import type { Dirent } from 'fs'
 import { join } from 'path'
 // F40: keeps plaintext passwords out of the shared/committed test files.
 import { stripSecrets, stripDataRows, refsByStepId, SECRETS_FILE_VERSION } from './secrets'
@@ -95,6 +96,9 @@ export interface SavedTestSummary {
   // when the test lives in one (e.g. "E2E/login-flow.json").
   fileName: string
   suite: string // the section (subfolder) — '' for legacy root files
+  // Phase 4: the PROJECT folder above the suite — '' when the test isn't in
+  // one, which is every test saved before projects existed.
+  project: string
   name: string
   baseURL: string
   updatedAt: string
@@ -141,10 +145,38 @@ export function safeSegment(segment: string): string {
   return clean === '..' || clean === '.' ? '' : clean
 }
 
-// A relative path arriving over IPC: at most "suite/file.json". Each segment
-// sanitised independently, then rejoined.
+// A relative path arriving over IPC. Each segment is sanitised independently,
+// then rejoined, and the depth is CAPPED — that cap is the containment, so it
+// stays explicit rather than becoming an incidental property of the loop.
+//
+// Phase 4 raised the cap from 2 to 3, for Projects above Suites. The three
+// legal shapes, and why all three have to stay legal:
+//
+//   file.json                  a test saved before suites existed
+//   Suite/file.json            a test saved before projects existed
+//   Project/Suite/file.json    a test saved now
+//
+// A shorter path is never rewritten into a longer one. Every test already in
+// someone's library keeps the exact path it has, because "we reorganised your
+// files on upgrade" is not a thing a test tool gets to do to a folder the user
+// owns, shares and commits.
+export const MAX_PATH_DEPTH = 3
+
 export function safeRel(relPath: string): string {
-  return relPath.split(/[\\/]/).map(safeSegment).filter(Boolean).slice(0, 2).join('/')
+  return relPath.split(/[\\/]/).map(safeSegment).filter(Boolean).slice(0, MAX_PATH_DEPTH).join('/')
+}
+
+/**
+ * Split a library-relative path into where it lives.
+ *
+ * Derived from the path, never stored — the folder IS the location, so the two
+ * cannot drift apart (the same reasoning `suite` was derived under before).
+ */
+export function locationOf(relPath: string): { project: string; suite: string } {
+  const parts = relPath.split('/')
+  if (parts.length >= 3) return { project: parts[0], suite: parts[1] }
+  if (parts.length === 2) return { project: '', suite: parts[0] }
+  return { project: '', suite: '' }
 }
 
 async function ensureDir(): Promise<void> {
@@ -181,8 +213,11 @@ function toSummary(fileName: string, test: SavedTestFile): SavedTestSummary {
   const stats = stepStats(test.steps)
   return {
     fileName,
-    // The folder IS the suite — derived, never stored, so the two can't drift.
-    suite: fileName.includes('/') ? fileName.split('/')[0] : '',
+    // The folder IS the location — derived, never stored, so the two can't
+    // drift. Phase 4 added the project level above the suite; locationOf reads
+    // both out of the path, and a two-segment path still means "suite, no
+    // project", so every test saved before projects existed reads as it always did.
+    ...locationOf(fileName),
     name: test.name,
     baseURL: test.baseURL,
     updatedAt: test.updatedAt,
@@ -244,6 +279,11 @@ export async function saveTest(input: {
   name: string
   baseURL: string
   suite: string
+  // Phase 4: the PROJECT this test belongs to — the level above suites, for
+  // the library that holds more than one product. Empty (the default, and what
+  // every existing caller passes) saves exactly where it always did, so no
+  // test already on disk moves.
+  project?: string
   steps: unknown[]
   storageState?: string
   viewport?: { width: number; height: number }
@@ -256,8 +296,14 @@ export async function saveTest(input: {
 }): Promise<SavedTestSummary> {
   await ensureDir()
   const suite = safeSegment(input.suite)
-  const fileName = suite ? `${suite}/${slugify(input.name)}.json` : `${slugify(input.name)}.json`
-  if (suite) await mkdir(join(libraryDir(), suite), { recursive: true })
+  const project = safeSegment(input.project ?? '')
+  // A project with no suite would put a test file directly in the project
+  // folder, which then reads back as a SUITE named after the project (the
+  // shapes are distinguished by depth alone). Folding it into the suite slot
+  // keeps the path honest about what it is.
+  const folder = [project, suite].filter(Boolean).join('/')
+  const fileName = folder ? `${folder}/${slugify(input.name)}.json` : `${slugify(input.name)}.json`
+  if (folder) await mkdir(join(libraryDir(), folder), { recursive: true })
   const now = new Date().toISOString()
   const previous = await readTestFile(fileName)
   // F1: write the new HAR (if capturing) and point the test at it; otherwise
@@ -312,10 +358,27 @@ export async function saveTest(input: {
 
 // Every section folder, defaults first — shown even when empty (a fresh app
 // must still offer E2E and Daily as save targets).
-export async function listSuites(): Promise<string[]> {
+export async function listSuites(project = ''): Promise<string[]> {
   await ensureDir()
-  const entries = await readdir(libraryDir(), { withFileTypes: true })
-  const found = entries.filter((e) => e.isDirectory() && !e.name.startsWith('_')).map((e) => e.name)
+  const scope = safeSegment(project)
+  const dir = scope ? join(libraryDir(), scope) : libraryDir()
+  let entries: Dirent[]
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch {
+    // A project that doesn't exist yet (the user is typing a new name) has no
+    // suites, but still has the defaults to offer as save targets.
+    return [...DEFAULT_SUITES]
+  }
+  let found = entries.filter((e) => e.isDirectory() && !e.name.startsWith('_')).map((e) => e.name)
+  // Phase 4: at the ROOT, a folder that contains other folders is a PROJECT,
+  // not a suite — offering it as a save target would put a test file directly
+  // inside a project, where it would then read back as a suite named after the
+  // project. Inside a project, every folder is a suite, so no filter applies.
+  if (!scope) {
+    const projects = new Set(await listProjects())
+    found = found.filter((name) => !projects.has(name))
+  }
   const rest = found.filter((s) => !DEFAULT_SUITES.includes(s)).sort()
   return [...DEFAULT_SUITES, ...rest]
 }
@@ -333,21 +396,65 @@ export async function listTests(): Promise<SavedTestSummary[]> {
   return summaries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
 }
 
-/** Every test file path in the library, relative to its folder. */
+/**
+ * Every test file path in the library, relative to its folder.
+ *
+ * Walks to MAX_PATH_DEPTH, which is what makes Projects work: a test can sit
+ * at the root (before suites existed), one level down (a suite), or two (a
+ * project's suite). Folders beginning with `_` are the app's own storage
+ * (_hars, _sessions, _drafts, _traces …) and are never tests.
+ */
 async function listTestPaths(): Promise<string[]> {
   await ensureDir()
   const relPaths: string[] = []
-  const entries = await readdir(libraryDir(), { withFileTypes: true })
-  for (const entry of entries) {
-    if (entry.isFile() && entry.name.endsWith('.json')) relPaths.push(entry.name)
-    if (entry.isDirectory() && !entry.name.startsWith('_')) {
-      const inner = await readdir(join(libraryDir(), entry.name))
-      for (const f of inner) {
-        if (f.endsWith('.json')) relPaths.push(`${entry.name}/${f}`)
+  const walk = async (rel: string, depth: number): Promise<void> => {
+    const here = rel ? join(libraryDir(), rel) : libraryDir()
+    let entries: Dirent[]
+    try {
+      entries = await readdir(here, { withFileTypes: true })
+    } catch {
+      return // a folder that vanished mid-walk is not a failure of the listing
+    }
+    for (const entry of entries) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name
+      if (entry.isFile() && entry.name.endsWith('.json')) relPaths.push(childRel)
+      // `depth + 1 < MAX_PATH_DEPTH`: a file one level deeper than this folder
+      // must still fit the cap, or it would be found here and then rejected by
+      // safeRel on the way back in — listed but unopenable.
+      else if (entry.isDirectory() && !entry.name.startsWith('_') && depth + 1 < MAX_PATH_DEPTH) {
+        await walk(childRel, depth + 1)
       }
     }
   }
+  await walk('', 0)
   return relPaths
+}
+
+/**
+ * Phase 4: every PROJECT folder — a folder that contains suite folders rather
+ * than tests. Projects are discovered, not declared, for the same reason suites
+ * are: the folder tree is the truth, so there is no index file to fall out of
+ * step with what is actually on disk.
+ *
+ * A folder holding only .json files is a SUITE, not a project. That is the
+ * whole distinction, and it is what lets an existing library keep working
+ * untouched: every folder in it holds tests, so nothing becomes a project by
+ * accident.
+ */
+export async function listProjects(): Promise<string[]> {
+  await ensureDir()
+  const out: string[] = []
+  const entries = await readdir(libraryDir(), { withFileTypes: true })
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('_')) continue
+    try {
+      const inner = await readdir(join(libraryDir(), entry.name), { withFileTypes: true })
+      if (inner.some((e) => e.isDirectory() && !e.name.startsWith('_'))) out.push(entry.name)
+    } catch {
+      /* unreadable folder — not a project we can offer */
+    }
+  }
+  return out.sort()
 }
 
 /**
@@ -654,15 +761,12 @@ function blocksDir(): string {
 // save, so a live link is always one level (a test → a block, never nested).
 export async function blockUsage(): Promise<Record<string, BlockLink[]>> {
   await ensureDir()
-  const relPaths: string[] = []
-  const entries = await readdir(libraryDir(), { withFileTypes: true })
-  for (const entry of entries) {
-    if (entry.isFile() && entry.name.endsWith('.json')) relPaths.push(entry.name)
-    if (entry.isDirectory() && !entry.name.startsWith('_')) {
-      const inner = await readdir(join(libraryDir(), entry.name))
-      for (const f of inner) if (f.endsWith('.json')) relPaths.push(`${entry.name}/${f}`)
-    }
-  }
+  // listTestPaths, not a second copy of the walk. This function used to have
+  // its own two-level version, which Phase 4's projects would have silently
+  // made wrong: a block used by a test inside a project would not have been
+  // counted, so the edit warning would UNDERSTATE the blast radius — the one
+  // number this feature exists to get right.
+  const relPaths = await listTestPaths()
   const usage: Record<string, BlockLink[]> = {}
   for (const fileName of relPaths) {
     const test = await readTestFile(fileName)
@@ -678,7 +782,7 @@ export async function blockUsage(): Promise<Record<string, BlockLink[]>> {
       ;(usage[blockRef] ??= []).push({
         fileName,
         name: test.name,
-        suite: fileName.includes('/') ? fileName.split('/')[0] : '',
+        suite: locationOf(fileName).suite,
         count
       })
     }

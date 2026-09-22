@@ -870,6 +870,23 @@ export function stepText(step: RecorderStep): string {
       return `Press ${step.key ?? 'Enter'} in ${name}`
     case 'hover':
       return `Hover over ${name}`
+    case 'scroll':
+      switch (step.scrollKind) {
+        case 'top':
+          return 'Scroll to the top of the page'
+        case 'bottom':
+          return 'Scroll to the bottom of the page'
+        case 'position':
+          return `Scroll the page to ${step.value ?? '0'}px`
+        default:
+          return `Scroll to ${name}`
+      }
+    case 'drag':
+      return step.targetLabel
+        ? `Drag ${name} onto ${step.targetLabel}`
+        : `Drag ${name} by ${step.value ?? '0,0'} pixels`
+    case 'comment':
+      return `💬 ${(step.label ?? '').trim() || 'Note'}`
     case 'assert':
       switch (step.assertKind) {
         case 'text-equals':
@@ -957,6 +974,20 @@ export function stepText(step: RecorderStep): string {
 // so a value's internal line breaks were never meaningful here.
 function stepComment(step: RecorderStep): string {
   return stepText(step).replace(/\s*[\r\n]+\s*/g, ' ')
+}
+
+/**
+ * Phase 4: the heading line a `comment` step becomes in the generated spec.
+ *
+ * The note is the ONE piece of a spec that is entirely free text the user
+ * typed, and it lands in a `//` line — so a newline in it would end the
+ * comment and turn whatever follows into code. Flattened here for exactly the
+ * reason stepComment flattens: a spec that doesn't parse fails at COLLECTION
+ * time, which takes down every other test in the same Playwright run.
+ */
+function noteComment(step: RecorderStep): string {
+  const text = (step.label ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim()
+  return `// ── ${text || 'Note'} ──`
 }
 
 // Day 16: a dialog is answered by a handler REGISTERED BEFORE the action that
@@ -1174,6 +1205,26 @@ function wrapOptional(line: string, pad: string): string {
 // `test.use({ baseURL })` (added by the generator, itself reading
 // process.env.BASE_URL — F25) resolves it at runtime, so retargeting the whole
 // suite at another environment is one BASE_URL env var, no file edit.
+/**
+ * Indent EVERY line of an emitted action, not just its first.
+ *
+ * Most actions are one line, and for years every call site could get away with
+ * `${pad}${action}`. Phase 4's drag is the first action that spans several
+ * lines, and in the page-object export its continuation lines came out flush
+ * against the left margin — valid TypeScript, unreadable output.
+ *
+ * The convention this establishes: actionFor returns lines indented RELATIVE to
+ * each other (a loop body is two spaces deeper than its `for`), with no base
+ * indent of its own. Adding the base is the caller's job, and this is it.
+ * Blank lines stay blank rather than becoming trailing whitespace.
+ */
+function padAll(action: string, pad: string): string {
+  return action
+    .split('\n')
+    .map((l) => (l.trim() ? pad + l : l))
+    .join('\n')
+}
+
 function actionFor(
   step: RecorderStep,
   baseURL: string | undefined,
@@ -1198,6 +1249,26 @@ function actionFor(
 
   if (step.type === 'back') {
     return `await ${pageVar}.goBack()`
+  }
+
+  // Phase 4: a PAGE-level scroll — no element, so it's handled before the
+  // locator is built. The element form falls through to the switch below.
+  //
+  // The settle wait after it is not padding: a recorded scroll exists because
+  // of what the scroll TRIGGERS (lazy images, the next page of an infinite
+  // list), and that work is asynchronous. The app's own replay waits here too,
+  // and the exported spec has to behave the same or it will race.
+  if (step.type === 'scroll' && step.scrollKind !== 'element') {
+    const target =
+      step.scrollKind === 'top'
+        ? '0'
+        : step.scrollKind === 'bottom'
+          ? 'document.body.scrollHeight'
+          : String(Math.max(0, parseInt(step.value ?? '0', 10) || 0))
+    return (
+      `await ${pageVar}.evaluate(() => window.scrollTo(0, ${target}))\n` +
+      `await ${pageVar}.waitForTimeout(400)`
+    )
   }
 
   if (step.type === 'closeTab') {
@@ -1291,30 +1362,30 @@ function actionFor(
     if (step.apiTimeoutMs) optParts.push(`timeout: ${step.apiTimeoutMs}`)
     const opts = optParts.length ? `, { ${optParts.join(', ')} }` : ''
     const bodyCheck = (step.apiExpectBody ?? '').trim()
-      ? `\n    expect(await res.text()).toContain(${valueExpr(step.apiExpectBody!.trim(), columns)})`
+      ? `\n  expect(await res.text()).toContain(${valueExpr(step.apiExpectBody!.trim(), columns)})`
       : ''
     // F24.2: the real assertions (field / header / count / type), the contract,
     // and the SLA — all of which must survive into CI or the export is a lie.
-    const checks = apiCheckLines(step, '    ', columns)
+    const checks = apiCheckLines(step, '  ', columns)
     // F24.1: lift saved values out of the response, so the exported test can also
     // GET/DELETE the record it just created. It reuses `body` when the checks
     // above already parsed it — declaring it twice would not compile.
-    const saves = apiSaveLines(step, '    ', checksDeclareBody(step))
+    const saves = apiSaveLines(step, '  ', checksDeclareBody(step))
     // F24.2: SLA — time the call and assert the budget.
     const sla = step.apiMaxMs
-      ? `\n    expect(Date.now() - t0, 'response time').toBeLessThanOrEqual(${step.apiMaxMs})`
+      ? `\n  expect(Date.now() - t0, 'response time').toBeLessThanOrEqual(${step.apiMaxMs})`
       : ''
-    const t0 = step.apiMaxMs ? `    const t0 = Date.now()\n` : ''
+    const t0 = step.apiMaxMs ? `  const t0 = Date.now()\n` : ''
     // F24.3: the 🔑 session handoff. Emitted LAST, so it only runs once the status
     // and the assertions have passed — handing a failed login's cookies to the
     // browser would be worse than not handing anything over at all.
-    const inject = apiInjectLines(step, '    ', pageVar, columns)
+    const inject = apiInjectLines(step, '  ', pageVar, columns)
     return (
       `{\n` +
       t0 +
-      `    const res = await request.${method}(${valueExpr(step.url ?? '', columns)}${opts})\n` +
-      `    ${apiStatusAssertion(step.apiExpectStatus, 'res')}${sla}${bodyCheck}${checks}${saves}${inject}\n` +
-      `  }`
+      `  const res = await request.${method}(${valueExpr(step.url ?? '', columns)}${opts})\n` +
+      `  ${apiStatusAssertion(step.apiExpectStatus, 'res')}${sla}${bodyCheck}${checks}${saves}${inject}\n` +
+      `}`
     )
   }
 
@@ -1452,6 +1523,50 @@ function actionFor(
     case 'hover':
       // Playwright's .hover() moves the real mouse — CSS :hover reveals work.
       return `await ${locator}.hover()`
+    // Phase 4: scroll to a recorded element. scrollIntoViewIfNeeded is the
+    // right primitive rather than a pixel offset — it means the same thing at
+    // any viewport size, which a hard-coded Y does not.
+    case 'scroll':
+      return `await ${locator}.scrollIntoViewIfNeeded()\nawait ${pageVar}.waitForTimeout(400)`
+    // Phase 4: drag. Which mechanism the spec gets is decided by what the page
+    // actually did when it was recorded — see RecorderStep.dragKind.
+    case 'drag': {
+      if (step.dragKind === 'html5' || step.targetSelector) {
+        if (!step.targetSelector) return null
+        // Playwright's dragTo drives the real drag, including Chromium's native
+        // HTML5 drag loop, which no amount of synthesized mouse input can do.
+        const targetSel =
+          (portableTestId && portableTestIdSelector({ ...step, selector: step.targetSelector })) ||
+          step.targetSelector
+        return `await ${locator}.dragTo(${base}.${targetSel})`
+      }
+      // An offset drag (a slider): there is no target element, only a distance.
+      // Playwright has no primitive for this, so it is the honest mouse
+      // sequence — and it is stepped, because drag libraries that require a
+      // movement threshold ignore a single jump. Same reasoning as the app's
+      // own replay, deliberately kept in lockstep with it.
+      const [dxRaw, dyRaw] = (step.value ?? '').split(',')
+      const dx = Math.round(parseFloat(dxRaw ?? '0') || 0)
+      const dy = Math.round(parseFloat(dyRaw ?? '0') || 0)
+      // Where within the element the human pressed, as a fraction of its box —
+      // see RecorderStep.dragFrom. Centre is the fallback for a step recorded
+      // before this was captured.
+      const [fxRaw, fyRaw] = (step.dragFrom ?? '0.5,0.5').split(',')
+      const fx = Number.isFinite(parseFloat(fxRaw)) ? parseFloat(fxRaw) : 0.5
+      const fy = Number.isFinite(parseFloat(fyRaw)) ? parseFloat(fyRaw) : 0.5
+      return [
+        `const dragBox = await ${locator}.boundingBox()`,
+        `if (!dragBox) throw new Error('Drag handle is not visible')`,
+        `const dragX = dragBox.x + dragBox.width * ${fx}`,
+        `const dragY = dragBox.y + dragBox.height * ${fy}`,
+        `await ${pageVar}.mouse.move(dragX, dragY)`,
+        `await ${pageVar}.mouse.down()`,
+        `for (let s = 1; s <= 12; s++) {`,
+        `  await ${pageVar}.mouse.move(dragX + (${dx} * s) / 12, dragY + (${dy} * s) / 12)`,
+        `}`,
+        `await ${pageVar}.mouse.up()`
+      ].join('\n')
+    }
     case 'upload': {
       // Day 16: Playwright sets a file input directly with setInputFiles.
       // Day 16(+): reference the file by a PORTABLE relative path. On save, the
@@ -1663,6 +1778,15 @@ export function generatePlaywrightTest(
     const step = enabled[i]
     const pageVar = pv(step.windowId)
 
+    // Phase 4: a human note becomes a real comment in the generated spec, with
+    // a blank line above it so it reads as a section heading rather than as a
+    // remark about the next line. This is the whole point of the step type —
+    // the "why" travels with the test instead of being lost at export.
+    if (step.type === 'comment') {
+      lines.push(`\n  ${noteComment(step)}`)
+      continue
+    }
+
     // === F37: loops + branching ===
     // These emit real JavaScript control flow, so the exported spec loops and
     // branches the same way the app did — not a comment saying it did.
@@ -1778,7 +1902,7 @@ export function generatePlaywrightTest(
       )
       continue
     }
-    lines.push(`${healNote}  // ${stepComment(step)}\n  ${action}`)
+    lines.push(`${healNote}  // ${stepComment(step)}\n${padAll(action, '  ')}`)
   }
   // F37: close any block whose end marker is missing. A 🔁 Repeat or 🔀 If with
   // no matching end left the file with an unbalanced `{`, and Playwright treats a
@@ -2422,6 +2546,15 @@ export function generatePageObjectTest(
       specBody.push(`${ind()}await ${pageOf()}.close()`)
       continue
     }
+    // Phase 4: a human note. It flushes the action buffer first for the same
+    // reason a control marker does — a section heading that ended up in the
+    // middle of a generated page-object method would label the wrong thing.
+    if (step.type === 'comment') {
+      flush()
+      specBody.push('')
+      specBody.push(`${ind()}${noteComment(step)}`)
+      continue
+    }
     // === F37: loops + branching, emitted as REAL control flow ===
     // Every control marker flushes the action buffer first, so a method never
     // straddles a block boundary (half its steps inside the loop, half outside).
@@ -2496,7 +2629,7 @@ export function generatePageObjectTest(
         columns,
         idPolicy.portable
       )
-      if (line) specBody.push(step.optional ? wrapOptional(line, ind()) : `${ind()}${line}`)
+      if (line) specBody.push(step.optional ? wrapOptional(line, ind()) : padAll(line, ind()))
       continue
     }
     // F13/F14/F15: a page-level accessibility, performance or VISUAL check —
@@ -2508,10 +2641,24 @@ export function generatePageObjectTest(
     // and was dropped WITHOUT A TRACE — no toHaveScreenshot, not even a comment.
     // A visual-regression test exported as a page object therefore did no visual
     // checking at all and reported green. Found by diffing inline vs POM output.
-    if (step.type === 'a11y' || step.type === 'perf' || step.type === 'snapshot') {
+    // Phase 4: a PAGE-level scroll (top / bottom / a pixel offset) belongs here
+    // for exactly the same reason `snapshot` does — it carries no selector, so
+    // without this branch it would fall through to `if (!step.selector) continue`
+    // below and vanish from the page-object export without a trace. The element
+    // form DOES have a selector and goes through the page object as usual.
+    //
+    // This is the fourth time this repo has shipped "the inline exporter got the
+    // feature, the POM export didn't". The gate in test-dom/exported-spec.spec.ts
+    // caught it this time before it reached her.
+    if (
+      step.type === 'a11y' ||
+      step.type === 'perf' ||
+      step.type === 'snapshot' ||
+      (step.type === 'scroll' && step.scrollKind !== 'element')
+    ) {
       flush()
       const line = actionFor(step, baseURL, pageOf(), undefined, columns, idPolicy.portable)
-      if (line) specBody.push(`${ind()}${line}`)
+      if (line) specBody.push(padAll(line, ind()))
       continue
     }
     // F24: an api step uses the `request` fixture (in the spec's test signature),
@@ -2520,7 +2667,7 @@ export function generatePageObjectTest(
       flush()
       const line = actionFor(step, baseURL, pageOf(), undefined, columns, idPolicy.portable)
       if (line) {
-        specBody.push(`${ind()}${line}`)
+        specBody.push(padAll(line, ind()))
         // F24.4: remember WHICH emitted line this teardown step became, so it can be
         // hoisted into a `finally`. (The POM lines carry no `// stepText` comment, so
         // the text-matching fallback would never find them — which is exactly why the
@@ -2535,7 +2682,7 @@ export function generatePageObjectTest(
     if (step.type === 'wait' || step.type === 'back') {
       flushIfTabChanges(tabOf(step))
       const line = actionFor(step, baseURL, 'this.page', undefined, columns, idPolicy.portable)
-      if (line) buffer.push(`    ${line}`)
+      if (line) buffer.push(padAll(line, '    '))
       if (stepUsesData(step)) bufferUsesData = true
       continue
     }
@@ -2555,7 +2702,7 @@ export function generatePageObjectTest(
       buffer.push(`    const downloadPromise = this.page.waitForEvent('download')`)
     }
     const line = actionFor(step, baseURL, 'this.page', `this.${name}`, columns, idPolicy.portable)
-    if (line) buffer.push(step.optional ? wrapOptional(line, '    ') : `    ${line}`)
+    if (line) buffer.push(step.optional ? wrapOptional(line, '    ') : padAll(line, '    '))
     if (stepUsesData(step)) bufferUsesData = true
     // Day 17: this click opens a tab. The method awaits the new page alongside
     // the click (arming the wait first, as Playwright requires) and hands back

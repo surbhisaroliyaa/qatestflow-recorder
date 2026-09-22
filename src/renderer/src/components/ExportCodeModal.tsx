@@ -19,6 +19,8 @@ export interface ExportCodeModalProps {
   handleCopyExport: () => void
   handleSaveExport: () => Promise<void>
   handleTogglePoExport: (po: boolean) => void
+  // Phase 4: write the test out in its portable, hand-editable form.
+  handleExportPortable: (format: 'yaml' | 'json') => Promise<void>
   poExport: boolean
   savedExtras: string[]
   savedPageOverwritten: boolean
@@ -40,6 +42,7 @@ export function ExportCodeModal({
   handleCopyExport,
   handleSaveExport,
   handleTogglePoExport,
+  handleExportPortable,
   poExport,
   savedExtras,
   savedPageOverwritten,
@@ -169,6 +172,24 @@ export function ExportCodeModal({
             />
             🧭 Cross-browser config
           </label>
+          {/* Phase 4: the portable form. Playwright code is a one-way VIEW of the
+              test — you cannot edit the spec and get your test back. These two
+              write the MODEL, in a shape a person can read, edit and re-import,
+              which is what makes a test reviewable in a pull request. */}
+          <button
+            className="modal-btn"
+            onClick={() => handleExportPortable('yaml')}
+            title="Write this test as editable YAML — reviewable in a pull request, and importable back"
+          >
+            Save .yaml
+          </button>
+          <button
+            className="modal-btn"
+            onClick={() => handleExportPortable('json')}
+            title="The same portable model as JSON, for tooling that prefers it"
+          >
+            Save .json
+          </button>
           <button className="modal-btn" onClick={handleCopyExport}>
             Copy
           </button>

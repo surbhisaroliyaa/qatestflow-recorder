@@ -19,6 +19,12 @@ export interface SavePanelProps {
   handleSaveSession: () => Promise<void>
   handleSaveTest: () => Promise<void>
   newSuiteInput: string
+  // Phase 4: the project above the suite ('' = none), and a box for a new one.
+  newProjectInput: string
+  projects: string[]
+  saveProject: string
+  setNewProjectInput: React.Dispatch<React.SetStateAction<string>>
+  setSaveProject: React.Dispatch<React.SetStateAction<string>>
   saveNameInput: string
   savePanelOpen: boolean
   saveSuite: string
@@ -49,6 +55,11 @@ export function SavePanel({
   handleSaveSession,
   handleSaveTest,
   newSuiteInput,
+  newProjectInput,
+  projects,
+  saveProject,
+  setNewProjectInput,
+  setSaveProject,
   saveNameInput,
   savePanelOpen,
   saveSuite,
@@ -86,6 +97,45 @@ export function SavePanel({
         }}
         placeholder="test name…"
         autoFocus
+        spellCheck={false}
+      />
+      {/* Phase 4: the PROJECT — the level above suites, for a library that
+          holds more than one product. Optional by design: leaving it as
+          "No project" saves exactly where tests have always been saved, so an
+          existing library is never reorganised behind the user's back. */}
+      <div className="assert-kinds">
+        <button
+          type="button"
+          className={`assert-kind${!saveProject && !newProjectInput.trim() ? ' chosen' : ''}`}
+          onClick={() => {
+            setSaveProject('')
+            setNewProjectInput('')
+          }}
+          title="Save straight into a suite, with no project above it"
+        >
+          No project
+        </button>
+        {projects.map((project) => (
+          <button
+            key={project}
+            type="button"
+            className={`assert-kind${
+              saveProject === project && !newProjectInput.trim() ? ' chosen' : ''
+            }`}
+            onClick={() => {
+              setSaveProject(project)
+              setNewProjectInput('')
+            }}
+          >
+            📁 {project}
+          </button>
+        ))}
+      </div>
+      <input
+        className="assert-value"
+        value={newProjectInput}
+        onChange={(e) => setNewProjectInput(e.target.value)}
+        placeholder="…or type a new project name"
         spellCheck={false}
       />
       {/* Day 11.5: which section this test belongs to */}

@@ -1,9 +1,16 @@
 // F32 — scheduled monitors. A saved test can be "promoted" to a monitor: the app
 // re-runs it on an interval (headless, via the same Playwright path as F17
-// cross-browser) and alerts on failure. HONEST LIMIT: monitors only fire while
-// the app is open — there's no background service. The scheduler itself lives in
-// the renderer (it already owns spec generation + xbrowser.run); this module is
+// cross-browser) and alerts on failure. The in-app scheduler lives in the
+// renderer (it already owns spec generation + xbrowser.run); this module is
 // just the persisted store, mirroring environments.ts.
+//
+// Phase 4 lifted the old limit recorded here — "monitors only fire while the
+// app is open; there's no background service". A monitor can now also be
+// handed to the OS scheduler, which invokes this app's own CLI, so it keeps
+// running with the app closed and across reboots. Still no background service
+// of ours: see src/main/scheduler.ts for why that is the point rather than a
+// shortcut. On platforms that build cannot schedule on, the original limit
+// stands and the UI says so.
 import { app } from 'electron'
 import { readFile, writeFile } from 'fs/promises'
 import { join } from 'path'

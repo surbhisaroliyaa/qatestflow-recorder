@@ -7,6 +7,8 @@ import { clampPaneWidth, readStoredPaneWidth, PANE_DEFAULT, PANE_KEY_STEP } from
 import { explainLoadError, loadErrorDetails } from '../../shared/loadErrors'
 // QF-011: one place that knows "1 step" vs "2 steps".
 import { plural } from '../../shared/plural'
+
+import { resolveVideoMode } from '../../shared/videoPolicy'
 import {
   generatePlaywrightTest,
   generatePageObjectTest,
@@ -78,6 +80,12 @@ import { ApiEditorModal } from './components/ApiEditorModal'
 import { DraftModal } from './components/DraftModal'
 import { HistoryModal } from './components/HistoryModal'
 import { ExportCodeModal } from './components/ExportCodeModal'
+import { PrivacyModal, type EvidencePrivacySettings } from './components/PrivacyModal'
+import { IntegrationsModal, type IntegrationConfigShape } from './components/IntegrationsModal'
+// Phase 4: the renderer half of run-video recording (MediaRecorder lives here).
+import { cancelRunVideo, startRunVideo, stopRunVideo } from './runVideo'
+// Phase 4: when a run of scrolls is one action and when it is several.
+import { appendRecordedStep } from './stepMerge'
 import { TraceViewerModal } from './components/TraceViewerModal'
 import { LocaleReportModal } from './components/LocaleReportModal'
 import { LocalePickerModal } from './components/LocalePickerModal'
@@ -510,6 +518,44 @@ function App(): React.JSX.Element {
   // contains id" passes on {"id": null, "status": "FAILED"} and you'd never know.
   const [apiResponses, setApiResponses] = useState<Record<number, ApiEvidence>>({})
   const [apiPanelIndex, setApiPanelIndex] = useState<number | null>(null)
+  // Phase 4: the evidence-privacy policy, loaded when the screen is opened.
+  // null = the screen is closed; there is no separate "open" flag to fall out
+  // of step with the data it is editing.
+  const [privacy, setPrivacy] = useState<EvidencePrivacySettings | null>(null)
+  // Phase 4 (durable background runner): which monitors really have a task in
+  // the OS scheduler, and whether this platform can schedule at all. Read from
+  // the OS, never from our own store — the user can delete a task themselves,
+  // and a checkbox that kept claiming "scheduled" because our file said so
+  // would be lying about the state of their machine.
+  const [scheduledIds, setScheduledIds] = useState<string[]>([])
+  const [schedulerInfo, setSchedulerInfo] = useState<{
+    available: boolean
+    message?: string
+  } | null>(null)
+  // Phase 4: the outbound-integration settings, open when non-null.
+  const [integrations, setIntegrations] = useState<IntegrationConfigShape | null>(null)
+  // Phase 4: the outcome of importing a portable (YAML/JSON) test — either the
+  // parse error, with its line number, or a summary plus any warnings the file
+  // produced. Warnings are things that PARSED but will not work (most often a
+  // hand-written selector this build can't resolve); showing them here is the
+  // difference between finding out now and finding out at replay.
+  const [importReport, setImportReport] = useState<{
+    ok: boolean
+    message: string
+    warnings: string[]
+  } | null>(null)
+  // Phase 4, Round 6 follow-up (Surbhi's option (a)): opening a test from the
+  // library REPLACES whatever flow is on screen. When that flow is unsaved —
+  // most obviously a just-imported .yaml/.json, but equally a recording never
+  // saved — it used to disappear without a word. This holds the pending "are
+  // you sure" while it is on screen; `resolve` is what the open is waiting on.
+  const [discardWarn, setDiscardWarn] = useState<{
+    action: 'open' | 'home'
+    count: number
+    name: string
+    drafted: boolean
+    resolve: (go: boolean) => void
+  } | null>(null)
   // F15 (smarter visual diffing): snapshot step being edited + its draft, plus a
   // transient status for the "re-capture baseline" action.
   const [snapEditIndex, setSnapEditIndex] = useState<number | null>(null)
@@ -621,16 +667,31 @@ function App(): React.JSX.Element {
   // section, and the save panel's chosen/typed section.
   const [suites, setSuites] = useState<string[]>([])
   const [testSuite, setTestSuite] = useState('')
+  // Phase 4: the PROJECT this test lives in — the level above suites, for a
+  // library that holds more than one product. '' = none, which is where every
+  // test saved before projects existed lives and stays.
+  const [testProject, setTestProject] = useState('')
+  const [projects, setProjects] = useState<string[]>([])
+  const [saveProject, setSaveProject] = useState('')
+  const [newProjectInput, setNewProjectInput] = useState('')
   const [saveSuite, setSaveSuite] = useState('Daily')
   const [newSuiteInput, setNewSuiteInput] = useState('')
   // Day 11.5 — failure screenshot of the LAST replay (📷 in the banner).
   const [lastScreenshotPath, setLastScreenshotPath] = useState<string | null>(null)
   // Day 18 — run trace. `traceMode` mirrors Playwright's retain policy; the
   // viewer opens a saved trace (manifest + the selected step's full image).
+  const [videoMode, setVideoMode] = useState<'always' | 'failure' | 'off'>(
+    () => (localStorage.getItem('qaflow.videoMode') as 'always' | 'failure' | 'off') || 'off'
+  )
   const [traceMode, setTraceMode] = useState<'always' | 'failure' | 'off'>(
     () => (localStorage.getItem('qaflow.traceMode') as 'always' | 'failure' | 'off') || 'failure'
   )
   const [lastTraceId, setLastTraceId] = useState<string | null>(null)
+  // Phase 4: a postback that did not arrive, surfaced rather than swallowed.
+  const [postbackError, setPostbackError] = useState<string | null>(null)
+  // Phase 4: the .webm this run produced, if the policy kept one. Lives in the
+  // run's trace folder, so it is opened through the same guarded handler.
+  const [lastVideoFile, setLastVideoFile] = useState<string | null>(null)
   // F29 (chaos): replay under a throttled (~Slow 3G) network to test resilience /
   // surface timing flakiness. Off by default.
   const [chaosSlowNet, setChaosSlowNet] = useState(false)
@@ -1482,9 +1543,32 @@ function App(): React.JSX.Element {
   }, [])
 
   // Append every recorded step to the live list as it arrives from main.
+  //
+  // === Phase 4: when a run of scrolls is ONE action, and when it is several ===
+  //
+  // Two scrolls in a row can mean two completely different things, and getting
+  // this wrong is visible either way:
+  //
+  //   · READING DOWN A PAGE. Wheel, read a paragraph, wheel again. The
+  //     intermediate positions are not something the test needs to reproduce —
+  //     only where the reader ended up. Kept as separate steps, a long article
+  //     fills the step list with noise.
+  //   · AN INFINITE-SCROLL LIST. Each scroll FETCHES the next page. Merging
+  //     those replays one load where the user did three, so the test covers a
+  //     third of what it was recorded to cover.
+  //
+  // Timing cannot tell these apart — both are "wheel, pause, wheel" — and two
+  // attempts to guess from the length of the pause each broke one of the cases
+  // (Surbhi, Round 2a and its retest). So this uses the fact instead of the
+  // guess: `loadedMore` says the page GREW during that scroll, which is
+  // precisely "this scroll loaded something".
+  //
+  // A scroll that loaded nothing supersedes the scroll before it. A scroll that
+  // loaded content stands on its own. And a scroll with anything else between
+  // is never merged, because then the scrolls are not adjacent at all.
   useEffect(() => {
     const unsubscribe = window.api.recorder.onStep((step) => {
-      setSteps((prev) => [...prev, step])
+      setSteps((prev) => appendRecordedStep(prev, step))
     })
     return unsubscribe
   }, [])
@@ -1683,7 +1767,15 @@ function App(): React.JSX.Element {
     // the running banner. Keeping it down for the duration costs nothing and
     // is what guarantees the banner is actually visible.
     parallelRunning ||
-    apiPanelIndex !== null
+    apiPanelIndex !== null ||
+    // Phase 4: the portable-import result (or its parse error).
+    importReport !== null ||
+    // Phase 4: the evidence-privacy policy screen.
+    privacy !== null ||
+    // Phase 4: the outbound-integrations screen.
+    integrations !== null ||
+    // Phase 4: "opening this will discard the unsaved flow on screen".
+    discardWarn !== null
 
   // QF-004: hold focus inside whichever dialog is open, and hand it back when
   // it closes. `anyOverlayOpen` is the only dependency: the effect re-runs on
@@ -1711,6 +1803,51 @@ function App(): React.JSX.Element {
   useEffect(() => {
     localStorage.setItem('qaflow.traceMode', traceMode)
   }, [traceMode])
+
+  // Phase 4: whether to also record a .webm of the run. OFF by default, and
+  // deliberately so — it is the only evidence feature that costs real disk and
+  // real CPU while the run happens, and most runs never need it. It rides on
+  // the trace (no trace, no video), so there is one retention policy, not two.
+  useEffect(() => {
+    localStorage.setItem('qaflow.videoMode', videoMode)
+  }, [videoMode])
+
+  // "🎬 always" cannot honestly mean always while the trace is kept only on
+  // FAILURE: the .webm is written inside the run's trace folder, and a passing
+  // run under an on-failure trace policy never gets one — so the video was
+  // recorded, handed back, and silently dropped. Surbhi hit exactly that and
+  // read it as a broken feature, which is the correct reaction to a setting
+  // that says "always" and means "sometimes".
+  //
+  // The option is disabled in the dropdown. This covers what a disabled option
+  // cannot: a videoMode that is ALREADY 'always' when the trace policy changes
+  // under it, or one restored from localStorage by a build that allowed the
+  // pair. DERIVED, not written back into state — so her stored preference
+  // survives, and choosing ⏺ always again brings 🎬 always back rather than
+  // making her set it a second time. (Writing it back would also be a setState
+  // inside an effect, which react-hooks/set-state-in-effect rejects, rightly:
+  // this is a value to compute, not two states to keep in step.)
+  const effectiveVideoMode = resolveVideoMode(traceMode, videoMode)
+
+  // Phase 4: main asks the RENDERER to record, because MediaRecorder only
+  // exists here. The stop half is an executeJavaScript call into this window,
+  // so the encoded bytes come back as a return value rather than having to be
+  // chunked over IPC — hence the function parked on window.
+  useEffect(() => {
+    const w = window as unknown as { __qaflowStopRunVideo?: () => Promise<ArrayBuffer | null> }
+    w.__qaflowStopRunVideo = stopRunVideo
+    const offStart = window.api.recorder.onVideoStart(async (req) => {
+      const ok = await startRunVideo(req)
+      window.api.recorder.videoStarted(ok)
+    })
+    const offCancel = window.api.recorder.onVideoCancel(() => cancelRunVideo())
+    return () => {
+      offStart()
+      offCancel()
+      cancelRunVideo()
+      delete w.__qaflowStopRunVideo
+    }
+  }, [])
 
   // Follow replay progress so we can highlight running / done / failed steps.
   useEffect(() => {
@@ -1868,9 +2005,41 @@ function App(): React.JSX.Element {
     }
   }
 
+  // Is the flow on screen unsaved work? `testFileName === null` means it came
+  // from nowhere in the library — an import, or a recording never saved — and
+  // steps existing means there is something to lose. One rule covers both:
+  // the import was the case Surbhi hit, but a fresh recording is the same loss
+  // through the same door, and a second condition would only drift from this one.
+  const workingFlowIsUnsaved = testFileName === null && steps.length > 0
+
+  // Ask first, and only when there is something to lose. Resolves true if the
+  // action should go ahead. Same shape as `confirmRetarget`: the dialog holds
+  // the `resolve`, so the caller simply awaits a boolean.
+  //
+  // `action` is which door is being walked through. BOTH doors need this, and
+  // the first version of this guard only covered 'open' — which is why it never
+  // fired for Surbhi: she went 🏠 Home first, and Home is what actually clears
+  // the steps. Opening from the library afterwards had nothing left to discard.
+  const confirmDiscardWorking = (action: 'open' | 'home'): Promise<boolean> => {
+    if (!workingFlowIsUnsaved) return Promise.resolve(true)
+    return new Promise((resolve) =>
+      setDiscardWarn({
+        action,
+        count: steps.length,
+        name: testName,
+        // Read HERE, not in the dialog's render: `draftIdRef` is a ref, and
+        // reading a ref while rendering is exactly what react-hooks/purity
+        // rejects. An event handler is the right place for it.
+        drafted: draftIdRef.current !== null,
+        resolve
+      })
+    )
+  }
+
   // Home: one click straight back to the welcome screen — a fresh start, so
   // stop recording and clear the captured steps too.
   const handleHome = async (): Promise<void> => {
+    if (!(await confirmDiscardWorking('home'))) return
     // Day 18: flush the current unsaved recording to its draft NOW (the
     // debounced auto-save may not have fired yet), so leaving never loses it.
     // It then lives in the Recent list; mint a fresh draft for the next take.
@@ -1916,6 +2085,7 @@ function App(): React.JSX.Element {
     setTags([]) // F38: a fresh test starts untagged
     setTagInput('')
     setTestSuite('')
+    setTestProject('')
     setSavePanelOpen(false)
     setSuiteRun(null)
     // Day 20: drop the data table + any data-run state on a fresh start.
@@ -2063,6 +2233,95 @@ function App(): React.JSX.Element {
     }
   }
 
+  // === Phase 4: the portable test format (YAML / JSON) ==============
+  //
+  // Playwright code is a one-way VIEW of the test: you can read the spec, but
+  // you cannot edit it and get your test back. These two are the round trip —
+  // the same model the saved JSON holds, written in a shape a person can read
+  // and a reviewer can diff, and readable back into a runnable test.
+  const handleExportPortable = async (format: 'yaml' | 'json'): Promise<void> => {
+    const path = await window.api.recorder.exportPortable(
+      {
+        name: testName || 'Recorded flow',
+        baseURL: baseURL || undefined,
+        tags,
+        viewport,
+        deviceId,
+        storageState,
+        har: harField,
+        dataRows
+      },
+      steps,
+      format
+    )
+    if (path) {
+      setSavedPath(path)
+      setSavedExtras([])
+      setSavedPageOverwritten(false)
+    }
+  }
+
+  // Read a portable test back in. It lands as the CURRENT flow (unsaved), not
+  // straight into the library: an imported test — especially a hand-edited one
+  // — deserves a look and a replay before it joins the suite everyone runs.
+  const handleImportPortable = async (): Promise<void> => {
+    let result: Awaited<ReturnType<typeof window.api.recorder.importPortable>>
+    try {
+      result = await window.api.recorder.importPortable()
+    } catch (e) {
+      // The parser throws with a LINE NUMBER. That message is the whole value
+      // of the error, so it goes on screen verbatim rather than being reduced
+      // to "import failed".
+      setImportReport({ ok: false, message: String((e as Error).message ?? e), warnings: [] })
+      return
+    }
+    if (!result) return
+    const imported = result.steps as RecorderStep[]
+    // editSteps, not setSteps: an import is an EDIT to the working flow, so it
+    // joins undo, versioning and the auto-saved draft like every other change.
+    editSteps(imported)
+    setTestName(result.name)
+    setTestFileName(null) // an import is a NEW test until it's saved
+    if (result.baseURL) setBaseURL(result.baseURL)
+    setTags(result.tags ?? [])
+    setDataRows(result.dataRows ?? [])
+    setTestVersions([])
+    // A test arriving from a FILE has none of this machine's run state. Left
+    // over from whatever was open before, a stale session or HAR would silently
+    // change what the imported test does on its first replay.
+    setStorageState(undefined)
+    setHarField(undefined)
+    setLastHarUsage(null)
+    setHistoryOpen(false)
+    setEdgeRun(null)
+    setEdgeReportOpen(false)
+    setDataPanelOpen(false)
+    // OPEN THE WORKSPACE, and put the browser on the test's starting page.
+    //
+    // Without these two the import was effectively invisible: the steps landed
+    // in state while the app stayed on the welcome screen, so there was no step
+    // list and no Replay button, and the only sign anything had happened was a
+    // modal. Importing a test then replaying "it" actually replayed whatever
+    // was opened from the library afterwards (Surbhi, Round 6).
+    //
+    // This is the same ending handleLoadTest has, and reusing its shape rather
+    // than writing a second loader is the point — the first attempt at a second
+    // loader is what left these out.
+    setHasNavigated(true)
+    const firstNav = imported.find((s) => s.type === 'navigate' && s.url)
+    if (firstNav?.url) {
+      setUrlInput(firstNav.url)
+      window.api.browser.navigate(firstNav.url)
+    }
+    setImportReport({
+      ok: true,
+      message:
+        `Imported ${result.steps.length} step${result.steps.length === 1 ? '' : 's'} ` +
+        `from ${result.path.split(/[\\/]/).pop()}.`,
+      warnings: result.warnings
+    })
+  }
+
   const handleCopyExport = (): void => {
     // Whichever FILE is on screen — copying the spec while looking at a page
     // class would be a quiet lie about what landed on the clipboard.
@@ -2158,6 +2417,11 @@ function App(): React.JSX.Element {
         sessionFile,
         {
           mode: traceOverride ?? traceMode,
+          // Phase 4: a video only rides along when a trace is being kept.
+          // Resolved against the trace policy ACTUALLY in force for this run —
+          // edge-case batches override it to always, which makes a video viable
+          // even when the toolbar says on failure.
+          video: resolveVideoMode(traceOverride ?? traceMode, videoMode),
           stepTexts: list.map((s) => stepText(s)),
           testName: testName || undefined
         },
@@ -2191,6 +2455,12 @@ function App(): React.JSX.Element {
     // variant and renders them in its own report.
     if (!silent) {
       setLastTraceId(result.traceId ?? null)
+      setLastVideoFile(result.videoFile ?? null)
+      // Phase 4 (postback): tell whatever is downstream that this run finished,
+      // as JSON it can branch on. Deliberately NOT awaited — a slow or dead
+      // receiver must not hold up the UI showing the result, and a postback
+      // that fails is reported where the user can see it rather than thrown.
+      void sendPostback(result)
       // F37: surface untaken branches / empty loops on PASS as well as fail —
       // a green run that skipped its checks is exactly the case worth flagging.
       setBranchNotes(result.branchNotes ?? [])
@@ -2267,6 +2537,45 @@ function App(): React.JSX.Element {
   // F13: scan the current page for accessibility violations. Opens the panel
   // right away (spinner), then fills it with the result. Never throws — a
   // page that can't be scanned comes back as a result with `error` set.
+  // Phase 4: POST this run's result to the configured receiver, if any.
+  //
+  // Reads the settings each time rather than caching them: they live in
+  // userData and can be changed while the app is open, and a cached copy would
+  // quietly keep posting to an address the user has already changed.
+  const sendPostback = async (result: {
+    ok: boolean
+    failedAt?: number
+    error?: string
+    traceId?: string
+    // Timed by MAIN, which owns the run — a renderer-side clock would also be
+    // measuring IPC round trips and whatever else the UI was doing.
+    durationMs?: number
+  }): Promise<void> => {
+    try {
+      const settings = await window.api.integrations.get()
+      if (settings.postback.when === 'off') return
+      const res = await window.api.integrations.postback(settings.postback, {
+        testName: testName || 'Recorded flow',
+        ok: result.ok,
+        total: steps.filter((s) => !s.disabled).length,
+        failed: result.ok ? 0 : 1,
+        durationMs: result.durationMs ?? 0,
+        failedAtStep: result.failedAt === undefined ? undefined : result.failedAt + 1,
+        error: result.error,
+        suite: testSuite || undefined,
+        project: testProject || undefined,
+        tags: tags.length ? tags : undefined,
+        traceId: result.traceId
+      })
+      // A postback nobody told you about failing is the whole problem this
+      // feature exists to avoid — something downstream is WAITING for this.
+      if (!res.ok && !res.skipped) setPostbackError(res.error ?? 'The postback did not arrive.')
+      else setPostbackError(null)
+    } catch {
+      setPostbackError('The postback could not be sent.')
+    }
+  }
+
   const handleA11yScan = async (): Promise<void> => {
     setA11yScan(null)
     setA11yScanning(true)
@@ -3432,7 +3741,12 @@ function App(): React.JSX.Element {
     setSaveNameInput(suggested)
     setSaveSuite(testSuite || 'Daily')
     setNewSuiteInput('')
-    setSuites(await window.api.library.listSuites())
+    // Phase 4: offer the project this test is already in, and the suites that
+    // exist INSIDE it — a suite list from the root would be the wrong list.
+    setSaveProject(testProject)
+    setNewProjectInput('')
+    setProjects(await window.api.library.listProjects())
+    setSuites(await window.api.library.listSuites(testProject))
     setSavePanelOpen(true)
   }
 
@@ -3530,11 +3844,14 @@ function App(): React.JSX.Element {
     if (!name) return
     // A typed new section name wins over the chosen chip.
     const suite = newSuiteInput.trim() || saveSuite || 'Daily'
+    // Phase 4: same rule for the project — a typed new name wins over the chip.
+    const project = newProjectInput.trim() || saveProject
     const base = baseURL || deriveBaseURL(steps)
     const summary = await window.api.library.save({
       name,
       baseURL: base,
       suite,
+      project,
       steps,
       storageState,
       viewport,
@@ -3556,6 +3873,7 @@ function App(): React.JSX.Element {
     setTestName(name)
     setTestFileName(summary.fileName)
     setTestSuite(summary.suite)
+    setTestProject(summary.project)
     setBaseURL(base)
     setSavePanelOpen(false)
     setHealedIndices(new Set()) // healed selectors are on disk now — hint done
@@ -3572,12 +3890,19 @@ function App(): React.JSX.Element {
   // Open a saved test: its steps become the working list (the single source
   // of truth, same as after recording), and the browser shows its start page.
   const handleLoadTest = async (fileName: string): Promise<void> => {
+    if (!(await confirmDiscardWorking('open'))) return
     const test = await window.api.library.load(fileName)
     if (!test) return
     editSteps(test.steps)
     setTestName(test.name)
     setTestFileName(fileName)
-    setTestSuite(fileName.includes('/') ? fileName.split('/')[0] : '')
+    // Phase 4: the path says where it lives — 3 segments = project/suite/file,
+    // 2 = suite/file (every test saved before projects existed).
+    {
+      const parts = fileName.split('/')
+      setTestProject(parts.length >= 3 ? parts[0] : '')
+      setTestSuite(parts.length >= 3 ? parts[1] : parts.length === 2 ? parts[0] : '')
+    }
     setBaseURL(test.baseURL)
     setStorageState(test.storageState)
     setHarField(test.har) // F1: replay this test against its saved HAR, if any
@@ -4297,7 +4622,10 @@ function App(): React.JSX.Element {
   // Which steps can be optional: ones that TARGET an element (so "present or
   // not" is meaningful). Page/flow steps (navigate, wait, back) always run.
   const canBeOptional = (step: RecorderStep): boolean =>
-    ['click', 'type', 'check', 'select', 'press', 'hover', 'assert'].includes(step.type)
+    ['click', 'type', 'check', 'select', 'press', 'hover', 'assert', 'drag'].includes(step.type) ||
+    // Phase 4: only the element form of a scroll targets anything. "Scroll to
+    // the bottom of the page" is a page step — it always runs, like a wait.
+    (step.type === 'scroll' && step.scrollKind === 'element')
 
   // The text an inline edit would change: a navigate edits its URL; a type /
   // select edits its value; a wait edits its seconds; a valued assertion edits
@@ -4306,6 +4634,16 @@ function App(): React.JSX.Element {
   const editableValue = (step: RecorderStep): string | null => {
     if (step.type === 'navigate') return step.url ?? ''
     if (step.secret) return null
+    // Phase 4: a note's whole content is its text, so editing the step edits
+    // the note. It lives in `label` rather than `value` because the step list,
+    // the trace and the reports all already display `label`.
+    if (step.type === 'comment') return step.label ?? ''
+    // Phase 4: a pixel scroll edits its offset. The element/top/bottom forms
+    // have nothing to type — their target is the point.
+    if (step.type === 'scroll') return step.scrollKind === 'position' ? (step.value ?? '0') : null
+    // Phase 4: an offset drag edits its distance ("dx,dy"). A drag onto an
+    // element is defined by its two selectors, not by a typed value.
+    if (step.type === 'drag') return step.targetSelector ? null : (step.value ?? '0,0')
     if (step.type === 'type' || step.type === 'select') {
       return step.value ?? ''
     }
@@ -5083,6 +5421,38 @@ function App(): React.JSX.Element {
     else insertStep({ type: 'wait', waitKind: 'time', value: '2' }, at)
   }
 
+  // === Phase 4: notes and scrolling =================================
+  // A note is inserted EMPTY and put straight into edit mode, because there is
+  // no window.prompt in Electron to ask for the text first — and because typing
+  // it in place, in the row where it will live, is the better interaction
+  // anyway. The same inline editor every other step's value uses.
+  const handleAddComment = (at: number | null): void => {
+    setInsertMenuIndex(null)
+    const i = at ?? steps.length
+    insertStep({ type: 'comment', label: '' }, at)
+    setEditingIndex(i)
+    setEditValue('')
+  }
+
+  // Scrolling as the thing under test — the lazy-load / infinite-list case.
+  // Recording produces these automatically; this is for adding one by hand
+  // (the common reason being "load the next page" in a flow you already have).
+  const handleAddScroll = (at: number | null, kind: 'bottom' | 'top' | 'position'): void => {
+    setInsertMenuIndex(null)
+    const i = at ?? steps.length
+    insertStep(
+      kind === 'position'
+        ? { type: 'scroll', scrollKind: 'position', value: '800' }
+        : { type: 'scroll', scrollKind: kind },
+      at
+    )
+    // A pixel offset is a number only the author knows — open it for editing.
+    if (kind === 'position') {
+      setEditingIndex(i)
+      setEditValue('800')
+    }
+  }
+
   // === F37: loops + branching =======================================
   // Both handlers insert a matched PAIR of markers in one go. That's deliberate:
   // if you could add a `repeat` on its own, the very first thing you'd have is a
@@ -5435,7 +5805,11 @@ function App(): React.JSX.Element {
           ? s
           : s.type === 'navigate'
             ? { ...s, url: editValue }
-            : { ...s, value: editValue }
+            : // Phase 4: a note's text IS its label — that's the field the step
+              // list, the trace and every report already render.
+              s.type === 'comment'
+              ? { ...s, label: editValue }
+              : { ...s, value: editValue }
       )
     )
   }
@@ -5766,6 +6140,171 @@ function App(): React.JSX.Element {
   // F31: the living-docs modal, opened by 📖 Suite docs on the library screen.
   // It's declared here (above both returns) but only rendered in the welcome
   // branch, which is the sole screen that can open it.
+  // Phase 4: what came back from importing a portable (YAML/JSON) test.
+  //
+  // It reports three different things, and the difference matters:
+  //   · a PARSE ERROR — the file could not be read; the message carries the
+  //     line number, which is the whole value of it on a 400-line file;
+  //   · WARNINGS — the file parsed and the steps are loaded, but something in
+  //     it will not work (almost always a hand-written selector this build
+  //     can't resolve into a candidate ladder). Saying so here is the
+  //     difference between knowing now and discovering it mid-replay;
+  //   · a plain summary, when everything read cleanly.
+  const importReportModal = importReport && (
+    <div className="modal-backdrop" onClick={() => setImportReport(null)}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">
+            {importReport.ok ? '📥 Test imported' : '📥 Could not import that file'}
+          </span>
+          <button className="modal-close" onClick={() => setImportReport(null)} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="modal-body">
+          <p>{importReport.message}</p>
+          {importReport.warnings.length > 0 && (
+            <>
+              <p className="warn-title">
+                ⚠ {importReport.warnings.length} thing
+                {importReport.warnings.length === 1 ? '' : 's'} in this file will not work as
+                written:
+              </p>
+              <ul className="warn-list">
+                {importReport.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+              <p className="warn-note">
+                The steps are loaded — fix these, or re-record the affected steps, before saving
+                this into the library.
+              </p>
+            </>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn primary" onClick={() => setImportReport(null)}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // Answer the discard dialog: hand the waiting open its boolean, then close.
+  // Both halves matter — resolving without clearing leaves the dialog up, and
+  // clearing without resolving leaves `handleLoadTest` awaiting a promise that
+  // never settles, i.e. a library click that silently does nothing forever.
+  const answerDiscardWarn = (go: boolean): void => {
+    discardWarn?.resolve(go)
+    setDiscardWarn(null)
+  }
+
+  // Phase 4, option (a): the guard in front of "open from the library" when the
+  // flow on screen is unsaved. Cancel is the SAFE choice, so cancel is what the
+  // backdrop and ✕ both do — only the explicit red button discards. A dismiss
+  // must never be read as "yes, throw it away".
+  const discardWarnModal = discardWarn && (
+    <div className="modal-backdrop" onClick={() => answerDiscardWarn(false)}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">⚠ You have an unsaved test open</span>
+          <button
+            className="modal-close"
+            onClick={() => answerDiscardWarn(false)}
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="modal-body">
+          <p>
+            <strong>{discardWarn.name || 'The flow on screen'}</strong> has {discardWarn.count} step
+            {discardWarn.count === 1 ? '' : 's'} and has never been saved to your library.{' '}
+            {discardWarn.action === 'home'
+              ? 'Going Home clears it and starts fresh.'
+              : 'Opening another test replaces it.'}
+          </p>
+          {discardWarn.drafted && (
+            <p className="warn-note">
+              It was auto-saved as a draft, so you can get it back from <strong>Drafts</strong> on
+              the welcome screen — but saving it properly is the sure thing.
+            </p>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn primary" onClick={() => answerDiscardWarn(false)}>
+            Keep editing
+          </button>
+          <button className="modal-btn danger" onClick={() => answerDiscardWarn(true)}>
+            {discardWarn.action === 'home' ? 'Discard and go Home' : 'Discard and open'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  // Phase 4: ask the OS which of our monitors are really scheduled. The task
+  // names carry the monitor id, so the mapping back is the name minus prefix.
+  const refreshScheduled = async (): Promise<void> => {
+    const res = await window.api.scheduler.list()
+    setSchedulerInfo({ available: res.available, message: res.message })
+    setScheduledIds(res.tasks.map((name) => name.replace(/^QATestFlow-/, '')))
+  }
+
+  // Turn "keep running when the app is closed" on or off for one monitor.
+  const handleToggleBackground = async (
+    monitor: { id: string; name: string; intervalMin: number },
+    on: boolean
+  ): Promise<void> => {
+    const res = on
+      ? await window.api.scheduler.enable(monitor.id, monitor.name, monitor.intervalMin)
+      : await window.api.scheduler.disable(monitor.id)
+    // Re-read from the OS rather than assuming it worked: this is the one
+    // setting whose truth lives outside this app.
+    await refreshScheduled()
+    if (!res.ok && res.error) setSchedulerInfo({ available: true, message: res.error })
+  }
+
+  // Phase 4: open the evidence-privacy policy, reading the stored one first so
+  // the screen always edits what is actually in force.
+  const openPrivacy = async (): Promise<void> => {
+    setPrivacy(await window.api.privacy.get())
+  }
+  const savePrivacyPolicy = async (): Promise<void> => {
+    if (!privacy) return
+    await window.api.privacy.save(privacy)
+    setPrivacy(null)
+  }
+  const privacyModal = (
+    <PrivacyModal
+      privacy={privacy}
+      setPrivacy={setPrivacy}
+      onSave={savePrivacyPolicy}
+      onClose={() => setPrivacy(null)}
+    />
+  )
+
+  // Phase 4: open the outbound-integration settings, reading the stored ones
+  // so the screen always edits what is actually in force.
+  const openIntegrations = async (): Promise<void> => {
+    setIntegrations((await window.api.integrations.get()) as IntegrationConfigShape)
+  }
+  const saveIntegrationSettings = async (): Promise<void> => {
+    if (!integrations) return
+    await window.api.integrations.save(integrations)
+    setIntegrations(null)
+  }
+  const integrationsModal = (
+    <IntegrationsModal
+      integrations={integrations}
+      setIntegrations={setIntegrations}
+      onSave={saveIntegrationSettings}
+      onClose={() => setIntegrations(null)}
+      postbackError={postbackError}
+    />
+  )
+
   const docsModal = docOpen && (
     <div className="modal-backdrop" onClick={() => setDocOpen(false)}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -5816,6 +6355,9 @@ function App(): React.JSX.Element {
   // value (not inline JSX) because it renders from BOTH returns; see the note there.
   const monitorsModal = (
     <MonitorsModal
+      scheduledIds={scheduledIds}
+      schedulerInfo={schedulerInfo}
+      onToggleBackground={handleToggleBackground}
       monitorsOpen={monitorsOpen}
       setMonitorsOpen={setMonitorsOpen}
       monitors={monitors}
@@ -5908,6 +6450,10 @@ function App(): React.JSX.Element {
         {suiteReport}
         {envManagerModal}
         {docsModal}
+        {importReportModal}
+        {discardWarnModal}
+        {privacyModal}
+        {integrationsModal}
         {acModal}
         {monitorsModal}
         {/* Run All is launched from here; its host-mismatch warning must render
@@ -6077,6 +6623,9 @@ function App(): React.JSX.Element {
             handleDeleteTest={handleDeleteTest}
             handleExportBundle={handleExportBundle}
             handleInspectBundle={handleInspectBundle}
+            handleImportPortable={handleImportPortable}
+            openPrivacy={openPrivacy}
+            openIntegrations={openIntegrations}
             handleLoadTest={handleLoadTest}
             handleOpenAcChecklist={handleOpenAcChecklist}
             handleRunSelected={handleRunSelected}
@@ -6707,6 +7256,32 @@ function App(): React.JSX.Element {
                   <option value="always">⏺ always</option>
                   <option value="off">⏺ off</option>
                 </select>
+                {/* Phase 4: a .webm of the run. The filmstrip shows what each
+                    step looked like; the video shows what happened BETWEEN
+                    them. Only offered when a trace is being kept, because the
+                    video lives inside the trace's folder. */}
+                <select
+                  className="trace-mode"
+                  value={effectiveVideoMode}
+                  onChange={(e) => setVideoMode(e.target.value as 'always' | 'failure' | 'off')}
+                  disabled={isReplaying || isRecording || traceMode === 'off'}
+                  title={
+                    traceMode === 'off'
+                      ? 'Turn run recording on first — the video is saved inside the run’s trace'
+                      : traceMode === 'failure'
+                        ? '🎬 always needs ⏺ always: the video is saved inside the run’s trace, and an on-failure trace keeps nothing when the run passes'
+                        : 'When to keep a video of the run (what happened BETWEEN the steps: a modal that flashed, an element that moved mid-click)'
+                  }
+                >
+                  <option value="off">🎬 no video</option>
+                  <option value="failure">🎬 on failure</option>
+                  {/* Greyed out under an on-failure trace: there would be no
+                      trace folder to save a passing run's video into, so
+                      "always" would quietly mean "only when it fails". */}
+                  <option value="always" disabled={traceMode === 'failure'}>
+                    🎬 always
+                  </option>
+                </select>
                 {/* F29 (chaos): replay under a throttled network to test resilience. */}
                 <button
                   className={`data-btn${chaosSlowNet ? ' active' : ''}`}
@@ -6763,8 +7338,12 @@ function App(): React.JSX.Element {
                     setMonTestSel('')
                     setMonHistoryFor(null)
                     setMonitorsOpen(true)
+                    // Phase 4: ask the OS which monitors are really scheduled,
+                    // every time the panel opens — the answer can change
+                    // outside this app.
+                    void refreshScheduled()
                   }}
-                  title="Monitors: scheduled re-runs of saved tests, with failure alerts (runs while the app is open)"
+                  title="Monitors: scheduled re-runs of saved tests, with failure alerts. Tick “runs when closed” on one to keep it running after you quit."
                 >
                   📡 Monitors{monitors.length ? ` (${monitors.length})` : ''}
                 </button>
@@ -7076,6 +7655,36 @@ function App(): React.JSX.Element {
                     title="Open the full run recording (every step's screenshot, console & network)"
                   >
                     ⏺ recording
+                  </button>
+                )}
+                {/* Phase 4: the run video. Only ever shown when one was
+                    actually kept — never as a disabled button for a thing that
+                    didn't happen. It opens in the system player, like every
+                    other trace asset. */}
+                {!isReplaying && lastTraceId && lastVideoFile && (
+                  <button
+                    type="button"
+                    className="shot-link trace-link"
+                    onClick={() => window.api.trace.openFile(lastTraceId, lastVideoFile)}
+                    title="Play the video of this run — shows what happened BETWEEN the steps"
+                  >
+                    🎬 video
+                  </button>
+                )}
+                {/* Save the video out. Its own button rather than a line in the
+                    "Save recording" export, which is deliberately one
+                    self-contained .html — and worth having at all because the
+                    trace folder prunes to the newest 40 runs, so the artifact
+                    most worth attaching to a bug report is also the one that
+                    deletes itself soonest. */}
+                {!isReplaying && lastTraceId && lastVideoFile && (
+                  <button
+                    type="button"
+                    className="shot-link trace-link"
+                    onClick={() => window.api.trace.saveVideo(lastTraceId)}
+                    title="Save this video to your PC — the run recording is deleted after 40 newer runs"
+                  >
+                    💾 save video
                   </button>
                 )}
                 {!isReplaying && lastTraceId && (
@@ -7525,6 +8134,11 @@ function App(): React.JSX.Element {
             setSaveNameInput={setSaveNameInput}
             setSavePanelOpen={setSavePanelOpen}
             setSaveSuite={setSaveSuite}
+            projects={projects}
+            saveProject={saveProject}
+            setSaveProject={setSaveProject}
+            newProjectInput={newProjectInput}
+            setNewProjectInput={setNewProjectInput}
             setSessionNameInput={setSessionNameInput}
             setStorageState={setStorageState}
             setTagInput={setTagInput}
@@ -8076,6 +8690,42 @@ function App(): React.JSX.Element {
                           >
                             🔌 API request…
                           </button>
+                          {/* Phase 4: a human note. Not an action — it gives a
+                              long flow section headings and carries the "why",
+                              and it survives into the exported spec as a real
+                              code comment. */}
+                          <button
+                            type="button"
+                            onClick={() => handleAddComment(i + 1)}
+                            title="Add a note / section heading — never runs, and is exported into the spec as a comment"
+                          >
+                            💬 Note / section heading…
+                          </button>
+                          {/* Phase 4: scrolling as the thing under test — lazy
+                              images, infinite lists, scroll-triggered events.
+                              Recording captures these on its own; these are for
+                              adding one to a flow you already have. */}
+                          <button
+                            type="button"
+                            onClick={() => handleAddScroll(i + 1, 'bottom')}
+                            title="Scroll to the bottom of the page — the infinite-scroll / lazy-load trigger"
+                          >
+                            ⬇ Scroll to bottom
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddScroll(i + 1, 'top')}
+                            title="Scroll back to the top of the page"
+                          >
+                            ⬆ Scroll to top
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAddScroll(i + 1, 'position')}
+                            title="Scroll to an exact pixel offset — then edit the number on the new step"
+                          >
+                            ↕ Scroll to position…
+                          </button>
                           <button type="button" onClick={() => openBlocksPanel(i + 1)}>
                             🧩 Insert block here
                           </button>
@@ -8295,6 +8945,10 @@ function App(): React.JSX.Element {
       </div>
 
       {f40Modals}
+      {importReportModal}
+      {discardWarnModal}
+      {privacyModal}
+      {integrationsModal}
       {suiteReport}
 
       {/* === Day 20: data-run overview popup — auto-appears when the matrix
@@ -8795,6 +9449,7 @@ function App(): React.JSX.Element {
         handleCopyExport={handleCopyExport}
         handleSaveExport={handleSaveExport}
         handleTogglePoExport={handleTogglePoExport}
+        handleExportPortable={handleExportPortable}
         poExport={poExport}
         savedExtras={savedExtras}
         savedPageOverwritten={savedPageOverwritten}

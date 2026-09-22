@@ -28,6 +28,12 @@ export interface SavedTestLibraryProps {
   handleDeleteTest: (test: SavedTestSummary) => Promise<void>
   handleExportBundle: () => Promise<void>
   handleInspectBundle: () => Promise<void>
+  // Phase 4: open ONE test from a portable YAML/JSON file (not a bundle).
+  handleImportPortable: () => Promise<void>
+  // Phase 4: open the evidence-privacy policy screen.
+  openPrivacy: () => Promise<void>
+  // Phase 4: open the outbound-integration settings (postback, GitLab).
+  openIntegrations: () => Promise<void>
   handleLoadTest: (fileName: string) => Promise<void>
   handleOpenAcChecklist: () => Promise<void>
   handleRunSelected: () => void
@@ -86,6 +92,9 @@ export function SavedTestLibrary({
   handleDeleteTest,
   handleExportBundle,
   handleInspectBundle,
+  handleImportPortable,
+  openPrivacy,
+  openIntegrations,
   handleLoadTest,
   handleOpenAcChecklist,
   handleRunSelected,
@@ -357,6 +366,36 @@ export function SavedTestLibrary({
             >
               📥 Import bundle
             </button>
+            {/* Phase 4: a single test in its portable, hand-editable form —
+                the YAML/JSON round trip. Distinct from a bundle, which is the
+                whole library as the app stores it: this is ONE test, in a
+                shape a person can write and a reviewer can diff. */}
+            <button
+              type="button"
+              className="library-filter-clear"
+              onClick={handleImportPortable}
+              title="Open a .yaml or .json test file — hand-written or exported from here"
+            >
+              📄 Import .yaml / .json
+            </button>
+            {/* Phase 4: what a run is allowed to write to disk. Lives next to
+                the library because that is where the evidence ends up. */}
+            <button
+              type="button"
+              className="library-filter-clear"
+              onClick={openIntegrations}
+              title="Integrations — post run results to a dashboard, or file failures as GitLab issues"
+            >
+              🔗 Integrations
+            </button>
+            <button
+              type="button"
+              className="library-filter-clear"
+              onClick={openPrivacy}
+              title="Evidence privacy — what runs are allowed to save to disk (screenshots, page HTML, console, network)"
+            >
+              🔒 Evidence privacy
+            </button>
             {importDone && (
               <span className="bundle-done">
                 ✓ {importDone}
@@ -494,14 +533,31 @@ export function SavedTestLibrary({
         // Sections in display order: E2E + Daily always shown (even
         // empty, so they're discoverable), customs after, legacy
         // root-level tests last under "Unsorted".
+        // Phase 4: a section is a FOLDER, which is now "Project/Suite" as well
+        // as a bare "Suite". Grouping by the folder path rather than by the
+        // suite name alone is what keeps two projects' identically-named suites
+        // apart — an "E2E" in Checkout and an "E2E" in Admin are different
+        // sections, and merging them would be the one thing projects exist to
+        // prevent.
+        const folderOf = (x: { project: string; suite: string }): string =>
+          x.project ? `${x.project}/${x.suite}` : x.suite
         const groups = [...suites]
         for (const t of savedTests) {
-          if (t.suite && !groups.includes(t.suite)) groups.push(t.suite)
+          const folder = folderOf(t)
+          if (folder && !groups.includes(folder)) groups.push(folder)
         }
-        if (savedTests.some((t) => !t.suite)) groups.push('')
+        if (savedTests.some((t) => !folderOf(t))) groups.push('')
+        // Keep each project's suites together, projects after the root suites.
+        groups.sort((a, b) => {
+          const pa = a.includes('/') ? 1 : 0
+          const pb = b.includes('/') ? 1 : 0
+          return pa - pb || a.localeCompare(b)
+        })
         return groups.map((suite) => {
           // A1: search + status filter + F9 category drill-in, all ANDed.
-          const tests = savedTests.filter((t) => t.suite === suite).filter(matchesLibraryFilters)
+          const tests = savedTests
+            .filter((t) => folderOf(t) === suite)
+            .filter(matchesLibraryFilters)
           const suiteKey = suite || '(unsorted)'
           const filtering = anyLibraryFilter()
           // With any filter active, hide sections that have nothing to show,
@@ -562,7 +618,14 @@ export function SavedTestLibrary({
                 >
                   <span className="section-caret">{isOpen ? '▾' : '▸'}</span>
                   <span className="library-title">
-                    {suite ? `${suite} test flows` : 'Unsorted'}
+                    {/* A project shows as "📁 Checkout › E2E", so the project
+                        it belongs to is readable at a glance rather than
+                        inferred from a slash. */}
+                    {suite
+                      ? suite.includes('/')
+                        ? `📁 ${suite.split('/')[0]} › ${suite.split('/')[1]} test flows`
+                        : `${suite} test flows`
+                      : 'Unsorted'}
                   </span>
                   <span className="library-count">{tests.length}</span>
                   {/* Collapsed: one dot per test — suite health at a

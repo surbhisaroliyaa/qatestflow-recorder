@@ -336,6 +336,19 @@ export function createObserver(
   // Timestamp until which the next click is ignored (implicit form submission
   // fires a synthetic click after an Enter we already recorded as `press`).
   let suppressClickUntil = 0
+  // Phase 4: an element that was just DRAGGED, and until when.
+  //
+  // Dragging a form control changes its value, and the browser fires `change`
+  // — which the change listener below would record as a second step. A slider
+  // came out as a drag PLUS `Type "3.5" into input`, and the exported spec
+  // then called .fill() on an input[type=range], which Playwright rejects
+  // outright with "Malformed value" (Surbhi, Round 4).
+  //
+  // That is QF-001's shape exactly: green in the app, red in CI. The click
+  // after a drag was already suppressed for the same reason; the change was
+  // simply missed.
+  let draggedEl: Element | null = null
+  let suppressChangeUntil = 0
 
   document.addEventListener(
     'mouseover',
@@ -1011,6 +1024,12 @@ export function createObserver(
     // QF-002: a change the PAGE dispatched is not something the user did.
     if (!event.isTrusted) return
     if (!recording) return
+    // Phase 4: the value changed BECAUSE it was just dragged. The drag step
+    // already records that, and a second value-setting step would both
+    // duplicate it and (for a range input) fail to run at all.
+    if (Date.now() < suppressChangeUntil && realTarget(event) === draggedEl) {
+      return
+    }
     const el = realTarget(event) as
       | HTMLInputElement
       | HTMLSelectElement
@@ -1191,6 +1210,424 @@ export function createObserver(
       ) {
         suppressClickUntil = Date.now() + 500
       }
+    },
+    true
+  )
+
+  // === Phase 4: capture SCROLLING ====================================
+  //
+  // `isTrusted` cannot be the gate here, the way it is for every other
+  // listener. A scroll event is dispatched BY THE BROWSER whether a human
+  // turned the wheel or the page called window.scrollTo() — both arrive
+  // trusted, so the flag says nothing about who scrolled.
+  //
+  // The gate is therefore the GESTURE that caused it: a wheel, a touch, a drag
+  // of the scrollbar, or a scrolling key, each of which IS isTrusted-checkable.
+  // A scroll with no such gesture just before it was the page moving itself,
+  // and the page moving itself is not a step the user performed. That also
+  // kills the noise that would otherwise arrive from every smooth-scroll
+  // animation, banner reveal and scroll-restoration on the site under test.
+  const SCROLL_KEYS = new Set([
+    'PageDown',
+    'PageUp',
+    'Home',
+    'End',
+    'ArrowDown',
+    'ArrowUp',
+    ' ',
+    'Spacebar'
+  ])
+  let lastGestureAt = 0
+  // How long the page must be BOTH gesture-free and scroll-free before the
+  // scroll is treated as finished.
+  //
+  // This was 350ms and it was far too short. A person reading a long page
+  // pauses longer than that between wheel notches constantly, so every notch
+  // settled, the timer fired, and a single gesture became seventeen steps
+  // (Surbhi, Round 2a). The timer is also restarted by the GESTURE events
+  // below, not only by scroll events — continuous wheeling keeps resetting it
+  // even in the gaps where the page has momentarily stopped moving, which is
+  // exactly the case the old version got wrong.
+  const SCROLL_SETTLE_MS = 800
+  let scrollTimer: ReturnType<typeof setTimeout> | null = null
+  let lastRecordedY = -1
+  // The page height when the last scroll step was recorded. Growth since then
+  // means this scroll LOADED something — see loadedMore in recordRest.
+  let lastRecordedHeight = 0
+
+  // Is a pointer being HELD right now? This is the scrollbar-drag case, and it
+  // is deliberately not the same thing as "a pointer was pressed recently".
+  //
+  // pointerdown used to mark a gesture for the next 1200ms like the wheel does,
+  // which quietly broke the whole rule: a CLICK is a pointerdown, so every
+  // click opened a window in which any scroll the page performed counted as the
+  // user's. Clicking a link and letting the new page jump to the top recorded a
+  // "Scroll to the top of the page" step nobody did (Surbhi, Round 2b Part 2) —
+  // and since navigation-after-a-click is the most common way a page scrolls
+  // itself, that covered most of what this rule exists to reject.
+  //
+  // A scrollbar drag scrolls WHILE THE BUTTON IS DOWN; a click's navigation
+  // scroll happens after the release. So the window is exactly the hold.
+  let pointerHeld = false
+  document.addEventListener(
+    'pointerdown',
+    (event) => {
+      if (event.isTrusted) pointerHeld = true
+    },
+    { capture: true, passive: true }
+  )
+  for (const name of ['pointerup', 'pointercancel']) {
+    document.addEventListener(
+      name,
+      () => {
+        pointerHeld = false
+      },
+      { capture: true, passive: true }
+    )
+  }
+
+  const markGesture = (event: Event): void => {
+    if (!event.isTrusted) return
+    if (event.type === 'keydown' && !SCROLL_KEYS.has((event as KeyboardEvent).key)) return
+    lastGestureAt = Date.now()
+    // Still gesturing, so the scroll is not over — push the deadline back.
+    if (scrollTimer) {
+      clearTimeout(scrollTimer)
+      scrollTimer = setTimeout(recordRest, SCROLL_SETTLE_MS)
+    }
+  }
+  // pointerdown is NOT in this list — see pointerHeld above.
+  for (const name of ['wheel', 'touchmove', 'keydown']) {
+    document.addEventListener(name, markGesture, { capture: true, passive: true })
+  }
+
+  /**
+   * The anchor for a recorded scroll: something identifiable near the middle of
+   * where the user landed. Preferred over the raw pixel offset because a
+   * selector survives a different viewport — "scroll to the Reviews heading"
+   * means the same thing on a phone, "scroll to 1200px" does not.
+   *
+   * But ONLY when the anchor is a real landmark. On a page whose content sits
+   * in one tall `<div id="content">`, climbing to "the nearest thing with an
+   * id" finds that container from every scroll position — so every step got the
+   * same label AND, far worse, the same meaning: "scroll to the top of the
+   * content", which is nowhere near where the user actually was. Seventeen
+   * steps that all replayed to the same wrong place (Surbhi, Round 2a).
+   *
+   * So a candidate has to earn it: it must be no taller than the viewport (a
+   * container you cannot see the whole of is not a place), and its top must
+   * actually be near the resting viewport. Anything else falls back to the
+   * pixel offset, which is weaker but at least true.
+   */
+  // What makes an element a LANDMARK rather than merely a thing that is there,
+  // strongest first. The tiers matter: a test id beats a heading, a heading
+  // beats a link or a button, and a bare list row is the last resort — the same
+  // order the selector engine ranks candidates in, so the anchor a scroll
+  // records is one it can also build a durable selector for.
+  const ANCHOR_TIERS = [
+    '[data-test], [data-testid], [id]',
+    'h1, h2, h3, h4, h5, h6, [role="heading"]',
+    'a[href], button, [aria-label]',
+    'li, tr, article, section'
+  ]
+
+  function anchorAtRest(): Element | null {
+    const viewportH = window.innerHeight
+    const midY = Math.round(viewportH / 2)
+    for (const x of [0.5, 0.25, 0.75]) {
+      const hit = document.elementFromPoint(Math.round(window.innerWidth * x), midY)
+      if (!hit || hit === document.body || hit === document.documentElement) continue
+
+      // Collect the ancestors worth considering: from the element under the
+      // midpoint outwards, stopping once a candidate grows taller than the
+      // viewport (past that we would be naming a container, not a place).
+      const chain: Element[] = []
+      let textFallback: Element | null = null
+      let node: Element | null = hit
+      while (node && node !== document.body && node !== document.documentElement) {
+        const rect = node.getBoundingClientRect()
+        if (rect.height > viewportH) break
+        // Near the resting viewport, not merely somewhere on the page.
+        if (rect.height > 0 && rect.top > -viewportH && rect.top < viewportH * 1.5) {
+          chain.push(node)
+          if (!textFallback && (node.textContent || '').trim().length > 0) textFallback = node
+        }
+        node = node.parentElement
+      }
+
+      // Now look for a landmark, strongest kind first — and look INSIDE each
+      // ancestor as well as at it.
+      //
+      // Looking inside is the part that took two attempts. On SauceDemo the
+      // item name (data-test="inventory-item-name") is a SIBLING of the price,
+      // not an ancestor of it, so climbing alone never reaches it: it goes
+      // price bar → item container → body, finds nothing identified, and
+      // settles for the price. That produced `getByText('$49.99Add to cart')` —
+      // a scroll step anchored to a PRICE, which breaks the moment the price
+      // changes (Surbhi, Round 2c).
+      //
+      // Asking each ancestor "does anything identified live in here" finds the
+      // item name from the item container, which is how a person would name
+      // that place: "the Fleece Jacket item", not "the div with the price in it".
+      // Is this element on screen at the resting position? A container can hold
+      // plenty that is scrolled out of sight or hidden.
+      const onScreen = (el: Element): boolean => {
+        const r = el.getBoundingClientRect()
+        return r.height > 0 && r.top > -viewportH && r.top < viewportH * 1.5
+      }
+
+      // Every tier match, self first then descendants, innermost ancestor out.
+      const tierMatches = (tier: string): Element[] => {
+        const out: Element[] = []
+        for (const candidate of chain) {
+          if (candidate.matches(tier) && onScreen(candidate)) out.push(candidate)
+          for (const inner of Array.prototype.slice.call(candidate.querySelectorAll(tier))) {
+            if (onScreen(inner as Element)) out.push(inner as Element)
+          }
+        }
+        return out
+      }
+
+      // A landmark has to be recognisable to a PERSON. SauceDemo gives its
+      // prices a data-test too, so the price and the item name sit in the same
+      // tier — and the price won simply by being nearer the cursor, giving
+      // "Scroll to $15.99" (Surbhi, Round 2c). The selector was stable, but the
+      // step read like nonsense and would move to a different item the moment
+      // prices changed order.
+      //
+      // "Readable" deliberately means "not purely a number", not "English":
+      // anything outside digits, currency and numeric punctuation counts, so a
+      // label in any script qualifies while a price, a quantity or a date does
+      // not.
+      const readable = (el: Element): boolean =>
+        /[^\d\s.,:/$€£¥%+\-()]/.test((el.textContent || '').trim())
+
+      let anyMatch: Element | null = null
+      for (const tier of ANCHOR_TIERS) {
+        const matches = tierMatches(tier)
+        if (!anyMatch && matches.length) anyMatch = matches[0]
+        const named = matches.find(readable)
+        if (named) return named
+      }
+      // Nothing readable anywhere — an identified element still beats a bare
+      // run of text, so take the strongest match we saw.
+      if (anyMatch) return anyMatch
+      if (textFallback) return textFallback
+    }
+    return null
+  }
+
+  /** Called once the scroll has settled — see SCROLL_SETTLE_MS. */
+  function recordRest(): void {
+    scrollTimer = null
+    if (!recording) return
+    const y = Math.round(window.scrollY || window.pageYOffset || 0)
+    // Landed where we already are (a wheel nudge against the end of the page,
+    // or a bounce) — nothing happened worth a step.
+    if (Math.abs(y - lastRecordedY) < 40) return
+    const height = document.documentElement.scrollHeight || 0
+    const maxY = Math.max(0, height - window.innerHeight)
+    // Did this scroll make the page GROW? That is the difference between the
+    // two things a run of scrolls can mean, and it is a fact rather than a
+    // guess about timing:
+    //
+    //   · reading down a static page — nothing loads, so the intermediate
+    //     positions do not matter and the steps merge into one;
+    //   · an infinite-scroll list — each scroll fetches the next page, so each
+    //     one is a real step and merging them would replay one load where the
+    //     user did three.
+    //
+    // Half a viewport is the bar. A shifting ad or a lazily-sized image moves
+    // the page by tens of pixels; a page of new content moves it by hundreds.
+    const grew = lastRecordedHeight > 0 && height - lastRecordedHeight > window.innerHeight / 2
+    const loadedMore = grew || undefined
+    // WHICH WAY. Reading down a page — the case the merging exists for — is
+    // always one direction; a reversal is unambiguously a new action, because
+    // you went somewhere and then came back. Without this, scrolling down and
+    // then back up merged into a single step and the trip down vanished
+    // (Surbhi, Round 2b Part 1).
+    const scrollDir: 'up' | 'down' = y >= lastRecordedY ? 'down' : 'up'
+    lastRecordedY = y
+    lastRecordedHeight = height
+    // At the very top or bottom, say so: those two are the intent ("load the
+    // next page", "back to the start"), and they hold at any window size.
+    if (y <= 4) {
+      postToHost('recorder:event', {
+        type: 'scroll',
+        scrollKind: 'top',
+        loadedMore,
+        scrollDir,
+        frame: FRAME
+      })
+      return
+    }
+    if (maxY > 0 && y >= maxY - 4) {
+      postToHost('recorder:event', {
+        type: 'scroll',
+        scrollKind: 'bottom',
+        loadedMore,
+        scrollDir,
+        frame: FRAME
+      })
+      return
+    }
+    const anchor = anchorAtRest()
+    if (anchor) {
+      postToHost('recorder:event', {
+        type: 'scroll',
+        scrollKind: 'element',
+        facts: collectFacts(anchor),
+        loadedMore,
+        scrollDir,
+        frame: FRAME
+      })
+      return
+    }
+    postToHost('recorder:event', {
+      type: 'scroll',
+      scrollKind: 'position',
+      value: String(y),
+      loadedMore,
+      scrollDir,
+      frame: FRAME
+    })
+  }
+
+  const onScroll = (): void => {
+    if (!recording || picking) return
+    // Not a human scroll — the page scrolled itself. See the note above.
+    // A held pointer counts for as long as it is held (a scrollbar drag); a
+    // wheel, touch or key counts for a short window after it.
+    if (!pointerHeld && Date.now() - lastGestureAt > 1200) return
+    if (scrollTimer) clearTimeout(scrollTimer)
+    scrollTimer = setTimeout(recordRest, SCROLL_SETTLE_MS)
+  }
+  document.addEventListener('scroll', onScroll, { capture: true, passive: true })
+
+  // === Phase 4: capture DRAGGING =====================================
+  //
+  // Two unrelated gestures wear the same name, and a recorder that only knows
+  // one of them silently misses half the drags on the web:
+  //
+  //   · HTML5 drag and drop — draggable="true", dragstart/dragover/drop. The
+  //     browser runs the gesture; the page only handles the events.
+  //   · a pointer drag — sliders, react-dnd, sortable.js. No dragstart ever
+  //     fires; the library is watching pointerdown/move/up itself.
+  //
+  // Both are captured here, and the step records WHICH one happened, because
+  // replay and export have to reproduce the matching one to work at all.
+
+  // --- HTML5 ---
+  let dragSource: Element | null = null
+  document.addEventListener(
+    'dragstart',
+    (event) => {
+      if (!event.isTrusted || !recording) return
+      const el = realTarget(event)
+      dragSource = el ? meaningfulTarget(el) : null
+    },
+    true
+  )
+  document.addEventListener(
+    'drop',
+    (event) => {
+      if (!event.isTrusted || !recording) return
+      const target = realTarget(event)
+      if (!dragSource || !target) return
+      const dropOn = meaningfulTarget(target)
+      postToHost('recorder:event', {
+        type: 'drag',
+        dragKind: 'html5',
+        facts: collectFacts(dragSource),
+        targetFacts: collectFacts(dropOn),
+        frame: FRAME
+      })
+      dragSource = null
+    },
+    true
+  )
+  // A drag the user abandoned (dropped on nothing) must not leave the source
+  // armed — the next unrelated drop would otherwise pair with it.
+  document.addEventListener(
+    'dragend',
+    () => {
+      dragSource = null
+    },
+    true
+  )
+
+  // --- pointer drag ---
+  // Held down, moved a real distance, released. The distance threshold is what
+  // separates a drag from a click with a shaky hand; below it the normal click
+  // listener records a click, as it should.
+  const DRAG_MIN_PX = 12
+  let pressAt: { x: number; y: number; el: Element; frac?: string } | null = null
+  document.addEventListener(
+    'pointerdown',
+    (event) => {
+      if (!event.isTrusted || !recording || picking) return
+      const el = realTarget(event)
+      if (!el) return
+      const pressEl = meaningfulTarget(el)
+      // Where inside the element the press landed, as a fraction of its box.
+      // See RecorderStep.dragFrom — this is what makes a slider replay from the
+      // knob rather than from the middle of the track.
+      const box = pressEl.getBoundingClientRect()
+      const frac =
+        box.width > 0 && box.height > 0
+          ? `${((event.clientX - box.left) / box.width).toFixed(3)},${(
+              (event.clientY - box.top) /
+              box.height
+            ).toFixed(3)}`
+          : undefined
+      pressAt = { x: event.clientX, y: event.clientY, el: pressEl, frac }
+    },
+    true
+  )
+  document.addEventListener(
+    'pointerup',
+    (event) => {
+      if (!event.isTrusted || !recording || picking) return
+      const start = pressAt
+      pressAt = null
+      if (!start) return
+      const dx = Math.round(event.clientX - start.x)
+      const dy = Math.round(event.clientY - start.y)
+      if (Math.abs(dx) < DRAG_MIN_PX && Math.abs(dy) < DRAG_MIN_PX) return
+      // An HTML5 drag also produces pointer events; it has already been recorded
+      // by the drop listener above, so don't record it twice.
+      if (dragSource) return
+      const upTarget = realTarget(event)
+      const dropOn = upTarget ? meaningfulTarget(upTarget) : null
+      // The click this gesture is about to fire is part of the drag, not a
+      // separate action — the same suppression the Enter-to-submit path uses.
+      suppressClickUntil = Date.now() + 500
+      // And the VALUE CHANGE it caused is part of the drag too. Without this a
+      // slider records the drag plus a value-setting step, and the exported
+      // spec calls .fill() on an input[type=range] — which Playwright refuses.
+      // See draggedEl.
+      draggedEl = start.el
+      suppressChangeUntil = Date.now() + 700
+      if (dropOn && dropOn !== start.el) {
+        postToHost('recorder:event', {
+          type: 'drag',
+          dragKind: 'mouse',
+          facts: collectFacts(start.el),
+          targetFacts: collectFacts(dropOn),
+          frame: FRAME
+        })
+        return
+      }
+      // Released over the element it started on: a slider or a knob. The
+      // DISTANCE is the whole content of the step.
+      postToHost('recorder:event', {
+        type: 'drag',
+        dragKind: 'mouse',
+        facts: collectFacts(start.el),
+        value: `${dx},${dy}`,
+        dragFrom: start.frac,
+        frame: FRAME
+      })
     },
     true
   )

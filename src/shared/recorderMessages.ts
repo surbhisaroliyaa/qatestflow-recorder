@@ -63,8 +63,27 @@ export const PAGE_CHANNELS = [
 export type PageChannel = (typeof PAGE_CHANNELS)[number]
 
 /** Step types the observer itself can emit. Anything else is not something the
- *  recorder produces, so it can only have been made up. */
-const OBSERVER_EVENT_TYPES = new Set(['click', 'hover', 'type', 'check', 'select', 'press'])
+ *  recorder produces, so it can only have been made up.
+ *
+ *  `comment` is deliberately NOT here. It is authored by hand in the step list
+ *  and there is no gesture that produces one, so a `comment` arriving from a
+ *  tab could only be a tab inventing steps. */
+const OBSERVER_EVENT_TYPES = new Set([
+  'click',
+  'hover',
+  'type',
+  'check',
+  'select',
+  'press',
+  'scroll',
+  'drag'
+])
+
+/** A `scroll` step's target. Anything else is dropped to the pixel form. */
+const SCROLL_KINDS = new Set(['element', 'bottom', 'top', 'position'])
+
+/** Which drag gesture the page used. See RecorderStep.dragKind. */
+const DRAG_KINDS = new Set(['html5', 'mouse'])
 
 const DIALOG_KINDS = new Set(['alert', 'confirm', 'prompt'])
 
@@ -196,11 +215,42 @@ function frame(v: unknown): { url: string; name?: string }[] | undefined {
 function recorderEvent(p: Record<string, unknown>): Record<string, unknown> | null {
   const type = str(p.type, 50)
   if (!type || !OBSERVER_EVENT_TYPES.has(type)) return null
+
+  const scrollKind = str(p.scrollKind, 20)
+  const dragKind = str(p.dragKind, 20)
   const f = facts(p.facts)
-  if (!f) return null
+
+  // Every other step type IS an element, so no facts means nothing happened.
+  // A scroll is the one exception: scrolling to the top or bottom of the page,
+  // or to a pixel offset, targets no element at all.
+  const pageLevelScroll =
+    type === 'scroll' && !!scrollKind && scrollKind !== 'element' && SCROLL_KINDS.has(scrollKind)
+  if (!f && !pageLevelScroll) return null
+
+  if (type === 'scroll' && (!scrollKind || !SCROLL_KINDS.has(scrollKind))) return null
+  if (type === 'drag' && (!dragKind || !DRAG_KINDS.has(dragKind))) return null
+
   return compact({
     type,
     facts: f,
+    // The drop target's own facts, validated by exactly the same rules as the
+    // source's — it becomes a second selector ladder, so it is exactly as much
+    // of a trust boundary as the first.
+    targetFacts: type === 'drag' ? facts(p.targetFacts) : undefined,
+    scrollKind: type === 'scroll' ? scrollKind : undefined,
+    // Recording-time only: this scroll made the page grow, so it loaded
+    // something and is a step in its own right rather than one to merge away.
+    loadedMore: type === 'scroll' ? bool(p.loadedMore) : undefined,
+    // Which way this scroll went. Recording-time only; a reversal is a new
+    // action rather than a continuation, so it must not be merged away.
+    scrollDir:
+      type === 'scroll' && (p.scrollDir === 'up' || p.scrollDir === 'down')
+        ? p.scrollDir
+        : undefined,
+    dragKind: type === 'drag' ? dragKind : undefined,
+    // "fx,fy" — where in the element the press began. Short by construction;
+    // the cap is what stops a page sending a megabyte in a two-number field.
+    dragFrom: type === 'drag' ? str(p.dragFrom, 40) : undefined,
     value: str(p.value),
     secret: bool(p.secret),
     key: str(p.key, 50),

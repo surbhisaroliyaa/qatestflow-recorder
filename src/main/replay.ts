@@ -50,6 +50,18 @@ export interface ReplayStep {
   // Tracked so a suite can flag a test that creates data but has no teardown to
   // remove it — an orphan-data risk. Purely informational at replay (no behaviour).
   createsData?: string
+  // === Phase 4: scroll + drag ===
+  // A `scroll` step's target ('element' | 'bottom' | 'top' | 'position'). Only
+  // 'element' reaches this module — the page-level kinds have no element to
+  // find, so the run loop in index.ts performs them directly.
+  scrollKind?: string
+  // A `drag` step's gesture: 'html5' (dragstart/drop) or 'mouse' (pointer).
+  dragKind?: string
+  // Where in the element the press began ("fx,fy" fractions). See dragFrom.
+  dragFrom?: string
+  // The drop target's own candidate ladder, resolved alongside the source's.
+  targetCandidates?: ReplayCandidate[]
+  targetLabel?: string
   // === F37: loops + branching ===
   // 'times' repeats the body `value` times; 'each' repeats it once per element
   // matching this step's candidate ladder.
@@ -535,6 +547,98 @@ export function buildActionScript(step: ReplayStep): string {
         target.scrollIntoView({ block: 'center' });
         const r = target.getBoundingClientRect();
         return { ok: true, hoverAt: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };`
+      break
+    }
+
+    // Phase 4: scroll to THIS step's element. The page-level kinds (top /
+    // bottom / a pixel offset) have no element and never reach here — the run
+    // loop performs those itself.
+    //
+    // Worth being clear about why this step exists at all, since every action
+    // already scrolls its own target into view: this one is scrolling AS THE
+    // THING UNDER TEST. The lazy-loaded images, the next page of an infinite
+    // list, the analytics event that fires at 50% depth — none of those are
+    // reachable by a test that only ever scrolls as a side effect of clicking.
+    case 'scroll': {
+      action = `
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        return { ok: true };`
+      break
+    }
+
+    // Phase 4: drag. Two gestures, two mechanisms — see RecorderStep.dragKind.
+    case 'drag': {
+      const targets = JSON.stringify(step.targetCandidates ?? [])
+      const isHtml5 = step.dragKind === 'html5'
+      const offset = (step.value ?? '').split(',')
+      const dx = Math.round(parseFloat(offset[0] ?? '0') || 0)
+      const dy = Math.round(parseFloat(offset[1] ?? '0') || 0)
+      // Where in the element the press began, as fractions of its box. Steps
+      // recorded before this was captured fall back to the centre.
+      const grip = (step.dragFrom ?? '0.5,0.5').split(',')
+      const fx = Number.isFinite(parseFloat(grip[0])) ? parseFloat(grip[0]) : 0.5
+      const fy = Number.isFinite(parseFloat(grip[1])) ? parseFloat(grip[1]) : 0.5
+      action = `
+        // Resolve the DROP TARGET through its own ladder, the same way the
+        // source was resolved — a drag that only self-heals on one end would
+        // still break the moment the target's markup changed.
+        const targetCands = ${targets};
+        let drop = null;
+        for (const c of targetCands) { drop = findByCandidate(c); if (drop) break; }
+        if (targetCands.length && !drop) {
+          return { ok: false, error: 'Could not find the element to drop onto (${(
+            step.targetLabel ?? 'the drop target'
+          ).replace(/'/g, "\\'")})' };
+        }
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const from = el.getBoundingClientRect();
+        // Press where the HAND pressed, not at the element's centre — see
+        // RecorderStep.dragFrom. On a slider the two are nowhere near each
+        // other, and starting from the centre silently changes the value
+        // before the drag even begins.
+        const fromPt = { x: from.left + from.width * ${fx}, y: from.top + from.height * ${fy} };
+        const toPt = drop
+          ? (() => { const r = drop.getBoundingClientRect();
+                     return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()
+          : { x: fromPt.x + ${dx}, y: fromPt.y + ${dy} };
+        ${
+          isHtml5
+            ? `
+        // HTML5 drag and drop. Chromium's NATIVE drag loop cannot be driven by
+        // synthesized mouse input — the OS owns it once it starts — so the
+        // gesture is reproduced at the event level instead: the same sequence
+        // the browser would fire, carrying ONE DataTransfer across all of them,
+        // which is what every HTML5 drop handler actually reads.
+        if (!drop) return { ok: false, error: 'An HTML5 drag needs an element to drop onto, and none was recorded' };
+        const dt = new DataTransfer();
+        const fire = (node, name, pt) => {
+          const ev = new DragEvent(name, {
+            bubbles: true, cancelable: true, composed: true,
+            clientX: pt.x, clientY: pt.y, dataTransfer: dt
+          });
+          node.dispatchEvent(ev);
+          return ev;
+        };
+        fire(el, 'dragstart', fromPt);
+        fire(drop, 'dragenter', toPt);
+        // dragover must be PREVENTED for a drop to be allowed — that is the
+        // HTML5 contract, and a page that doesn't do it is telling us it won't
+        // accept this drop. Saying so beats a silent green.
+        const over = fire(drop, 'dragover', toPt);
+        if (!over.defaultPrevented) {
+          return { ok: false, error: 'The drop target refused the drop (it never accepted the dragover) — this element may not be a valid drop zone' };
+        }
+        fire(drop, 'drop', toPt);
+        fire(el, 'dragend', toPt);
+        return { ok: true };`
+            : `
+        // A pointer drag (slider, react-dnd, sortable.js). These libraries
+        // listen for real pointer input, so the coordinates go back to main,
+        // which drives the actual mouse over CDP — the same division of labour
+        // the hover step uses, and for the same reason: synthetic events don't
+        // convince the things that matter.
+        return { ok: true, dragAt: { from: fromPt, to: toPt } };`
+        }`
       break
     }
 

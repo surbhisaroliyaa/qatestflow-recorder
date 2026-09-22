@@ -1,3 +1,15 @@
+// =====================================================================
+// THE RENDERER-FACING TYPES
+// =====================================================================
+// Named api.d.ts rather than index.d.ts on purpose (Phase 4). TypeScript
+// treats `index.d.ts` as the DECLARATION OUTPUT of a neighbouring
+// `index.ts` and drops it from the program when both exist — which is
+// exactly the case here. The renderer's tsconfig never noticed, because it
+// includes only the .d.ts; main's tsconfig did, the moment the CLI needed
+// the same ambient types, and it failed as fifty "Cannot find name
+// RecorderStep" errors that pointed nowhere near the cause.
+// =====================================================================
+
 import { ElectronAPI } from '@electron-toolkit/preload'
 
 interface BrowserAPI {
@@ -54,6 +66,12 @@ interface ReplayResult {
   consoleErrors?: string[] // page JS errors during the run (Day 13)
   networkErrors?: string[] // failed / 4xx / 5xx requests during the run (Day 13)
   traceId?: string // Day 18: a recorded run trace was kept (open it in the viewer)
+  // Phase 4: how long the run took, measured by main. Feeds the postback.
+  durationMs?: number
+  // Phase 4: the run video's filename inside that trace's folder ("run.webm").
+  // Absent whenever there isn't one, which includes every case where capture
+  // was refused — a missing video is never reported as a run failure.
+  videoFile?: string
   // Day 20: every failed step in this run (not just the first) — surfaced when
   // Continue bypassed several, so each one's screenshot is reachable.
   failures?: { index: number; error: string; screenshotPath?: string }[]
@@ -84,6 +102,11 @@ type TraceMode = 'always' | 'failure' | 'off'
 
 interface TraceOptions {
   mode: TraceMode
+  // Phase 4: whether to also record a .webm of the run. Rides on the trace —
+  // a video only exists for a run that kept a trace, and lives in its folder —
+  // so there is one retention policy rather than two. Same three words as
+  // `mode` on purpose: it is the same idea.
+  video?: TraceMode
   stepTexts?: string[] // the human sentence per step (renderer-computed)
   testName?: string
 }
@@ -110,6 +133,31 @@ interface RecorderAPI {
     // `pageOverwritten` = a DIFFERENT page class already existed at that path
     // (the class name comes from the test name, so two tests can collide).
   ) => Promise<{ path: string; alsoWrote: string[]; pageOverwritten: boolean } | null>
+  // Phase 4: the portable YAML/JSON form of a test — the human-editable view
+  // of the same model the saved JSON holds. See src/shared/testFormat.ts.
+  exportPortable: (
+    test: Record<string, unknown>,
+    steps: RecorderStep[],
+    format: 'yaml' | 'json'
+  ) => Promise<string | null>
+  // Reads a YAML or JSON test back. `warnings` are things that PARSED but will
+  // not work — most often a hand-written selector this build cannot resolve —
+  // surfaced at import rather than discovered at replay.
+  importPortable: () => Promise<{
+    name: string
+    baseURL?: string
+    tags?: string[]
+    dataRows?: Record<string, string>[]
+    steps: RecorderStep[]
+    warnings: string[]
+    path: string
+  } | null>
+  // Phase 4 (run video): main drives, the renderer encodes.
+  onVideoStart: (
+    callback: (req: { sourceId: string; maxMs: number; fps: number }) => void
+  ) => () => void
+  videoStarted: (ok: boolean) => void
+  onVideoCancel: (callback: () => void) => () => void
   pickUploadFile: () => Promise<string | null>
   revealDownload: (path: string) => Promise<void>
   onDownloadStart: (callback: (info: { name: string }) => void) => () => void
@@ -465,6 +513,9 @@ interface LibraryAPI {
     name: string
     baseURL: string
     suite: string
+    // Phase 4: the project above the suite. Omitted = save where tests have
+    // always been saved, so no existing library is reorganised.
+    project?: string
     steps: RecorderStep[]
     storageState?: string
     viewport?: { width: number; height: number }
@@ -474,7 +525,10 @@ interface LibraryAPI {
     captureHar?: boolean // F1: bank the captured network with this test
   }) => Promise<SavedTestSummary>
   list: () => Promise<SavedTestSummary[]>
-  listSuites: () => Promise<string[]>
+  // Phase 4: suites WITHIN a project (or at the root when none is given).
+  listSuites: (project?: string) => Promise<string[]>
+  // Phase 4: every project — a folder that holds suites rather than tests.
+  listProjects: () => Promise<string[]>
   load: (fileName: string) => Promise<SavedTestData | null>
   remove: (fileName: string) => Promise<void>
   recordRun: (fileName: string, run: RunInfo) => Promise<void>
@@ -554,8 +608,33 @@ interface TraceAPI {
   openFile: (id: string, file: string) => Promise<void>
   // Copy the whole recording to a folder the user picks. Returns the path.
   export: (id: string) => Promise<string | null>
+  // Save this run's video where it will outlive the trace prune. Returns the
+  // path, or null if cancelled or there was no video.
+  saveVideo: (id: string) => Promise<string | null>
   // Save a whole-run HTML report (pass or fail). Returns the path.
   exportReport: (id: string) => Promise<string | null>
+}
+
+interface IntegrationConfig {
+  /** POST a machine-readable result when a run finishes. */
+  postback: { when: 'always' | 'failure' | 'off'; url: string; headers: string }
+  /** File a failure as a GitLab issue — the mirror of the Jira integration. */
+  gitlab: { baseUrl: string; token: string; projectId: string; labels: string }
+}
+
+interface EvidencePrivacy {
+  /** Apply the built-in patterns (emails, card-like numbers, tokens). */
+  builtins: boolean
+  /** Extra regexes, one per line. An uncompilable line is ignored, and the
+   *  settings screen flags it — silently ignoring it would leave the user
+   *  believing they are covered when they are not. */
+  patterns: string
+  /** CSS selectors painted over in captured screenshots (same syntax as F15’s
+   *  per-snapshot masks). */
+  maskSelectors: string
+  /** Capture the page’s HTML into the trace at all — the biggest carrier of
+   *  real data in the whole evidence set. */
+  captureDom: boolean
 }
 
 interface API {
@@ -581,6 +660,45 @@ interface API {
   monitors: MonitorsAPI
   notify: NotifyAPI
   coverage: CoverageAPI
+  // Phase 4: what may be written to disk when a run leaves evidence behind.
+  // The rules live in src/shared/evidencePrivacy.ts; this is the stored policy.
+  privacy: {
+    get: () => Promise<EvidencePrivacy>
+    save: (settings: EvidencePrivacy) => Promise<EvidencePrivacy>
+  }
+  // Phase 4: monitors that keep running with the app closed. Backed by the OS
+  // scheduler invoking this app's own CLI, so there is one runner, not two.
+  scheduler: {
+    enable: (
+      monitorId: string,
+      testName: string,
+      intervalMin: number
+    ) => Promise<{ ok: boolean; error?: string }>
+    disable: (monitorId: string) => Promise<{ ok: boolean; error?: string }>
+    // `available` is false on platforms this build cannot schedule on, with a
+    // message that says what DOES still work.
+    list: () => Promise<{ available: boolean; message?: string; tasks: string[] }>
+  }
+  // Phase 4: outbound integrations. The chat webhook (F32b) sends PROSE about a
+  // monitor; these send something a machine can act on, for any run.
+  integrations: {
+    get: () => Promise<IntegrationConfig>
+    save: (settings: IntegrationConfig) => Promise<IntegrationConfig>
+    // Returns skipped:true when the policy said not to send — a no-op is not a
+    // failure, and the UI must not report one.
+    postback: (
+      settings: { when: string; url: string; headers: string },
+      run: Record<string, unknown>
+    ) => Promise<{ ok: boolean; skipped?: boolean; status?: number; error?: string }>
+    gitlabIssue: (cfg: {
+      baseUrl: string
+      token: string
+      projectId: string
+      title: string
+      description: string
+      labels?: string
+    }) => Promise<{ ok: boolean; iid?: number; url?: string; error?: string }>
+  }
 }
 
 declare global {
@@ -804,6 +922,8 @@ declare global {
     // when present (e.g. "E2E/login-flow.json").
     fileName: string
     suite: string // the section — '' for legacy root files
+    // Phase 4: the project folder above the suite — '' when there isn't one.
+    project: string
     name: string
     baseURL: string
     updatedAt: string
@@ -1108,6 +1228,21 @@ declare global {
       | 'select'
       | 'press'
       | 'hover'
+      // Phase 4 (audit gap): a deliberate SCROLL. Every element action already
+      // scrolls its target into view implicitly, so this step is not "get the
+      // element on screen" — it is scrolling as the thing under test: lazy
+      // images, infinite lists, scroll-triggered analytics, sticky headers.
+      // `scrollKind` says what it scrolls to. See `scrollKind` below.
+      | 'scroll'
+      // Phase 4 (audit gap): drag one element onto another, or drag a handle by
+      // an offset (a slider). `dragKind` says WHICH gesture the page actually
+      // used, because the two need different machinery end to end — see below.
+      | 'drag'
+      // Phase 4 (audit gap): a human note in the step list. Never recorded,
+      // never executed — it exists to give a 200-step flow section headings and
+      // to carry the "why" a selector alone can't. Exported as a code comment,
+      // so the note survives into the generated spec.
+      | 'comment'
       | 'assert'
       | 'wait'
       | 'dialog'
@@ -1180,6 +1315,55 @@ declare global {
     // F27: this step CREATES persistent data (label = the entity). Tracked so a
     // suite can flag a test that creates data with no teardown to remove it.
     createsData?: string
+    // === Phase 4: scroll + drag ===
+    // For a `scroll` step: WHAT it scrolls to.
+    //   'element'  — bring this step's own element into view. The recorded
+    //                default whenever the landing viewport had a stable anchor,
+    //                because it survives a viewport change; a pixel offset does
+    //                not (the same 1200px is a different place on a phone).
+    //   'bottom'   — the foot of the page. The infinite-scroll / lazy-load case.
+    //   'top'      — back to the start (a "scroll up reveals the sticky nav" test).
+    //   'position' — an absolute Y in CSS pixels, in `value`. The fallback when
+    //                no anchor element was found, and honestly the weakest form.
+    scrollKind?: 'element' | 'bottom' | 'top' | 'position'
+    // Recording-time only, and never saved: this scroll made the page GROW, so
+    // it loaded content. It is the signal that decides whether a run of scrolls
+    // is one action or several — reading down a static page loads nothing and
+    // collapses to one step, while an infinite-scroll list loads on every
+    // scroll and keeps each one. See the onStep effect in App.tsx.
+    loadedMore?: boolean
+    // Recording-time only: which way this scroll went. Reading down a page is
+    // one direction throughout; a reversal means the user went somewhere and
+    // came back, which is two actions, not one.
+    scrollDir?: 'up' | 'down'
+    // For a `drag` step: which gesture the page ACTUALLY used, decided at record
+    // time by whether a native `dragstart` fired. This is not cosmetic — the two
+    // need different machinery in both replay and export:
+    //   'html5' — the HTML Drag and Drop API (draggable="true", dragstart/drop).
+    //             Replays by dispatching the drag events with a shared
+    //             DataTransfer; exports to Playwright's .dragTo().
+    //   'mouse' — a pointer-driven drag (sliders, react-dnd, sortable.js), which
+    //             never fires a dragstart. Replays and exports as a real mouse
+    //             down → move → up, because that is the only thing those
+    //             libraries listen for.
+    dragKind?: 'html5' | 'mouse'
+    // A `drag` step's DROP TARGET — a second selector ladder, ranked and
+    // self-healing exactly like the source's. `targetLabel` is its human name.
+    // Absent on an offset drag (a slider has no target element, only a distance).
+    targetSelector?: string
+    targetCandidates?: SelectorCandidate[]
+    targetLabel?: string
+    // An offset drag's distance in CSS pixels, as "dx,dy" in `value` — used when
+    // the drag had no drop target element (the slider case).
+    // WHERE inside the element the press began, as fractions of its box ("fx,fy"
+    // — "0,0.5" is the middle of the left edge). Not a detail: a slider knob at
+    // its minimum sits at the LEFT edge, and a replay that pressed the element's
+    // centre instead would jump the value to 50% before the drag even started,
+    // then drag on from there. Recording where the hand actually went down is
+    // the difference between reproducing the gesture and inventing a new one.
+    // Absent on steps recorded before this was captured — those fall back to the
+    // centre, which is what they always did.
+    dragFrom?: string
     // === F37: loops + branching ===
     // For a `repeat` step: 'times' runs its body `value` times; 'each' runs it
     // once per element matching the step's selector (the "for each row in the

@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest'
 // filesystem, but the module-level import has to resolve.
 vi.mock('electron', () => ({ app: { getPath: () => '/Users/test/Documents' } }))
 
-const { harNameForFile, safeRel, safeSegment, slugify, stepStats } =
+const { harNameForFile, locationOf, MAX_PATH_DEPTH, safeRel, safeSegment, slugify, stepStats } =
   await import('../src/main/library')
 
 // =====================================================================
@@ -51,8 +51,11 @@ describe('nothing can escape the library folder', () => {
         expect(seg, `${attempt} → ${out}`).not.toBe('.')
       }
       expect(out, attempt).not.toMatch(/^[/\\]/)
-      // …and whatever survives is at most suite/file, inside the library.
-      expect(out.split('/').length, attempt).toBeLessThanOrEqual(2)
+      // …and whatever survives is at most project/suite/file, inside the
+      // library. The cap moved from 2 to 3 when Phase 4 added projects; the
+      // property being tested did NOT move — the depth IS the containment, so
+      // it stays asserted rather than left to the loop to imply.
+      expect(out.split('/').length, attempt).toBeLessThanOrEqual(MAX_PATH_DEPTH)
     }
   })
 
@@ -61,10 +64,28 @@ describe('nothing can escape the library folder', () => {
     expect(safeRel('E2E\\login.json')).toBe('E2E/login.json')
   })
 
-  it('never returns more than two segments', () => {
-    // The layout is one suite folder deep. Anything deeper is not a path we
-    // wrote, so it is truncated rather than trusted.
-    expect(safeRel('a/b/c/d.json').split('/')).toHaveLength(2)
+  it('never returns more than three segments', () => {
+    // The layout is at most project/suite/file. Anything deeper is not a path
+    // we wrote, so it is truncated rather than trusted.
+    expect(safeRel('a/b/c/d.json').split('/')).toHaveLength(3)
+    expect(safeRel('a/b/c/d/e/f.json').split('/')).toHaveLength(3)
+  })
+
+  it('keeps a project/suite/file path intact', () => {
+    expect(safeRel('Checkout/E2E/login.json')).toBe('Checkout/E2E/login.json')
+  })
+
+  it('reads a location out of a path, at every depth it supports', () => {
+    // Three shapes, three eras of this app, and all three have to keep working:
+    // a test saved before suites existed, one saved before projects existed,
+    // and one saved now. A shorter path is never rewritten into a longer one —
+    // nothing already in someone's library moves.
+    expect(locationOf('login.json')).toEqual({ project: '', suite: '' })
+    expect(locationOf('E2E/login.json')).toEqual({ project: '', suite: 'E2E' })
+    expect(locationOf('Checkout/E2E/login.json')).toEqual({
+      project: 'Checkout',
+      suite: 'E2E'
+    })
   })
 
   it('drops empty segments instead of producing a double slash', () => {

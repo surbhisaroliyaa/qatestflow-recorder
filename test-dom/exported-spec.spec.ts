@@ -75,10 +75,65 @@ const FIXTURE = `<!doctype html>
     <button id="submit" type="button">Submit</button>
   </form>
   <p id="result"></p>
+
+  <!-- Phase 4: the two drag gestures, which are genuinely different machinery.
+       HTML5 drag and drop first: draggable source, a zone that ACCEPTS the drop
+       by preventing dragover (a zone that doesn't is refusing it), and a result
+       line so the assertion can prove the drop was handled, not merely attempted. -->
+  <div id="drag-src" draggable="true">Card</div>
+  <div id="drop-zone">Drop here</div>
+  <p id="drop-result"></p>
+
+  <!-- A pointer drag: a range input. No dragstart ever fires for one of these,
+       which is exactly why it needs the mouse-sequence path. -->
+  <input id="slider" type="range" min="0" max="100" value="0" style="width:200px">
+  <p id="slider-result">0</p>
+
+  <!-- Phase 4: scrolling AS THE THING UNDER TEST. The spacer makes the page
+       genuinely scrollable, and #lazy stays empty until the reader actually
+       reaches the bottom — the lazy-load behaviour a test can only reach by
+       scrolling, never as a side effect of clicking something. -->
+  <div id="spacer" style="height:2000px"></div>
+  <h2 id="deep">Deep section</h2>
+  <p id="lazy"></p>
+
   <script>
     document.getElementById('submit').addEventListener('click', () => {
       document.getElementById('result').textContent = 'Submitted';
     });
+
+    const src = document.getElementById('drag-src');
+    const zone = document.getElementById('drop-zone');
+    src.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', 'card');
+    });
+    // Preventing dragover is what MAKES this a drop zone — without it the
+    // browser refuses the drop and nothing is handled.
+    zone.addEventListener('dragover', (e) => e.preventDefault());
+    zone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      document.getElementById('drop-result').textContent =
+        'Dropped: ' + e.dataTransfer.getData('text/plain');
+    });
+
+    const slider = document.getElementById('slider');
+    // Reported as a band, not a raw number: the exact value depends on
+    // sub-pixel rounding and on where a platform puts the knob, so asserting
+    // "50" would make this gate flaky for no gain. What the test needs to know
+    // is that the knob MOVED A REAL DISTANCE, and that it did so because of the
+    // drag — a click alone would land somewhere too.
+    slider.addEventListener('input', () => {
+      const v = Number(slider.value);
+      document.getElementById('slider-result').textContent =
+        v > 20 ? 'moved' : String(v);
+    });
+
+    // Lazy content that only exists once the page has actually been scrolled.
+    window.addEventListener('scroll', () => {
+      if (window.scrollY > 500) {
+        document.getElementById('lazy').textContent = 'Loaded on scroll';
+      }
+    }, { passive: true });
   </script>
 </body>
 </html>`
@@ -197,6 +252,124 @@ const controls: Control[] = [
     steps: (base) => [
       s({ type: 'navigate', url: base }),
       s({ type: 'click', selector: 'locator("#submit")', label: 'Submit' }),
+      s({
+        type: 'assert',
+        selector: 'locator("#result")',
+        assertKind: 'text-equals',
+        value: 'Submitted',
+        label: 'Result'
+      })
+    ]
+  },
+
+  // ── Phase 4: the step types the audit found missing ────────────────
+  // Each one asserts on a RESULT the page only produces if the gesture really
+  // happened — a drop handler that ran, a slider that moved, content that only
+  // loads on scroll. Asserting that the step didn't throw would prove nothing.
+  {
+    name: 'drag-html5',
+    steps: (base) => [
+      s({ type: 'navigate', url: base }),
+      s({
+        type: 'drag',
+        dragKind: 'html5',
+        selector: 'locator("#drag-src")',
+        label: 'Card',
+        targetSelector: 'locator("#drop-zone")',
+        targetLabel: 'Drop here'
+      }),
+      s({
+        type: 'assert',
+        selector: 'locator("#drop-result")',
+        assertKind: 'text-equals',
+        value: 'Dropped: card',
+        label: 'Drop result'
+      })
+    ]
+  },
+  {
+    name: 'drag-slider',
+    steps: (base) => [
+      s({ type: 'navigate', url: base }),
+      // A 200px-wide range starting at 0, so its knob is at the LEFT EDGE.
+      // dragFrom says so ("0,0.5"), which is the whole point of that field: a
+      // replay that pressed the element's centre would jump the value to 50
+      // before moving at all, and would then be testing a gesture the user
+      // never made. Grip the knob, drag it right by 100px.
+      s({
+        type: 'drag',
+        dragKind: 'mouse',
+        selector: 'locator("#slider")',
+        label: 'Slider',
+        dragFrom: '0,0.5',
+        value: '100,0'
+      }),
+      s({
+        type: 'assert',
+        selector: 'locator("#slider-result")',
+        assertKind: 'text-equals',
+        value: 'moved',
+        label: 'Slider value'
+      })
+    ]
+  },
+  {
+    name: 'scroll-to-bottom',
+    steps: (base) => [
+      s({ type: 'navigate', url: base }),
+      s({ type: 'scroll', scrollKind: 'bottom' }),
+      s({
+        type: 'assert',
+        selector: 'locator("#lazy")',
+        assertKind: 'text-equals',
+        value: 'Loaded on scroll',
+        label: 'Lazy content'
+      })
+    ]
+  },
+  {
+    name: 'scroll-to-element',
+    steps: (base) => [
+      s({ type: 'navigate', url: base }),
+      s({
+        type: 'scroll',
+        scrollKind: 'element',
+        selector: 'locator("#deep")',
+        label: 'Deep section'
+      }),
+      s({
+        type: 'assert',
+        selector: 'locator("#lazy")',
+        assertKind: 'text-equals',
+        value: 'Loaded on scroll',
+        label: 'Lazy content'
+      })
+    ]
+  },
+  {
+    name: 'scroll-to-position',
+    steps: (base) => [
+      s({ type: 'navigate', url: base }),
+      s({ type: 'scroll', scrollKind: 'position', value: '900' }),
+      s({
+        type: 'assert',
+        selector: 'locator("#lazy")',
+        assertKind: 'text-equals',
+        value: 'Loaded on scroll',
+        label: 'Lazy content'
+      })
+    ]
+  },
+  {
+    // A note must not break the generated file. It is a comment, so the proof
+    // that it worked is that the spec still PARSES and the steps around it run
+    // — a malformed comment would take the whole file down with it.
+    name: 'comment-note',
+    steps: (base) => [
+      s({ type: 'navigate', url: base }),
+      s({ type: 'comment', label: 'Login phase — uses the seeded account' }),
+      s({ type: 'click', selector: 'locator("#submit")', label: 'Submit' }),
+      s({ type: 'comment', label: 'Verify' }),
       s({
         type: 'assert',
         selector: 'locator("#result")',
@@ -362,6 +535,35 @@ test.describe('the exported spec passes when Playwright actually runs it', () =>
 
     expect(status, 'the old broken export somehow passed — the gate is blind').not.toBe(0)
     expect(output).toMatch(/fill|checkbox/i)
+  })
+
+  test('the gate has teeth: a slider recorded as a VALUE FILL dies under real Playwright', async () => {
+    // Round 4, and the same shape as the checkbox blocker above.
+    //
+    // Dragging a slider changes its value, the browser fires `change`, and the
+    // recorder logged a SECOND step — so the export carried both the drag and
+    // `.fill("3.5")` on an input[type=range]. The in-app replay was perfectly
+    // happy; Playwright refuses that fill outright ("Malformed value"), so the
+    // exported spec died on a line the app had gone green on.
+    //
+    // The recorder no longer emits that step (see draggedEl in
+    // observerSource.ts, and the test in test-dom/observer.spec.ts). This is
+    // here to prove the GATE would have caught it — the checkbox proves the
+    // same thing for QF-001, and a gate that cannot see this class of bug is
+    // not protecting the thing it exists to protect.
+    exportInto([
+      {
+        name: 'slider-as-fill',
+        steps: [
+          s({ type: 'navigate', url: base }),
+          s({ type: 'type', selector: 'locator("#slider")', value: '3.5', label: 'Slider' })
+        ]
+      }
+    ])
+    const { status, output } = await runGeneratedSpecs()
+
+    expect(status, 'a .fill() on a range input somehow passed — the gate is blind').not.toBe(0)
+    expect(output).toMatch(/fill|malformed/i)
   })
 
   // Option A: a protected password column exports as process.env reads — one

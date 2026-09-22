@@ -1442,3 +1442,179 @@ describe('a data-driven login with a protected password column', () => {
     expect(titles).toEqual(['Login — row 1', 'Login — (empty)'])
   })
 })
+
+// =====================================================================
+// § Phase 4 — scroll, drag and notes
+//
+// The audit listed these as flatly missing. They are the first step types
+// in this module whose emitted action spans SEVERAL LINES, which is its own
+// hazard: for years every call site indented only the first line, so a
+// multi-line action came out of the page-object export with its body flush
+// against the margin. Parity between the two exporters is checked here for
+// the same reason it is checked everywhere else in this file — three shipped
+// bugs in this repo were all "the inline exporter got the feature, the POM
+// export didn't", and the page-level scroll made it four.
+// =====================================================================
+describe('Phase 4: scrolling, dragging and notes export', () => {
+  const PAGE_SCROLL = [
+    s({ type: 'navigate', url: 'https://shop.example.com/' }),
+    s({ type: 'scroll', scrollKind: 'bottom' }),
+    s({ type: 'assert', selector: "getByText('Page 2')", assertKind: 'visible', label: 'Page 2' })
+  ] as never as RecorderStep[]
+
+  const ELEMENT_SCROLL = [
+    s({ type: 'navigate', url: 'https://shop.example.com/' }),
+    s({
+      type: 'scroll',
+      scrollKind: 'element',
+      selector: "getByRole('heading', { name: 'Reviews' })",
+      label: 'Reviews'
+    })
+  ] as never as RecorderStep[]
+
+  const HTML5_DRAG = [
+    s({ type: 'navigate', url: 'https://board.example.com/' }),
+    s({
+      type: 'drag',
+      dragKind: 'html5',
+      selector: "getByText('Write the spec')",
+      label: 'Write the spec',
+      targetSelector: "getByTestId('done-column')",
+      targetLabel: 'Done'
+    })
+  ] as never as RecorderStep[]
+
+  const SLIDER_DRAG = [
+    s({ type: 'navigate', url: 'https://shop.example.com/' }),
+    s({
+      type: 'drag',
+      dragKind: 'mouse',
+      selector: "getByLabel('Max price')",
+      label: 'Max price',
+      dragFrom: '0,0.5',
+      value: '120,0'
+    })
+  ] as never as RecorderStep[]
+
+  const NOTED = [
+    s({ type: 'navigate', url: 'https://shop.example.com/' }),
+    s({ type: 'comment', label: 'Checkout phase — card is a Stripe test number' }),
+    s({ type: 'click', selector: "getByRole('button', { name: 'Pay' })", label: 'Pay' })
+  ] as never as RecorderStep[]
+
+  const ALL: Array<[string, RecorderStep[]]> = [
+    ['page scroll', PAGE_SCROLL],
+    ['element scroll', ELEMENT_SCROLL],
+    ['html5 drag', HTML5_DRAG],
+    ['slider drag', SLIDER_DRAG],
+    ['notes', NOTED]
+  ]
+
+  for (const [title, steps] of ALL) {
+    it(`${title} — both exports parse as TypeScript`, () => {
+      expect(syntaxErrors(generatePlaywrightTest(steps, { name: 'T' })), 'inline').toEqual([])
+      const pom = generatePageObjectTest(steps, { name: 'T' })
+      if (!pom) return
+      expect(syntaxErrors(pom.spec), 'pom spec').toEqual([])
+      for (const p of pom.pages) expect(syntaxErrors(p.source), p.fileName).toEqual([])
+    })
+  }
+
+  it('a PAGE-level scroll survives the page-object export', () => {
+    // The exact bug `snapshot` once had: no selector, so it fell through to
+    // "skip anything without one" and vanished — the POM export silently did
+    // no scrolling at all and went green. Caught by the export gate.
+    const pom = generatePageObjectTest(PAGE_SCROLL, { name: 'Shop' })!
+    expect(pom.spec).toMatch(/scrollTo/)
+  })
+
+  it('scrolls to an element by locator, not by a pixel guess', () => {
+    // A hard-coded Y means something different at every viewport size; a
+    // locator means the same thing everywhere.
+    const inline = generatePlaywrightTest(ELEMENT_SCROLL, { name: 'Shop' })
+    expect(inline).toMatch(/scrollIntoViewIfNeeded\(\)/)
+    expect(inline).not.toMatch(/scrollTo\(/)
+  })
+
+  it('an HTML5 drag uses dragTo — the only thing that drives the native drag', () => {
+    for (const out of [
+      generatePlaywrightTest(HTML5_DRAG, { name: 'Board' }),
+      generatePageObjectTest(HTML5_DRAG, { name: 'Board' })!.page
+    ]) {
+      expect(out).toMatch(/\.dragTo\(/)
+    }
+  })
+
+  it('a slider drag grips where the hand gripped, not the middle', () => {
+    // dragFrom '0,0.5' is the left edge. Pressing the centre instead would
+    // slam the slider to 50% before the drag began — reproducing a gesture
+    // the user never made, and doing it silently.
+    const inline = generatePlaywrightTest(SLIDER_DRAG, { name: 'Shop' })
+    expect(inline).toMatch(/dragBox\.x \+ dragBox\.width \* 0/)
+    expect(inline).not.toMatch(/dragBox\.width \* 0\.5/)
+    expect(inline).toMatch(/mouse\.down\(\)/)
+    expect(inline).toMatch(/mouse\.up\(\)/)
+  })
+
+  it('a drag recorded before the grip was captured still exports, from the centre', () => {
+    // Back-compat: old recordings have no dragFrom. Falling back to the centre
+    // is what they always effectively did, so they must not change behaviour.
+    const old = [
+      s({ type: 'navigate', url: 'https://shop.example.com/' }),
+      s({
+        type: 'drag',
+        dragKind: 'mouse',
+        selector: "getByLabel('Max price')",
+        label: 'Max price',
+        value: '120,0'
+      })
+    ] as never as RecorderStep[]
+    expect(generatePlaywrightTest(old, { name: 'Shop' })).toMatch(/dragBox\.width \* 0\.5/)
+  })
+
+  it('a multi-line action is indented THROUGHOUT, in both exports', () => {
+    // The hazard this step type introduced. A body flush against the margin
+    // still compiles, which is exactly why nothing else would catch it.
+    const inline = generatePlaywrightTest(SLIDER_DRAG, { name: 'Shop' })
+    for (const line of inline.split('\n')) {
+      if (line.includes('mouse.down()') || line.includes('mouse.up()')) {
+        expect(line, line).toMatch(/^ {2,}await/)
+      }
+    }
+    const page = generatePageObjectTest(SLIDER_DRAG, { name: 'Shop' })!.page
+    for (const line of page.split('\n')) {
+      if (line.includes('mouse.down()') || line.includes('mouse.up()')) {
+        expect(line, line).toMatch(/^ {4,}await/)
+      }
+    }
+  })
+
+  it('a note becomes a real comment in both exports, and takes no action', () => {
+    const inline = generatePlaywrightTest(NOTED, { name: 'Shop' })
+    expect(inline).toMatch(/\/\/ ── Checkout phase/)
+    const pom = generatePageObjectTest(NOTED, { name: 'Shop' })!
+    expect(pom.spec).toMatch(/\/\/ ── Checkout phase/)
+    // It is documentation, not behaviour: nothing is awaited for it.
+    expect(inline).not.toMatch(/await.*Checkout phase/)
+  })
+
+  it('a note cannot comment out the code beneath it', () => {
+    // The break §harness describes, aimed straight at this step type: the note
+    // text is the one thing in a spec that is fully user-authored AND lands in
+    // a `//` line. A newline in it would turn the next statement into prose.
+    const nasty = [
+      s({ type: 'navigate', url: 'https://shop.example.com/' }),
+      s({ type: 'comment', label: 'line one\nline two */ await page.evaluate("pwned")' }),
+      s({ type: 'click', selector: "getByRole('button', { name: 'Pay' })", label: 'Pay' })
+    ] as never as RecorderStep[]
+    expect(syntaxErrors(generatePlaywrightTest(nasty, { name: 'Shop' }))).toEqual([])
+  })
+
+  it('stepText names each one in plain language', () => {
+    expect(stepText(PAGE_SCROLL[1])).toBe('Scroll to the bottom of the page')
+    expect(stepText(ELEMENT_SCROLL[1])).toBe('Scroll to Reviews')
+    expect(stepText(HTML5_DRAG[1])).toBe('Drag Write the spec onto Done')
+    expect(stepText(SLIDER_DRAG[1])).toBe('Drag Max price by 120,0 pixels')
+    expect(stepText(NOTED[1])).toBe('💬 Checkout phase — card is a Stripe test number')
+  })
+})
