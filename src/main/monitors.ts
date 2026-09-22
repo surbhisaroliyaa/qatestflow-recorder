@@ -12,7 +12,7 @@
 // shortcut. On platforms that build cannot schedule on, the original limit
 // stands and the UI says so.
 import { app } from 'electron'
-import { readFile, writeFile } from 'fs/promises'
+import { readFile, writeFile, rename } from 'fs/promises'
 import { join } from 'path'
 
 export interface MonitorRun {
@@ -70,7 +70,23 @@ async function load(): Promise<MonitorState> {
 
 async function persist(state: MonitorState): Promise<void> {
   cache = state
-  await writeFile(storePath(), JSON.stringify(state, null, 2), 'utf-8')
+  // Written via a temp file and renamed, because this store now has TWO
+  // writers: the app, and the CLI invoked by the Windows scheduler for a
+  // "🌙 runs when closed" monitor. A plain writeFile that is interrupted
+  // half-way leaves truncated JSON, which would lose every monitor the user
+  // has. rename is atomic on the same volume, so a reader sees either the old
+  // file or the new one, never a half-written one.
+  //
+  // HONEST LIMIT: this prevents a CORRUPT file, not a LOST update. If the app
+  // is open when a scheduled run records into its history, whichever process
+  // writes last wins — the app holds its own copy in memory. Background runs
+  // are the case this exists for and the app is closed for those, so the
+  // overlap is the rare one; it is not fixed here, and it is not pretended to
+  // be a lock.
+  const target = storePath()
+  const tmp = `${target}.${process.pid}.tmp`
+  await writeFile(tmp, JSON.stringify(state, null, 2), 'utf-8')
+  await rename(tmp, target)
 }
 
 export async function listMonitors(): Promise<Monitor[]> {

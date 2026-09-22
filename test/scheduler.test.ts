@@ -164,3 +164,37 @@ describe('§ platforms it does not support', () => {
     expect(unavailableMessage('darwin')).toMatch(/while the app is open/)
   })
 })
+
+// The scheduled command must carry the monitor id, or the background run has
+// nothing to record itself against — which is how "🌙 runs when closed" ended
+// up producing one overwritten report file and an empty history in the app.
+describe('the scheduled command records against its monitor', () => {
+  const plan = buildCreateTask(
+    { monitorId: 'mon-1790083554332', testName: 'mozilla.org flow', intervalMin: 5 },
+    String.raw`C:\Apps\QATestFlow Recorder.exe`,
+    String.raw`C:\Reports\out.xml`
+  )
+  const tr = plan.args[plan.args.indexOf('/tr') + 1] ?? plan.args.join(' ')
+
+  it('passes --monitor with the id', () => {
+    expect(tr).toContain('--monitor "mon-1790083554332"')
+  })
+
+  it('still runs the right test and writes the report', () => {
+    expect(tr).toContain('--grep "mozilla.org flow"')
+    expect(tr).toContain('--reporter junit')
+    expect(tr).toContain(String.raw`--out "C:\Reports\out.xml"`)
+  })
+
+  it('strips quotes from the id rather than breaking the /TR argument', () => {
+    // The id is data. A quote in it would end the /TR string early and schtasks
+    // would take the rest as its own arguments.
+    const evil = buildCreateTask(
+      { monitorId: 'mon-"1"', testName: 't', intervalMin: 5 },
+      'exe',
+      'r.xml'
+    )
+    const cmd = evil.args[evil.args.indexOf('/tr') + 1] ?? evil.args.join(' ')
+    expect(cmd).toContain('--monitor "mon-1"')
+  })
+})

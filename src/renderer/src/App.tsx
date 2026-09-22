@@ -532,6 +532,12 @@ function App(): React.JSX.Element {
     available: boolean
     message?: string
   } | null>(null)
+  // Is the Windows task query in flight? `schtasks /query` takes ~1s because it
+  // enumerates EVERY task on the machine, and for that second the 🌙 boxes used
+  // to render as confident, enabled, unticked — stating "not scheduled" when the
+  // honest answer was "not asked yet". That is the same lie the whole
+  // read-from-the-OS design exists to prevent, just briefer.
+  const [schedulerLoading, setSchedulerLoading] = useState(false)
   // Phase 4: the outbound-integration settings, open when non-null.
   const [integrations, setIntegrations] = useState<IntegrationConfigShape | null>(null)
   // Phase 4: the outcome of importing a portable (YAML/JSON) test — either the
@@ -6247,9 +6253,43 @@ function App(): React.JSX.Element {
   // Phase 4: ask the OS which of our monitors are really scheduled. The task
   // names carry the monitor id, so the mapping back is the name minus prefix.
   const refreshScheduled = async (): Promise<void> => {
-    const res = await window.api.scheduler.list()
-    setSchedulerInfo({ available: res.available, message: res.message })
-    setScheduledIds(res.tasks.map((name) => name.replace(/^QATestFlow-/, '')))
+    setSchedulerLoading(true)
+    try {
+      const res = await window.api.scheduler.list()
+      setSchedulerInfo({ available: res.available, message: res.message })
+      setScheduledIds((res.tasks ?? []).map((name) => name.replace(/^QATestFlow-/, '')))
+    } catch (e) {
+      // This used to be called as `void refreshScheduled()` with no catch, so a
+      // failure here disappeared completely: no message, no console entry, and
+      // every 🌙 box rendered confidently unticked. A whole debugging session
+      // went on the difference between "not scheduled" and "never found out".
+      setSchedulerInfo({
+        available: false,
+        message: `Could not read the scheduled state: ${(e as Error)?.message ?? String(e)}`
+      })
+      setScheduledIds([])
+    } finally {
+      setSchedulerLoading(false)
+    }
+  }
+
+  // ONE way to open the Monitors panel, because there are two buttons that do
+  // it: the workspace toolbar and the welcome screen's library. Only the toolbar
+  // one used to refresh the scheduled state, so opening Monitors from the
+  // welcome screen showed every 🌙 box unticked — with available: true and no
+  // error, which is indistinguishable from "nothing is scheduled" while a
+  // healthy task sat in Windows. The state has to be re-read on open because it
+  // can change outside this app entirely.
+  const openMonitors = async (): Promise<void> => {
+    setMonTestSel('')
+    setMonHistoryFor(null)
+    setMonitorsOpen(true)
+    // Re-read the store, not just the Windows task list. A "🌙 runs when
+    // closed" monitor is run by the CLI in a SEPARATE process, which appends to
+    // the same file — so the copy this window loaded at startup is stale the
+    // moment a background run happens. Without this the history would only
+    // catch up on a restart.
+    await Promise.all([window.api.monitors.list().then(setMonitors), refreshScheduled()])
   }
 
   // Turn "keep running when the app is closed" on or off for one monitor.
@@ -6357,6 +6397,7 @@ function App(): React.JSX.Element {
     <MonitorsModal
       scheduledIds={scheduledIds}
       schedulerInfo={schedulerInfo}
+      schedulerLoading={schedulerLoading}
       onToggleBackground={handleToggleBackground}
       monitorsOpen={monitorsOpen}
       setMonitorsOpen={setMonitorsOpen}
@@ -6652,9 +6693,7 @@ function App(): React.JSX.Element {
             setImportDone={setImportDone}
             setLibraryFilter={setLibraryFilter}
             setLibrarySearch={setLibrarySearch}
-            setMonHistoryFor={setMonHistoryFor}
-            setMonTestSel={setMonTestSel}
-            setMonitorsOpen={setMonitorsOpen}
+            openMonitors={openMonitors}
             setParallelMode={setParallelMode}
             setParallelWorkers={setParallelWorkers}
             setSelectedTests={setSelectedTests}
@@ -7335,13 +7374,7 @@ function App(): React.JSX.Element {
                 <button
                   className={`data-btn${monitors.some((m) => m.enabled) ? ' monitoring' : ''}`}
                   onClick={() => {
-                    setMonTestSel('')
-                    setMonHistoryFor(null)
-                    setMonitorsOpen(true)
-                    // Phase 4: ask the OS which monitors are really scheduled,
-                    // every time the panel opens — the answer can change
-                    // outside this app.
-                    void refreshScheduled()
+                    void openMonitors()
                   }}
                   title="Monitors: scheduled re-runs of saved tests, with failure alerts. Tick “runs when closed” on one to keep it running after you quit."
                 >

@@ -24,6 +24,9 @@ export interface MonitorsModalProps {
   // null while we have not asked yet; available:false on a platform this build
   // cannot schedule on, with a message saying what DOES still work.
   schedulerInfo: { available: boolean; message?: string } | null
+  // True while Windows is being asked. Rendered as "checking…" rather than as an
+  // unticked box, so the panel never states an answer it does not have yet.
+  schedulerLoading: boolean
   onToggleBackground: (
     monitor: { id: string; name: string; intervalMin: number },
     on: boolean
@@ -59,6 +62,7 @@ export interface MonitorsModalProps {
 export function MonitorsModal({
   scheduledIds,
   schedulerInfo,
+  schedulerLoading,
   onToggleBackground,
   monitorsOpen,
   setMonitorsOpen,
@@ -96,9 +100,10 @@ export function MonitorsModal({
         <div className="ac-body">
           <p className="api-hint">
             A monitor re-runs a saved test on a schedule (headless) and pops a desktop alert when it
-            fails — catching regressions between your manual runs.{' '}
-            <strong>It only runs while this app is open</strong> (there’s no background service),
-            and it needs Playwright installed (same as cross-browser).
+            fails — catching regressions between your manual runs. By default it runs{' '}
+            <strong>while this app is open</strong>; tick <strong>🌙 runs when closed</strong> on a
+            monitor to hand its schedule to Windows so it keeps going after you quit. Either way it
+            needs Playwright installed (same as cross-browser).
           </p>
           {monRunningId && (
             <p className="api-hint" style={{ color: '#7fd39a' }}>
@@ -367,22 +372,31 @@ export function MonitorsModal({
                             monitor stopped the moment the window closed, which
                             made it a timer rather than a monitor. This hands the
                             schedule to the OS, which keeps it across reboots. */}
-                        <label
-                          className="mon-bg"
-                          title={
-                            schedulerInfo?.available === false
-                              ? schedulerInfo.message
-                              : 'Keep running this monitor after the app is closed (uses the OS scheduler)'
-                          }
-                        >
-                          <input
-                            type="checkbox"
-                            disabled={schedulerInfo?.available === false}
-                            checked={scheduledIds.includes(m.id)}
-                            onChange={(e) => onToggleBackground(m, e.target.checked)}
-                          />{' '}
-                          🌙 runs when closed
-                        </label>{' '}
+                        {schedulerLoading ? (
+                          <span
+                            className="mon-bg"
+                            title="Asking Windows which monitors are scheduled…"
+                          >
+                            ⏳ checking…
+                          </span>
+                        ) : (
+                          <label
+                            className="mon-bg"
+                            title={
+                              schedulerInfo?.available === false
+                                ? schedulerInfo.message
+                                : 'Keep running this monitor after the app is closed (uses the OS scheduler)'
+                            }
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={schedulerInfo?.available === false}
+                              checked={scheduledIds.includes(m.id)}
+                              onChange={(e) => onToggleBackground(m, e.target.checked)}
+                            />{' '}
+                            🌙 runs when closed
+                          </label>
+                        )}{' '}
                         ·{' '}
                         {last
                           ? `last run ${last.status} at ${new Date(last.at).toLocaleTimeString()}`

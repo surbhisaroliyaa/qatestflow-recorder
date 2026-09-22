@@ -64,9 +64,11 @@ export interface SavedTestLibraryProps {
   setImportDone: React.Dispatch<React.SetStateAction<string | null>>
   setLibraryFilter: React.Dispatch<React.SetStateAction<'all' | 'failing' | 'passing' | 'flaky'>>
   setLibrarySearch: React.Dispatch<React.SetStateAction<string>>
-  setMonHistoryFor: React.Dispatch<React.SetStateAction<string | null>>
-  setMonTestSel: React.Dispatch<React.SetStateAction<string>>
-  setMonitorsOpen: React.Dispatch<React.SetStateAction<boolean>>
+  // Opens the Monitors panel AND re-reads which monitors Windows really has
+  // scheduled. This button used to call setMonitorsOpen directly and skipped
+  // that read, so every 🌙 box showed unticked here while the toolbar's copy of
+  // the same panel showed the truth.
+  openMonitors: () => Promise<void>
   setParallelMode: React.Dispatch<React.SetStateAction<boolean>>
   setParallelWorkers: React.Dispatch<React.SetStateAction<number>>
   setSelectedTests: React.Dispatch<React.SetStateAction<Set<string>>>
@@ -121,9 +123,7 @@ export function SavedTestLibrary({
   setImportDone,
   setLibraryFilter,
   setLibrarySearch,
-  setMonHistoryFor,
-  setMonTestSel,
-  setMonitorsOpen,
+  openMonitors,
   setParallelMode,
   setParallelWorkers,
   setSelectedTests,
@@ -220,12 +220,8 @@ export function SavedTestLibrary({
           <button
             type="button"
             className={`env-bar-manage${monitors.some((m) => m.enabled) ? ' monitoring' : ''}`}
-            onClick={() => {
-              setMonTestSel('')
-              setMonHistoryFor(null)
-              setMonitorsOpen(true)
-            }}
-            title="Monitors: re-run a saved test on a schedule and get a desktop alert when it fails (runs while the app is open)"
+            onClick={() => void openMonitors()}
+            title="Monitors: re-run a saved test on a schedule and get a desktop alert when it fails. Tick 🌙 runs when closed on one to keep it running after you quit."
           >
             📡 Monitors{monitors.length ? ` (${monitors.length})` : ''}
           </button>

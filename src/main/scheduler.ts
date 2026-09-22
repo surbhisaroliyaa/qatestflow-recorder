@@ -101,6 +101,11 @@ export function buildCreateTask(
     'run',
     '--grep',
     `"${run.testName.replace(/"/g, '')}"`,
+    // So the background run lands in this monitor's history. Without it the
+    // feature's whole output was one report file that each run overwrote, and
+    // the app showed nothing at all for runs made while it was closed.
+    '--monitor',
+    `"${run.monitorId.replace(/"/g, '')}"`,
     '--reporter',
     'junit',
     '--out',

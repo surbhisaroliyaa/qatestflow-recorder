@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   CliError,
   exitCodeFor,
+  HELP_TEXT,
   formatJunit,
   formatReport,
   parseArgs,
@@ -407,5 +408,36 @@ describe('environment variables the generated specs need', () => {
     expect(text).toContain('needed by 2 tests')
     expect(text).toContain('"Login"')
     expect(text).toContain('Nothing was run.')
+  })
+})
+
+// =====================================================================
+// § --monitor
+//
+// Set only by the scheduled task the app writes for "🌙 runs when closed", so
+// a background run lands in that monitor's history. Before it, the feature's
+// entire output was one report file that each run overwrote, and the app showed
+// nothing for runs made while it was closed — a monitor that ran all night
+// looked like it had never run.
+//
+// Deliberately absent from --help: it is machinery, not something to type.
+// =====================================================================
+describe('the --monitor flag', () => {
+  it('carries the monitor id through', () => {
+    const o = parseArgs(['run', '--monitor', 'mon-1790083554332'])
+    expect(o?.monitorId).toBe('mon-1790083554332')
+  })
+
+  it('accepts the --monitor=id form too', () => {
+    expect(parseArgs(['run', '--monitor=mon-42'])?.monitorId).toBe('mon-42')
+  })
+
+  it('is absent unless asked for', () => {
+    // An ordinary run must not record against anything.
+    expect(parseArgs(['run', '--suite', 'E2E'])?.monitorId).toBeUndefined()
+  })
+
+  it('stays out of the help text', () => {
+    expect(HELP_TEXT).not.toContain('--monitor')
   })
 })

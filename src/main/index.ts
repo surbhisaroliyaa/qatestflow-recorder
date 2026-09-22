@@ -5786,7 +5786,19 @@ function createWindow(): void {
         return { available: false, message: unavailableMessage(), tasks: [] }
       }
       const res = await runSchtasks(buildQueryTasks())
-      return { available: true, tasks: res.ok ? parseTaskList(res.out) : [] }
+      // "Windows says this monitor is not scheduled" and "I could not ask
+      // Windows" are DIFFERENT answers, and returning [] for both stated the
+      // first one with total confidence while meaning the second. A 🌙 box that
+      // reads unticked because a query failed is a lie about the machine —
+      // exactly what reading from the OS was supposed to prevent.
+      if (!res.ok) {
+        return {
+          available: false,
+          message: `Could not read the Windows task list, so the 🌙 state below is unknown: ${res.error ?? 'schtasks failed'}`,
+          tasks: []
+        }
+      }
+      return { available: true, tasks: parseTaskList(res.out) }
     }
   )
 
@@ -6969,6 +6981,30 @@ async function runCli(opts: CliOptions): Promise<number> {
   } else {
     cliOut(text)
   }
+  // A scheduled "🌙 runs when closed" run writes itself into the monitor's
+  // history, so the app can show what happened while it was shut. Before this,
+  // the only trace was ONE report file that every run overwrote, and the panel
+  // showed "last run" from whenever the app had last been open — a monitor that
+  // ran all night looked like it had never run at all.
+  //
+  // Best-effort on purpose: the tests really did run and their exit code is the
+  // truth. Failing the run because a history file could not be updated would
+  // turn a bookkeeping problem into a red build.
+  if (opts.monitorId) {
+    try {
+      const failed = report.results.filter((r) => !r.ok)
+      await recordMonitorRun(opts.monitorId, {
+        at: new Date().toISOString(),
+        status: failed.length ? 'failed' : 'passed',
+        detail: failed.length
+          ? `${failed.length} of ${report.total} failed — e.g. ${failed[0].name}: ${failed[0].error ?? 'no message'}`
+          : undefined
+      })
+    } catch {
+      // history is a nicety; the run's own result is not affected
+    }
+  }
+
   return exitCodeFor(report, opts)
 }
 

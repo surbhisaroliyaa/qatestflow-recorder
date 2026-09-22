@@ -48,6 +48,15 @@ export interface CliOptions {
   /** Write the report here instead of (only) stdout. */
   out?: string
   workers: number
+  /**
+   * Record this run against a monitor's history (the monitor's id).
+   *
+   * Set only by the scheduled task the app creates for "🌙 runs when closed" —
+   * it is not for people to type, which is why it is absent from --help. Without
+   * it a monitor that ran all night with the app closed left no trace in the
+   * app: its history and "last run" only ever showed in-app runs.
+   */
+  monitorId?: string
   /** Exit 0 even when tests failed — for a pipeline stage that only collects. */
   allowFailures: boolean
 }
@@ -67,7 +76,8 @@ const VALUE_FLAGS = new Set([
   '--grep',
   '--reporter',
   '--out',
-  '--workers'
+  '--workers',
+  '--monitor'
 ])
 
 export class CliError extends Error {}
@@ -159,6 +169,9 @@ export function parseArgs(argv: string[]): CliOptions | null {
         break
       case '--out':
         opts.out = value
+        break
+      case '--monitor':
+        opts.monitorId = value
         break
       case '--workers': {
         const n = Number(value)
