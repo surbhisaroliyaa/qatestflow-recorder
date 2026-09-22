@@ -19,7 +19,14 @@ import {
   osEnvCollisions
 } from './playwrightExport'
 import { generateBugReport, bugReportFileName, jiraSummary } from './bugReport'
-import { dataColumns, substituteSteps, resolveRow, envVarNames, toColumnName } from './dataDriven'
+import {
+  dataColumns,
+  substituteSteps,
+  resolveRow,
+  envVarNames,
+  toColumnName,
+  unresolvedDataColumns
+} from './dataDriven'
 import {
   retargetSteps,
   retargetHostMismatch,
@@ -2604,7 +2611,7 @@ function App(): React.JSX.Element {
       // the application, and a webhook being down says nothing about it. The
       // toast says so in as many words, so a red-looking warning beside a green
       // run does not read as a contradiction.
-      if (!res.ok && !res.skipped) {
+      if (!res.ok && !res.skipped && !res.unconfigured) {
         const why = res.error ?? 'The postback did not arrive.'
         setPostbackError(why)
         showPostbackToast(why)
@@ -4400,7 +4407,16 @@ function App(): React.JSX.Element {
           category: result.category,
           healed: result.aiHealed,
           // Read from the ref: applyEnv set it while building THIS test's steps.
-          unresolvedEnv: unresolvedEnvRef.current.length ? [...unresolvedEnvRef.current] : undefined
+          unresolvedEnv: unresolvedEnvRef.current.length
+            ? [...unresolvedEnvRef.current]
+            : undefined,
+          // Computed from the test itself rather than from a ref: this one is
+          // knowable before the run, and saying so afterwards is still better
+          // than letting the failure be blamed on the page.
+          unresolvedData: (() => {
+            const missing = unresolvedDataColumns(flatSuite, data.dataRows)
+            return missing.length ? missing : undefined
+          })()
         }
         // B: this test's selectors auto-healed — capture the REPAIRED display
         // steps (block-aware, updated by the auto-heal events) so the report can

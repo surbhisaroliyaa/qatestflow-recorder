@@ -702,8 +702,13 @@ const api = {
     postback: (
       settings: { when: string; url: string; headers: string },
       run: Record<string, unknown>
-    ): Promise<{ ok: boolean; skipped?: boolean; status?: number; error?: string }> =>
-      ipcRenderer.invoke('postback:send', settings, run),
+    ): Promise<{
+      ok: boolean
+      skipped?: boolean
+      unconfigured?: boolean
+      status?: number
+      error?: string
+    }> => ipcRenderer.invoke('postback:send', settings, run),
     gitlabIssue: (cfg: {
       baseUrl: string
       token: string

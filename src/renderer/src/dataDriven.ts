@@ -101,6 +101,33 @@ export function dataColumns(steps: RecorderStep[]): string[] {
   return cols
 }
 
+/**
+ * Data columns this test needs that the data table cannot supply.
+ *
+ * A `{{username}}` with no row behind it does not fail where you typed it. It
+ * resolves to an empty string, the field takes it, the click submits, and the
+ * run dies on an assertion several steps later — which the failure classifier
+ * then files as "stale data", pointing at the test rather than at the missing
+ * data. Surbhi hit exactly this: a test carrying {{username}}/{{password}} and
+ * `dataRows: none` was reported as a URL assertion failure.
+ *
+ * The same shape as the `{{env:…}}` warning beside it, and the same shape as
+ * the CLI's missing-PASSWORD refusal: an unresolved placeholder must be named
+ * where it is missing, not where it eventually hurts.
+ *
+ * A column counts as unresolved when NO row supplies a non-empty value for it —
+ * which covers both "no rows at all" and "a column nobody filled in".
+ */
+export function unresolvedDataColumns(
+  steps: RecorderStep[],
+  rows: Record<string, string>[] | undefined
+): string[] {
+  const cols = dataColumns(steps)
+  if (!cols.length) return []
+  if (!rows?.length) return cols
+  return cols.filter((c) => !rows.some((r) => (r?.[c] ?? '').trim() !== ''))
+}
+
 // Every environment variable name referenced — by the steps AND by the data
 // rows' cells (a cell may itself be "{{env:REAL_PW}}"). The renderer resolves
 // these once (via main) before a run.

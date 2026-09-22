@@ -689,7 +689,16 @@ interface API {
     postback: (
       settings: { when: string; url: string; headers: string },
       run: Record<string, unknown>
-    ) => Promise<{ ok: boolean; skipped?: boolean; status?: number; error?: string }>
+    ) => Promise<{
+      ok: boolean
+      /** The policy said not to send (e.g. "on failure" and the run passed). */
+      skipped?: boolean
+      /** Armed, but no URL typed yet — nothing was attempted, so this is NOT a
+       *  failed delivery and must not be reported as one. */
+      unconfigured?: boolean
+      status?: number
+      error?: string
+    }>
     gitlabIssue: (cfg: {
       baseUrl: string
       token: string

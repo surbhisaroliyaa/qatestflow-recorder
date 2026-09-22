@@ -5620,10 +5620,23 @@ function createWindow(): void {
       _event,
       settings: PostbackSettings,
       run: RunSummary
-    ): Promise<{ ok: boolean; skipped?: boolean; status?: number; error?: string }> => {
+    ): Promise<{
+      ok: boolean
+      skipped?: boolean
+      /** Armed, but not set up yet — nothing was attempted. */
+      unconfigured?: boolean
+      status?: number
+      error?: string
+    }> => {
       if (!shouldPost(settings?.when ?? 'off', run.ok)) return { ok: true, skipped: true }
       const urlError = postbackUrlError(settings.url)
-      if (urlError) return { ok: false, error: urlError }
+      // Flagged as UNCONFIGURED, not as a failed delivery. Nothing was sent, so
+      // "didn't arrive" would be false — and with the postback armed but no URL
+      // typed, every single run would say it. The Integrations panel already
+      // shows this error beside the URL box, which is where it gets fixed; a
+      // toast on every run would be noise in front of the one notice that has
+      // to be believed, a receiver that really did not answer.
+      if (urlError) return { ok: false, unconfigured: true, error: urlError }
 
       // The failure message quotes the page, so the evidence-privacy policy has
       // to reach it too — this payload LEAVES the machine, which the page HTML

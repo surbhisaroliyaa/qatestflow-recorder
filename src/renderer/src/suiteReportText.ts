@@ -64,6 +64,40 @@ export const generateSuiteReport = (suiteRun: SuiteRunState | null): string => {
       lines.push('')
     }
   }
+  // The same warning one layer over: a data column with no row behind it.
+  // Kept as its own block rather than merged with the env one, because the fix
+  // is different — an env var is set outside the app, a data column is filled
+  // in the test's own data table.
+  {
+    const byCol = new Map<string, string[]>()
+    for (const r of suiteRun.results) {
+      for (const c of r.unresolvedData ?? []) {
+        byCol.set(c, [...(byCol.get(c) ?? []), r.name])
+      }
+    }
+    if (byCol.size) {
+      lines.push('## ⚠ Data columns with no value', '')
+      lines.push(
+        'Each was replaced with an empty string. A failure below may be this test having no ' +
+          'data to run with rather than the page being wrong — the run typically dies on an ' +
+          'assertion several steps after the empty field.',
+        ''
+      )
+      for (const [c, tests] of byCol) {
+        lines.push(
+          '- `{{' +
+            c +
+            '}}` — ' +
+            tests.length +
+            ' test' +
+            (tests.length === 1 ? '' : 's') +
+            ': ' +
+            tests.join(', ')
+        )
+      }
+      lines.push('')
+    }
+  }
   if (suiteRun.healables?.length) {
     lines.push('## Healable failures (review before accepting)', '')
     for (const hf of suiteRun.healables) {

@@ -8,7 +8,8 @@ import {
   stepHasTokens,
   substituteSteps,
   substituteText,
-  toColumnName
+  toColumnName,
+  unresolvedDataColumns
 } from '../src/renderer/src/dataDriven'
 
 // Every case here is a bug that actually shipped, or the invariant that stops it
@@ -238,5 +239,72 @@ describe('toColumnName', () => {
     expect(toColumnName('')).toBe('value')
     expect(toColumnName(undefined)).toBe('value')
     expect(toColumnName('!!!')).toBe('value')
+  })
+})
+
+// =====================================================================
+// § data columns with no data
+//
+// A {{username}} with no row behind it does not fail where you typed it. It
+// resolves to an empty string, the field accepts it, the click submits, and the
+// run dies on an assertion several steps later — which the classifier then files
+// as "stale data", pointing at the page rather than at the missing data.
+//
+// Found in Round 13: "Label fallback check" carries {{username}}/{{password}}
+// and `dataRows: none`, and its suite report blamed a URL assertion. The
+// {{env:…}} warning beside it did not cover this, because these are not env
+// tokens.
+// =====================================================================
+describe('data columns a test cannot fill', () => {
+  const steps = [
+    { type: 'type', value: '{{username}}', selector: "getByTestId('username')" },
+    { type: 'type', value: '{{password}}', selector: "getByTestId('password')" }
+  ] as unknown as Parameters<typeof unresolvedDataColumns>[0]
+
+  it('names every column when there are no rows at all', () => {
+    expect(unresolvedDataColumns(steps, undefined)).toEqual(['username', 'password'])
+    expect(unresolvedDataColumns(steps, [])).toEqual(['username', 'password'])
+  })
+
+  it('says nothing when the rows supply them', () => {
+    const rows = [{ username: 'standard_user', password: 'secret_sauce' }]
+    expect(unresolvedDataColumns(steps, rows)).toEqual([])
+  })
+
+  it('names only the column nobody filled in', () => {
+    // A half-filled table is likelier than an empty one, and fails the same way.
+    const rows = [{ username: 'standard_user', password: '' }]
+    expect(unresolvedDataColumns(steps, rows)).toEqual(['password'])
+  })
+
+  it('counts a whitespace-only cell as unfilled', () => {
+    // " " typed into a password box is not a password; treating it as supplied
+    // would let the warning go quiet on exactly the run that needs it.
+    expect(unresolvedDataColumns(steps, [{ username: 'u', password: '   ' }])).toEqual(['password'])
+  })
+
+  it('is satisfied when ANY row supplies the column', () => {
+    // A matrix where one row deliberately leaves a field blank (a negative case)
+    // is not a missing column — warning there would cry wolf.
+    const rows = [
+      { username: 'u1', password: 'p' },
+      { username: 'u2', password: '' }
+    ]
+    expect(unresolvedDataColumns(steps, rows)).toEqual([])
+  })
+
+  it('ignores env, secret and runtime tokens — they have their own warning', () => {
+    const other = [
+      { type: 'type', value: '{{env:SAUCE_PW}}', selector: 'x' },
+      { type: 'type', value: '{{uuid}}', selector: 'y' }
+    ] as unknown as Parameters<typeof unresolvedDataColumns>[0]
+    expect(unresolvedDataColumns(other, undefined)).toEqual([])
+  })
+
+  it('says nothing for a test with no tokens at all', () => {
+    const plain = [{ type: 'click', selector: 'x' }] as unknown as Parameters<
+      typeof unresolvedDataColumns
+    >[0]
+    expect(unresolvedDataColumns(plain, undefined)).toEqual([])
   })
 })

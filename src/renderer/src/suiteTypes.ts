@@ -24,6 +24,11 @@ export interface SuiteRunEntry {
   // environment. Carried per-test because a suite can mix tests that need
   // different variables.
   unresolvedEnv?: string[]
+  // The same problem one layer over: data columns ({{username}}) with no row
+  // behind them. Also resolve to an empty string, also surface as a failure
+  // several steps later, and were NOT covered by the env warning above — so a
+  // test with no data at all was reported as "stale data" on an assertion.
+  unresolvedData?: string[]
   // F39: this result came from the headless parallel batch, not the in-app
   // replay engine. Shown in the report because the two aren't equivalent —
   // no self-heal, no recovery pause — so the reader should know which ran it.
