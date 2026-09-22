@@ -88,6 +88,28 @@ export function shouldPost(when: PostbackWhen, ok: boolean): boolean {
  * asserted exactly in a test — a timestamp is the one field that would
  * otherwise make the output untestable.
  */
+/**
+ * Put the evidence-privacy policy over the one free-text field in the payload.
+ *
+ * `error` is a Playwright assertion message, and those QUOTE THE PAGE: the text
+ * an element actually had, the URL actually reached. So a postback to a chat
+ * webhook or a public inbox can carry real data out of a staging environment,
+ * while the same patterns were busy scrubbing the page HTML, console, network
+ * and step titles that never left the machine.
+ *
+ * Takes the redactor rather than importing it, so this file stays free of main's
+ * settings loading and can be tested without one.
+ *
+ * NOT redacted: testName, suite, project and tags. Those are names the user
+ * chose and the receiver identifies the run by; blanking them would leave a
+ * payload nobody can act on. Said here so the gap is a decision, not a
+ * discovery.
+ */
+export function redactRunSummary(run: RunSummary, redactFn: (text: string) => string): RunSummary {
+  if (run.error === undefined) return run
+  return { ...run, error: redactFn(run.error) }
+}
+
 export function buildRunPayload(run: RunSummary, now = new Date()): PostbackPayload {
   const payload: PostbackPayload = {
     schema: 'qatestflow.run/1',

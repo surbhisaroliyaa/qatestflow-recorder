@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   DEFAULT_POSTBACK,
   buildRunPayload,
+  redactRunSummary,
   gitlabConfigError,
   gitlabIssuesUrl,
   isRetryable,
@@ -240,5 +241,54 @@ describe('§ GitLab', () => {
       /readable form/
     )
     expect(gitlabConfigError({ ...cfg, baseUrl: 'http://localhost:8929' })).toBe(null)
+  })
+})
+
+// =====================================================================
+// § the policy reaches the payload
+//
+// The postback is the one thing here that LEAVES the machine. The page HTML,
+// console and network that evidence-privacy already scrubs sit in a local
+// folder; this goes to a chat webhook, a CI server, or — in the test plan's own
+// instructions — a public inbox. And `error` is a Playwright assertion message,
+// which quotes the page: the text an element actually had, the URL reached.
+//
+// So it was the least protected field in the app and the most exposed.
+// =====================================================================
+describe('the evidence-privacy policy over a run summary', () => {
+  const run = {
+    testName: 'SauceDemo Positive Login',
+    ok: false,
+    total: 6,
+    failed: 1,
+    durationMs: 4310,
+    failedAtStep: 3,
+    error: 'Expected "Products" — actual: "standard_user is locked out"'
+  }
+  const scrub = (t: string): string => t.split('standard_user').join('[redacted]')
+
+  it('redacts the failure message', () => {
+    const out = redactRunSummary(run, scrub)
+    expect(out.error).toBe('Expected "Products" — actual: "[redacted] is locked out"')
+  })
+
+  it('reaches the payload the receiver actually gets', () => {
+    // Redacting the summary but building the payload from the raw run would
+    // look right in a unit test and leak in production.
+    const payload = buildRunPayload(redactRunSummary(run, scrub))
+    expect(payload.failure?.message).not.toContain('standard_user')
+    expect(JSON.stringify(payload)).not.toContain('standard_user')
+  })
+
+  it('leaves a run with no error alone, object identity and all', () => {
+    const passing = { ...run, ok: true, error: undefined }
+    expect(redactRunSummary(passing, scrub)).toBe(passing)
+  })
+
+  it('does not touch the fields the receiver identifies the run by', () => {
+    // A blanked test name is a payload nobody can act on. This is a decision,
+    // not an oversight — see the note on redactRunSummary.
+    const out = redactRunSummary({ ...run, testName: 'standard_user login' }, scrub)
+    expect(out.testName).toBe('standard_user login')
   })
 })

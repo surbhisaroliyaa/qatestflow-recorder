@@ -695,6 +695,16 @@ function App(): React.JSX.Element {
   const [lastTraceId, setLastTraceId] = useState<string | null>(null)
   // Phase 4: a postback that did not arrive, surfaced rather than swallowed.
   const [postbackError, setPostbackError] = useState<string | null>(null)
+  // 10s rather than the usual 6: this one names a URL or a DNS error, which is
+  // longer to read than "no checks were added", and it is the only notice that
+  // something downstream did not hear about this run.
+  const showPostbackToast = (why: string): void => {
+    setAiToast({
+      tone: 'warn',
+      msg: `⚠ Postback didn't arrive: ${why} — the run result is unaffected.`
+    })
+    window.setTimeout(() => setAiToast(null), 10000)
+  }
   // Phase 4: the .webm this run produced, if the policy kept one. Lives in the
   // run's trace folder, so it is opened through the same guarded handler.
   const [lastVideoFile, setLastVideoFile] = useState<string | null>(null)
@@ -2566,7 +2576,15 @@ function App(): React.JSX.Element {
         total: steps.filter((s) => !s.disabled).length,
         failed: result.ok ? 0 : 1,
         durationMs: result.durationMs ?? 0,
-        failedAtStep: result.failedAt === undefined ? undefined : result.failedAt + 1,
+        // toDisplayIdx, not the raw index. `failedAt` counts the EXPANDED run
+        // plan — buildRunPlan flattens linked blocks before a run — while
+        // `total` above counts the steps as shown in the editor. Sending the raw
+        // one put two different numbering systems in the same payload: a test
+        // with 11 steps and one block reported "step 12 of 11", and a receiver
+        // has no way to know it is being handed an index into a list it cannot
+        // see. Every other consumer of failedAt already maps it; this one did
+        // not.
+        failedAtStep: result.failedAt === undefined ? undefined : toDisplayIdx(result.failedAt) + 1,
         error: result.error,
         suite: testSuite || undefined,
         project: testProject || undefined,
@@ -2575,10 +2593,25 @@ function App(): React.JSX.Element {
       })
       // A postback nobody told you about failing is the whole problem this
       // feature exists to avoid — something downstream is WAITING for this.
-      if (!res.ok && !res.skipped) setPostbackError(res.error ?? 'The postback did not arrive.')
-      else setPostbackError(null)
+      //
+      // Said in TWO places on purpose. The 🔗 Integrations panel keeps the last
+      // error for when you go looking; the toast is for when you are not, which
+      // is every ordinary run. Until this existed the only surface was a
+      // settings panel nobody opens, so a release gate could stop receiving
+      // results and the first anyone knew was a stale dashboard.
+      //
+      // Deliberately NOT a failed run: the test's own result is the truth about
+      // the application, and a webhook being down says nothing about it. The
+      // toast says so in as many words, so a red-looking warning beside a green
+      // run does not read as a contradiction.
+      if (!res.ok && !res.skipped) {
+        const why = res.error ?? 'The postback did not arrive.'
+        setPostbackError(why)
+        showPostbackToast(why)
+      } else setPostbackError(null)
     } catch {
       setPostbackError('The postback could not be sent.')
+      showPostbackToast('The postback could not be sent.')
     }
   }
 

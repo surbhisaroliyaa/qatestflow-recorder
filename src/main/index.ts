@@ -92,6 +92,7 @@ import { loadIntegrations, saveIntegrations, type IntegrationSettings } from './
 // Phase 4: the machine-readable "a run finished" notification, and GitLab.
 import {
   buildRunPayload,
+  redactRunSummary,
   gitlabConfigError,
   gitlabIssuesUrl,
   isRetryable,
@@ -5624,7 +5625,18 @@ function createWindow(): void {
       const urlError = postbackUrlError(settings.url)
       if (urlError) return { ok: false, error: urlError }
 
-      const body = JSON.stringify(buildRunPayload(run))
+      // The failure message quotes the page, so the evidence-privacy policy has
+      // to reach it too — this payload LEAVES the machine, which the page HTML
+      // and console it already scrubs never do.
+      let privacy: PrivacySettings = { ...DEFAULT_PRIVACY }
+      try {
+        privacy = await loadPrivacy()
+      } catch {
+        // Failing OPEN, as loadPrivacy does elsewhere.
+      }
+      const body = JSON.stringify(
+        buildRunPayload(redactRunSummary(run, (text) => redact(text, privacy)))
+      )
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...parseHeaders(settings.headers ?? '')
