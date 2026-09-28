@@ -58,9 +58,15 @@ export interface RunSummary {
    *  fetch it — it's a local folder — but naming it is what lets a human find
    *  the run a dashboard is pointing at. */
   traceId?: string
+  /** A data-driven run: how many rows ran and how many failed. The whole run
+   *  is ONE postback — per-row postbacks gave a receiver N separate "runs" of
+   *  the same test with no way to tell they belonged together. */
+  rows?: { total: number; failed: number }
 }
 
-/** The wire format. Versioned because somebody else's code depends on it. */
+/** The wire format. Versioned because somebody else's code depends on it.
+ *  `rows` was added later as an OPTIONAL field — a receiver written before it
+ *  still reads every field it knew about, so the schema stays at /1. */
 export interface PostbackPayload {
   schema: 'qatestflow.run/1'
   sentAt: string
@@ -73,6 +79,7 @@ export interface PostbackPayload {
   durationMs: number
   failure?: { step: number; message: string }
   traceId?: string
+  rows?: { total: number; failed: number }
 }
 
 export function shouldPost(when: PostbackWhen, ok: boolean): boolean {
@@ -123,6 +130,7 @@ export function buildRunPayload(run: RunSummary, now = new Date()): PostbackPayl
   if (run.project) payload.project = run.project
   if (run.tags?.length) payload.tags = run.tags
   if (run.traceId) payload.traceId = run.traceId
+  if (run.rows) payload.rows = { total: run.rows.total, failed: run.rows.failed }
   if (!run.ok && run.failedAtStep !== undefined) {
     payload.failure = { step: run.failedAtStep, message: run.error ?? 'Step failed' }
   }

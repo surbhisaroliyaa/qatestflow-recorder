@@ -88,6 +88,32 @@ describe('§ the payload is a contract', () => {
     expect('project' in bare).toBe(false)
     expect('tags' in bare).toBe(false)
     expect('failure' in bare).toBe(false)
+    expect('rows' in bare).toBe(false)
+  })
+
+  it('a data-driven run is ONE payload that says how many rows ran and failed', () => {
+    // Per-row postbacks gave a receiver N "runs" of the same test with no way
+    // to tell they belonged together. The run's verdict is red if any row is.
+    const payload = buildRunPayload(
+      {
+        ...RUN,
+        ok: false,
+        failed: 1,
+        failedAtStep: 3,
+        error: '2/5 rows failed — e.g. locked_out_user: Epic sadface',
+        rows: { total: 5, failed: 2 }
+      },
+      AT
+    )
+    expect(payload.status).toBe('failed')
+    expect(payload.rows).toEqual({ total: 5, failed: 2 })
+    expect(payload.failure).toEqual({
+      step: 3,
+      message: '2/5 rows failed — e.g. locked_out_user: Epic sadface'
+    })
+    // Additive field on the same schema — a receiver written before it still
+    // finds everything it knew about.
+    expect(payload.schema).toBe('qatestflow.run/1')
   })
 
   it('carries a status a machine can branch on, not prose', () => {

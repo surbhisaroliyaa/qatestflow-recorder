@@ -918,6 +918,9 @@ function App(): React.JSX.Element {
   // handleRunData); cleared by resolveEnvForRun, which every run goes through
   // first — so a run that binds no row never shows an earlier run's warning.
   const unresolvedDataRef = useRef<string[]>([])
+  // True while handleRunData loops over rows, so runOnce skips its per-run
+  // postback — the data run sends ONE for all rows at the end.
+  const dataRunActiveRef = useRef(false)
   const toDisplayIdx = (i: number): number => runPlanRef.current?.[i] ?? i
 
   // A1 (scalable library): the flaky tag for a test (from its run history) + a
@@ -2402,6 +2405,7 @@ function App(): React.JSX.Element {
     screenshotPath?: string
     aborted?: boolean
     traceId?: string
+    durationMs?: number // timed by main; a data run sums it for its one postback
     consoleErrors?: string[]
     networkErrors?: string[]
     failures?: {
@@ -2500,7 +2504,9 @@ function App(): React.JSX.Element {
       // as JSON it can branch on. Deliberately NOT awaited — a slow or dead
       // receiver must not hold up the UI showing the result, and a postback
       // that fails is reported where the user can see it rather than thrown.
-      void sendPostback(result)
+      // A data-driven row does NOT post: handleRunData sends one postback for
+      // the whole run once every row is done.
+      if (!dataRunActiveRef.current) void sendPostback(result)
       // F37: surface untaken branches / empty loops on PASS as well as fail —
       // a green run that skipped its checks is exactly the case worth flagging.
       setBranchNotes(result.branchNotes ?? [])
@@ -2591,6 +2597,8 @@ function App(): React.JSX.Element {
     // Timed by MAIN, which owns the run — a renderer-side clock would also be
     // measuring IPC round trips and whatever else the UI was doing.
     durationMs?: number
+    // A data-driven run's ONE postback: how many rows ran / failed.
+    rows?: { total: number; failed: number }
   }): Promise<void> => {
     let counted = false
     try {
@@ -2630,7 +2638,8 @@ function App(): React.JSX.Element {
         suite: testSuite || undefined,
         project: testProject || undefined,
         tags: tags.length ? tags : undefined,
-        traceId: result.traceId
+        traceId: result.traceId,
+        rows: result.rows
       })
       // A postback nobody told you about failing is the whole problem this
       // feature exists to avoid — something downstream is WAITING for this.
@@ -2933,47 +2942,72 @@ function App(): React.JSX.Element {
     unresolvedDataRef.current = unresolvedDataColumns(flat, dataRows)
     setDataRun({ total: dataRows.length, current: 0, currentLabel: '', results: [], running: true })
     const results: DataRunEntry[] = []
-    for (let i = 0; i < dataRows.length; i++) {
-      const label = rowLabel(dataRows[i], i)
-      setDataRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: label } : prev))
-      let list = substituteSteps(flat, resolveRow(dataRows[i], envMap), envMap)
-      // F25: re-point navigations at the active environment (creds already
-      // resolved above via envMap, which main sourced from the active env).
-      if (activeEnv?.baseURL)
-        list = retargetSteps(list, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
-      // fileName null: don't stamp a run per row — record ONE aggregate below.
-      const result = await runOnce(list, null, false)
-      if (result.aborted) {
-        setDataRun(null)
-        return
+    let durationMs = 0
+    let lastTraceId: string | undefined
+    dataRunActiveRef.current = true
+    try {
+      for (let i = 0; i < dataRows.length; i++) {
+        const label = rowLabel(dataRows[i], i)
+        setDataRun((prev) => (prev ? { ...prev, current: i + 1, currentLabel: label } : prev))
+        let list = substituteSteps(flat, resolveRow(dataRows[i], envMap), envMap)
+        // F25: re-point navigations at the active environment (creds already
+        // resolved above via envMap, which main sourced from the active env).
+        if (activeEnv?.baseURL)
+          list = retargetSteps(list, baseURL || deriveBaseURL(flat), activeEnv.baseURL)
+        // fileName null: don't stamp a run per row — record ONE aggregate below.
+        const result = await runOnce(list, null, false)
+        // Aborted = Home mid-run: the run is moot, so no postback either (the
+        // same as an aborted single replay).
+        if (result.aborted) {
+          setDataRun(null)
+          return
+        }
+        durationMs += result.durationMs ?? 0
+        if (result.traceId) lastTraceId = result.traceId
+        const entry: DataRunEntry = {
+          label,
+          status: result.ok ? 'passed' : 'failed',
+          failedAt: result.failedAt,
+          error: result.error,
+          screenshotPath: result.screenshotPath,
+          traceId: result.traceId,
+          consoleErrors: result.consoleErrors,
+          networkErrors: result.networkErrors,
+          category: result.category
+        }
+        results.push(entry)
+        setDataRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
       }
-      const entry: DataRunEntry = {
-        label,
-        status: result.ok ? 'passed' : 'failed',
-        failedAt: result.failedAt,
-        error: result.error,
-        screenshotPath: result.screenshotPath,
-        traceId: result.traceId,
-        consoleErrors: result.consoleErrors,
-        networkErrors: result.networkErrors,
-        category: result.category
-      }
-      results.push(entry)
-      setDataRun((prev) => (prev ? { ...prev, results: [...prev.results, entry] } : prev))
+    } finally {
+      dataRunActiveRef.current = false
     }
     setDataRun((prev) => (prev ? { ...prev, running: false } : prev))
+    const failed = results.filter((r) => r.status === 'failed')
+    const first = failed[0]
+    const rowsSummary = failed.length
+      ? `${failed.length}/${results.length} rows failed — e.g. ${first.label}: ${first.error}`
+      : undefined
+    // ONE postback for the whole data run, not one per row: a receiver saw N
+    // separate "runs" of the same test and could not tell they belonged
+    // together, or which one was the verdict. Same rule as the library below —
+    // green only if every row passed. The first failing row supplies the step
+    // and trace, since that is the evidence someone will go and open.
+    void sendPostback({
+      ok: failed.length === 0,
+      failedAt: first?.failedAt,
+      error: rowsSummary,
+      traceId: first?.traceId ?? lastTraceId,
+      durationMs,
+      rows: { total: results.length, failed: failed.length }
+    })
     // A saved test remembers the run as ONE outcome: green only if every row
     // passed, else red with a "N/M rows failed" summary.
     if (testFileName) {
-      const failed = results.filter((r) => r.status === 'failed')
-      const first = failed[0]
       window.api.library.recordRun(testFileName, {
         status: failed.length ? 'failed' : 'passed',
         at: new Date().toISOString(),
         failedAt: first?.failedAt,
-        error: failed.length
-          ? `${failed.length}/${results.length} rows failed — e.g. ${first.label}: ${first.error}`
-          : undefined,
+        error: rowsSummary,
         screenshotPath: first?.screenshotPath,
         category: first?.category // F9 (Stage 2): representative failure type
       })
