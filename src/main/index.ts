@@ -245,7 +245,7 @@ import {
   protectedEdgeTraceIds,
   type EdgeRunRecord
 } from './edgeRuns'
-import { capturePageWithin } from './captureGuard'
+import { capturePageWithin, settleWithin } from './captureGuard'
 import { downloadNameMatches, describeDownloadExpectation } from '../shared/downloadName'
 
 // Small pause so a human can watch each replayed step happen.
@@ -315,34 +315,62 @@ function parseMaskSelectors(text?: string): string[] {
 // The app also attaches the CDP debugger for HAR capture, so REUSE an existing
 // session when one's attached (attaching twice throws) and only detach if we opened
 // it. Any CDP failure (DevTools open, page too tall) falls back to the viewport.
+//
+// Every capture here has a DEADLINE (see captureGuard.ts — the 2026-09-23 hang).
+// A full-page CDP shot of a tall page is legitimately slow, so it gets far longer
+// than the viewport shot; if it misses, the viewport is tried; if THAT misses,
+// this throws. A visual check with no picture must FAIL, saying so — adopting or
+// passing on a missing image would report a comparison that never happened.
+const VIEWPORT_SHOT_MS = 3000
+const FULL_PAGE_SHOT_MS = 15000
+async function viewportShot(wc: Electron.WebContents): Promise<Electron.NativeImage> {
+  const image = await capturePageWithin(wc, VIEWPORT_SHOT_MS)
+  if (!image) {
+    throw new Error(
+      `Visual snapshot: the page did not produce a screenshot within ${VIEWPORT_SHOT_MS / 1000}s — nothing was compared`
+    )
+  }
+  return image
+}
 async function captureFullPage(wc: Electron.WebContents): Promise<Electron.NativeImage> {
   const alreadyAttached = wc.debugger.isAttached()
   try {
     if (!alreadyAttached) wc.debugger.attach('1.3')
   } catch {
-    return wc.capturePage()
+    return viewportShot(wc)
   }
   try {
-    const metrics = (await wc.debugger.sendCommand('Page.getLayoutMetrics')) as {
+    const metrics = (await settleWithin(
+      () => wc.debugger.sendCommand('Page.getLayoutMetrics'),
+      VIEWPORT_SHOT_MS
+    )) as {
       contentSize?: { width: number; height: number }
       cssContentSize?: { width: number; height: number }
-    }
-    const size = metrics.cssContentSize || metrics.contentSize
-    if (!size || size.width <= 0 || size.height <= 0) return wc.capturePage()
-    const shot = (await wc.debugger.sendCommand('Page.captureScreenshot', {
-      format: 'png',
-      captureBeyondViewport: true,
-      clip: {
-        x: 0,
-        y: 0,
-        width: Math.ceil(size.width),
-        height: Math.ceil(size.height),
-        scale: 1
-      }
-    })) as { data: string }
+    } | null
+    const size = metrics?.cssContentSize || metrics?.contentSize
+    if (!size || size.width <= 0 || size.height <= 0) return await viewportShot(wc)
+    const shot = (await settleWithin(
+      () =>
+        wc.debugger.sendCommand('Page.captureScreenshot', {
+          format: 'png',
+          captureBeyondViewport: true,
+          clip: {
+            x: 0,
+            y: 0,
+            width: Math.ceil(size.width),
+            height: Math.ceil(size.height),
+            scale: 1
+          }
+        }),
+      FULL_PAGE_SHOT_MS
+    )) as { data: string } | null
+    if (!shot?.data) return await viewportShot(wc)
     return nativeImage.createFromBuffer(Buffer.from(shot.data, 'base64'))
-  } catch {
-    return wc.capturePage()
+  } catch (err) {
+    // viewportShot's own "no screenshot" is the final answer, not a reason to
+    // try the viewport a second time.
+    if (err instanceof Error && err.message.startsWith('Visual snapshot:')) throw err
+    return viewportShot(wc)
   } finally {
     if (!alreadyAttached && wc.debugger.isAttached()) {
       try {
@@ -404,19 +432,23 @@ async function captureStabilized(
     )
     .catch(() => {})
   await wait(120) // let the scroll reset + freeze + overlays settle and paint
-  const image = await captureFullPage(wc)
-  await wc
-    .executeJavaScript(
-      `(() => {
+  try {
+    return await captureFullPage(wc)
+  } finally {
+    // In a finally: a capture that gives up must not leave the masks painted
+    // and the animations frozen on the live page for every step after it.
+    await wc
+      .executeJavaScript(
+        `(() => {
           const D = window.__qaflowVisual; if (!D) return;
           if (D.freeze) D.freeze.remove();
           for (const m of D.masks) m.remove();
           window.__qaflowVisual = null;
         })()`,
-      true
-    )
-    .catch(() => {})
-  return image
+        true
+      )
+      .catch(() => {})
+  }
 }
 
 // F18: injected into the current page to list its INTERACTIVE elements, each
@@ -3533,7 +3565,13 @@ function createWindow(): void {
           const cw = Math.min(loc.vw - cx, Math.ceil(w))
           const ch = Math.min(loc.vh - cy, Math.ceil(h))
           if (cw < 4 || ch < 4) return
-          const img = await currentWC.capturePage({ x: cx, y: cy, width: cw, height: ch })
+          // Deadlined: this runs after EVERY healable step, so an un-settling
+          // crop here would freeze a green run, not just a failing one.
+          const img = await settleWithin(
+            () => currentWC.capturePage({ x: cx, y: cy, width: cw, height: ch }),
+            VIEWPORT_SHOT_MS
+          )
+          if (!img) return // no crop this time; the run goes on
           runFingerprints[idx] = {
             rect: { x: x / loc.vw, y: y / loc.vh, w: w / loc.vw, h: h / loc.vh },
             crop: toCropPng(img).toString('base64')
@@ -3672,7 +3710,11 @@ function createWindow(): void {
               const ch = Math.min(s.m.vh - cy, Math.ceil(h))
               if (cw < 4 || ch < 4) continue
               try {
-                const img = await currentWC.capturePage({ x: cx, y: cy, width: cw, height: ch })
+                const img = await settleWithin(
+                  () => currentWC.capturePage({ x: cx, y: cy, width: cw, height: ch }),
+                  VIEWPORT_SHOT_MS
+                )
+                if (!img) continue // no visual evidence for this candidate
                 const sim = cropSimilarity(fingerprint.crop, img)
                 s.visualSim = sim
                 // A close look strongly corroborates (+20); a clearly different
@@ -4407,16 +4449,23 @@ function createWindow(): void {
                 let png: Buffer | undefined
                 if (cdpReady) {
                   try {
-                    const res = (await cdp.sendCommand('Page.captureScreenshot', {
-                      format: 'png',
-                      captureBeyondViewport: true
-                    })) as { data?: string }
+                    const res = (await settleWithin(
+                      () =>
+                        cdp.sendCommand('Page.captureScreenshot', {
+                          format: 'png',
+                          captureBeyondViewport: true
+                        }),
+                      FULL_PAGE_SHOT_MS
+                    )) as { data?: string } | null
                     if (res?.data) png = Buffer.from(res.data, 'base64')
                   } catch {
                     // CDP capture failed — fall back to the viewport capture below
                   }
                 }
-                if (!png) png = (await currentWC.capturePage()).toPNG()
+                // Both deadlined: with no picture the check is judged on the
+                // page text alone (the catch below), never left hanging.
+                if (!png) png = (await capturePageWithin(currentWC, VIEWPORT_SHOT_MS))?.toPNG()
+                if (!png) throw new Error('no screenshot in time')
                 const dir = join(libraryDir(), '_nlchecks')
                 await mkdir(dir, { recursive: true })
                 shotPath = join(dir, `nl-${Date.now()}.png`)

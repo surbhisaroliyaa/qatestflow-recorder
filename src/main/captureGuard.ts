@@ -56,10 +56,28 @@ export interface CapturedImage {
 export async function capturePageWithin<T extends CapturedImage>(
   wc: { capturePage: () => Promise<T> },
   ms: number,
-  sleep: (ms: number) => Promise<void> = (d) => new Promise((r) => setTimeout(r, d))
+  sleep: (ms: number) => Promise<void> = defaultSleep
+): Promise<T | null> {
+  return settleWithin(() => wc.capturePage(), ms, sleep)
+}
+
+const defaultSleep = (d: number): Promise<void> => new Promise((r) => setTimeout(r, d))
+
+/**
+ * The same deadline for any capture that is not a plain `capturePage()` — a
+ * clipped crop (`capturePage(rect)`), or a CDP `Page.captureScreenshot`, which
+ * goes through the same compositor and can stall the same way.
+ *
+ * Takes a FUNCTION rather than a promise so that a capture which throws
+ * synchronously (a destroyed WebContents does) lands in the same `null`.
+ */
+export async function settleWithin<T>(
+  start: () => Promise<T>,
+  ms: number,
+  sleep: (ms: number) => Promise<void> = defaultSleep
 ): Promise<T | null> {
   try {
-    return await Promise.race([wc.capturePage(), sleep(ms).then(() => null)])
+    return await Promise.race([start(), sleep(ms).then(() => null)])
   } catch {
     // The page navigated away or the window closed. No picture, no drama — the
     // same outcome as a timeout, reached a different way.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { capturePageWithin, type CapturedImage } from '../src/main/captureGuard'
+import { capturePageWithin, settleWithin, type CapturedImage } from '../src/main/captureGuard'
 
 // The bug this function exists for (2026-09-23, Round 13 step 6): a replayed
 // step failed, the red failure banner was painted into the page, and
@@ -61,5 +61,38 @@ describe('capturePageWithin', () => {
       capturePage: (): Promise<CapturedImage> => new Promise((r) => setTimeout(() => r(img), 5))
     }
     expect(await capturePageWithin(wc, 2000)).toBe(img)
+  })
+})
+
+// The same deadline for the captures that are not a plain capturePage(): the
+// self-heal crops (capturePage(rect), run after EVERY healable step), the CDP
+// full-page shot behind visual snapshots, and the AI check's screenshot. They
+// were left un-timed on 2026-09-23 as "a different path"; same hang, same fix.
+describe('settleWithin', () => {
+  it('returns the value when the work finishes in time', async () => {
+    expect(await settleWithin(async () => 'shot', 1000)).toBe('shot')
+  })
+
+  it('gives up on work that never finishes', async () => {
+    let deadline = false
+    const result = await settleWithin(
+      () => new Promise<string>(() => {}),
+      15000,
+      async () => {
+        deadline = true
+      }
+    )
+    expect(result).toBeNull()
+    expect(deadline).toBe(true)
+  })
+
+  // A destroyed WebContents throws BEFORE returning a promise. Taking a function
+  // rather than a promise is what lets that land in the same null.
+  it('returns null when starting the work throws synchronously', async () => {
+    expect(
+      await settleWithin(() => {
+        throw new Error('Object has been destroyed')
+      }, 1000)
+    ).toBeNull()
   })
 })

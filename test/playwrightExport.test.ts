@@ -1739,3 +1739,45 @@ describe('§ POM method shape', () => {
     expect(syntaxErrors(generatePageObjectTest(nasty, { name: 'N' })!.page)).toEqual([])
   })
 })
+
+// =====================================================================
+// § API body content type. Daily/api-demo.json POSTed `{ "title": "qaflow" }`
+// to jsonplaceholder with no Content-Type. The in-app runner defaults a body to
+// JSON (main/apiStep.ts); Playwright sends a string `data` as
+// application/octet-stream, so the server ignored it and answered
+// `{ "id": 101 }` — green in the app, red exported. Probed against the real
+// server on 2026-09-28 before fixing.
+// =====================================================================
+describe('§ API body content type', () => {
+  const post = (headers?: string): RecorderStep[] =>
+    [
+      s({
+        type: 'api',
+        apiMethod: 'POST',
+        url: 'https://jsonplaceholder.typicode.com/posts',
+        apiBody: '{ "title": "qaflow" }',
+        apiHeaders: headers
+      })
+    ] as never as RecorderStep[]
+
+  it('a body with no content type is sent as JSON, like the in-app runner', () => {
+    const inline = generatePlaywrightTest(post(), { name: 'Api' })
+    expect(inline).toMatch(/headers: \{ "Content-Type": "application\/json" \}/)
+    expect(generatePageObjectTest(post(), { name: 'Api' })!.spec).toMatch(
+      /"Content-Type": "application\/json"/
+    )
+  })
+
+  it('an explicit content type is left alone', () => {
+    const inline = generatePlaywrightTest(post('content-type: text/plain'), { name: 'Api' })
+    expect(inline).toContain('"content-type": "text/plain"')
+    expect(inline).not.toContain('application/json')
+  })
+
+  it('a GET with no body gets no content type', () => {
+    const get = [
+      s({ type: 'api', apiMethod: 'GET', url: 'https://jsonplaceholder.typicode.com/users/1' })
+    ] as never as RecorderStep[]
+    expect(generatePlaywrightTest(get, { name: 'Api' })).not.toContain('Content-Type')
+  })
+})

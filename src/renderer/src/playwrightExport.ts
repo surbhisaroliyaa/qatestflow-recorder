@@ -1383,6 +1383,15 @@ function actionFor(
     const hasBody =
       method !== 'get' && method !== 'delete' && !!(step.apiBody && step.apiBody.length)
     const headers = parseHeaderLines(step.apiHeaders)
+    // The in-app runner (main/apiStep.ts) sends a body with no content type as
+    // JSON. Playwright does NOT: a string `data` goes out as
+    // application/octet-stream, and a JSON API then ignores it. Found through
+    // Daily/api-demo.json — its POST to jsonplaceholder passed in the app and
+    // failed exported, the server answering `{ "id": 101 }` without the title it
+    // had never parsed. Same default here, so both runners send the same request.
+    if (hasBody && !headers.some(([k]) => k.toLowerCase() === 'content-type')) {
+      headers.push(['Content-Type', 'application/json'])
+    }
     const optParts: string[] = []
     if (headers.length) {
       optParts.push(

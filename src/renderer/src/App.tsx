@@ -7,6 +7,7 @@ import { clampPaneWidth, readStoredPaneWidth, PANE_DEFAULT, PANE_KEY_STEP } from
 import { explainLoadError, loadErrorDetails } from '../../shared/loadErrors'
 // QF-011: one place that knows "1 step" vs "2 steps".
 import { plural } from '../../shared/plural'
+import { shouldPost } from '../../shared/postback'
 
 import { resolveVideoMode } from '../../shared/videoPolicy'
 import {
@@ -702,6 +703,13 @@ function App(): React.JSX.Element {
   const [lastTraceId, setLastTraceId] = useState<string | null>(null)
   // Phase 4: a postback that did not arrive, surfaced rather than swallowed.
   const [postbackError, setPostbackError] = useState<string | null>(null)
+  // A failing postback is retried with 1s + 2s gaps, so "didn't arrive" can
+  // only be said ~3s after the run ends. Without a note in between, that gap
+  // looks like nothing is happening. Counted, not a flag: a data-driven run
+  // posts once per row, and one row finishing must not hide another's note.
+  const [postbackSending, setPostbackSending] = useState(false)
+  const postbackInFlightRef = useRef(0)
+  const postbackNoteTimerRef = useRef<number | null>(null)
   // 10s rather than the usual 6: this one names a URL or a DNS error, which is
   // longer to read than "no checks were added", and it is the only notice that
   // something downstream did not hear about this run.
@@ -868,6 +876,10 @@ function App(): React.JSX.Element {
   // F25: {{env:NAME}} tokens the last run couldn't resolve — surfaced in the
   // panel so an empty substitution can't masquerade as a test-data problem.
   const [unresolvedEnv, setUnresolvedEnv] = useState<string[]>([])
+  // The same for data columns ({{username}}) no row fills in. The suite report
+  // learned this on 2026-09-22; the single-run banner is the surface most runs
+  // are actually read on, and it could not see it.
+  const [unresolvedData, setUnresolvedData] = useState<string[]>([])
   // F19: how many AI checks the CURRENTLY-RUNNING step is judging in one model
   // call. An AI check costs ~7-12s per CALL regardless of how many claims ride
   // in it, so the first check of a run pays for the whole group and the rest
@@ -902,6 +914,10 @@ function App(): React.JSX.Element {
   // state — applyEnv runs inside the run's async flow and a state write wouldn't
   // be visible to the code that reports the outcome.
   const unresolvedEnvRef = useRef<string[]>([])
+  // Set by the two run paths that bind a data row (handleReplay's data branch,
+  // handleRunData); cleared by resolveEnvForRun, which every run goes through
+  // first — so a run that binds no row never shows an earlier run's warning.
+  const unresolvedDataRef = useRef<string[]>([])
   const toDisplayIdx = (i: number): number => runPlanRef.current?.[i] ?? i
 
   // A1 (scalable library): the flaky tag for a test (from its run history) + a
@@ -1109,6 +1125,7 @@ function App(): React.JSX.Element {
     // nowhere near the cause. Record it so the run can say which name is
     // missing; the substitution still happens, so nothing else changes.
     unresolvedEnvRef.current = out.missing
+    unresolvedDataRef.current = []
     return out
   }
 
@@ -2490,6 +2507,7 @@ function App(): React.JSX.Element {
       // F25: names that resolved to nothing this run. Shown on PASS too — a token
       // that silently became '' can leave a test green while testing nothing.
       setUnresolvedEnv(unresolvedEnvRef.current)
+      setUnresolvedData(unresolvedDataRef.current)
       // F1: surface how the HAR was used this run (absent when no HAR was in play).
       setLastHarUsage(
         result.harServed !== undefined
@@ -2574,9 +2592,25 @@ function App(): React.JSX.Element {
     // measuring IPC round trips and whatever else the UI was doing.
     durationMs?: number
   }): Promise<void> => {
+    let counted = false
     try {
       const settings = await window.api.integrations.get()
-      if (settings.postback.when === 'off') return
+      // Switched off = nothing is waiting any more, so an old "didn't arrive"
+      // marker is no longer true. Returning before the clear below left the
+      // banner up for good once the postback was turned off.
+      if (settings.postback.when === 'off') {
+        setPostbackError(null)
+        return
+      }
+      // Only when something will really be sent ("failures only" + a pass
+      // sends nothing). Shown after a short delay so a receiver that answers
+      // at once doesn't make the note flash on every run.
+      if (shouldPost(settings.postback.when, result.ok)) {
+        counted = true
+        postbackInFlightRef.current += 1
+        if (postbackNoteTimerRef.current === null)
+          postbackNoteTimerRef.current = window.setTimeout(() => setPostbackSending(true), 500)
+      }
       const res = await window.api.integrations.postback(settings.postback, {
         testName: testName || 'Recorded flow',
         ok: result.ok,
@@ -2619,6 +2653,15 @@ function App(): React.JSX.Element {
     } catch {
       setPostbackError('The postback could not be sent.')
       showPostbackToast('The postback could not be sent.')
+    } finally {
+      if (counted) {
+        postbackInFlightRef.current -= 1
+        if (postbackInFlightRef.current === 0) {
+          if (postbackNoteTimerRef.current !== null) window.clearTimeout(postbackNoteTimerRef.current)
+          postbackNoteTimerRef.current = null
+          setPostbackSending(false)
+        }
+      }
     }
   }
 
@@ -2730,6 +2773,9 @@ function App(): React.JSX.Element {
       // didn't resolve here too, or the run reports nothing while every row
       // types an empty password.
       const { values: envMap } = await resolveEnvForRun(flat, [row])
+      // This branch is reached only with NO rows, so every column is typed as
+      // an empty string — name them rather than let a later step take the blame.
+      unresolvedDataRef.current = unresolvedDataColumns(flat, dataRows)
       let list = substituteSteps(flat, resolveRow(row, envMap), envMap)
       if (activeEnv?.baseURL && !noEnv) list = retargetSteps(list, fromBase, activeEnv.baseURL)
       await runOnce(list, testFileName, false)
@@ -2883,6 +2929,8 @@ function App(): React.JSX.Element {
     runPlanRef.current = map
     // Env tokens in the data rows are invisible to applyEnv — pass the rows in.
     const { values: envMap } = await resolveEnvForRun(flat, dataRows)
+    // A column no row fills in (the same rule the suite report uses).
+    unresolvedDataRef.current = unresolvedDataColumns(flat, dataRows)
     setDataRun({ total: dataRows.length, current: 0, currentLabel: '', results: [], running: true })
     const results: DataRunEntry[] = []
     for (let i = 0; i < dataRows.length; i++) {
@@ -8093,6 +8141,60 @@ function App(): React.JSX.Element {
                     account name instead of a test value.
                   </>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* The postback that did not arrive — as a MARKER that stays, not only
+              the 10-second toast. Something downstream (a dashboard, a release
+              gate) is waiting for this result; a notice that is gone by the time
+              you look back at the screen is how a gate quietly stops receiving
+              runs. Stays until a later postback arrives (or the postback is
+              switched off). Worded so it cannot be read as the run failing. */}
+          {/* While a postback is being delivered (retries included), say so in
+              the banner's place — the previous run's error is stale by now. */}
+          {postbackSending && !isReplaying && (
+            <div className="replay-status branch-note">
+              <strong>⏳ Sending the run&apos;s result to your postback receiver…</strong>
+              <div className="branch-note-why">
+                If it doesn&apos;t answer, it is tried again twice before giving up.
+              </div>
+            </div>
+          )}
+          {postbackError && !postbackSending && !isReplaying && (
+            <div className="replay-status branch-note">
+              <strong>⚠ The last run&apos;s postback didn&apos;t arrive</strong>
+              <div>{postbackError}</div>
+              <div className="branch-note-why">
+                The run&apos;s own result is unaffected — this is only about the receiver not
+                hearing about it.
+              </div>
+              <div>
+                <button type="button" className="modal-btn" onClick={() => void openIntegrations()}>
+                  Open 🔗 Integrations
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* The same blind spot one layer over: a {{column}} no data row fills
+              in. Its own block rather than merged with the env one because the
+              fix is somewhere else — an env var is set outside the test, a data
+              column is filled in the test's own 🧪 Data table. Shown on PASS as
+              well: a green run that typed nothing into the password box is the
+              case worth flagging. */}
+          {unresolvedData.length > 0 && !isReplaying && (
+            <div className="replay-status branch-note">
+              <strong>
+                ⚠ {unresolvedData.length} data {unresolvedData.length === 1 ? 'column' : 'columns'}{' '}
+                had no value
+              </strong>
+              <div>{unresolvedData.map((c) => `{{${c}}}`).join(', ')}</div>
+              <div className="branch-note-why">
+                No data row fills {unresolvedData.length === 1 ? 'it' : 'them'} in, so each was
+                replaced with an <strong>empty string</strong> and any step using it typed nothing.
+                A failure a few steps later is most likely this, not the page. Add a row in{' '}
+                <strong>🧪 Data</strong>, then run again.
               </div>
             </div>
           )}
