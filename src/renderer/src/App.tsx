@@ -4674,6 +4674,14 @@ function App(): React.JSX.Element {
     editSteps(steps.map((s, idx) => (idx === i ? { ...s, optional: !s.optional } : s)))
   }
 
+  // Round 13: how strictly a download step compares the filename it got. Loose
+  // (digits are wildcards) is the default and covers timestamps and order ids;
+  // exact is for the case where the digits are the point — a statement for a
+  // particular year, an invoice with a known number.
+  const handleToggleDownloadExact = (i: number): void => {
+    editSteps(steps.map((s, idx) => (idx === i ? { ...s, downloadExact: !s.downloadExact } : s)))
+  }
+
   // Which steps can be optional: ones that TARGET an element (so "present or
   // not" is meaningful). Page/flow steps (navigate, wait, back) always run.
   const canBeOptional = (step: RecorderStep): boolean =>
@@ -8729,11 +8737,31 @@ function App(): React.JSX.Element {
                       {step.type === 'download' && step.downloadPath && (
                         <button
                           type="button"
-                          className="step-selector"
+                          className="step-download-action"
                           onClick={() => window.api.recorder.revealDownload(step.downloadPath!)}
                           title={`Show "${step.label}" in its folder`}
                         >
                           📂 Show in folder
+                        </button>
+                      )}
+                      {/* Round 13: how strictly to compare the filename. A
+                          download whose name carries the time it was generated
+                          can only ever match itself, so digits are wildcards by
+                          default — and this says so out loud, because a check
+                          that quietly ignores part of what it reads is worse
+                          than one that never existed. */}
+                      {step.type === 'download' && canEdit && (
+                        <button
+                          type="button"
+                          className="step-download-action"
+                          onClick={() => handleToggleDownloadExact(i)}
+                          title={
+                            step.downloadExact
+                              ? 'Exact: every character must match, digits included. Click to ignore numbers (timestamps, order ids).'
+                              : 'Numbers in the filename are ignored, so a timestamp or order id will not fail the test. Click to demand an exact match.'
+                          }
+                        >
+                          {step.downloadExact ? '🔢 exact name' : '🔢 numbers may differ'}
                         </button>
                       )}
                       {insertMenuIndex === i && canEdit && (

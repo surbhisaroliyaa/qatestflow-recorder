@@ -87,6 +87,24 @@ describe('§ round trip', () => {
     expect(back[4]).toMatchObject({ assertKind: 'text-equals', value: 'Products' })
   })
 
+  // Round 13. The field list in testFormat.ts is a WHITELIST, so a new step
+  // flag that nobody adds to it survives in .json and vanishes in .yaml — and a
+  // download step whose exact-name check silently became a loose one is a test
+  // that quietly stopped checking what it was set up to check. Worse than a
+  // format that refused to save it.
+  it('carries a download step BOTH ways, including its exact-name flag', () => {
+    const { steps: back } = roundTrip({ name: 'Receipt' }, [
+      { type: 'navigate', url: 'https://shop.test/' },
+      {
+        type: 'download',
+        label: 'statement-2024.pdf',
+        value: 'statement-2024.pdf',
+        downloadExact: true
+      }
+    ])
+    expect(back[1]).toMatchObject({ type: 'download', downloadExact: true })
+  })
+
   it('keeps the test-level settings', () => {
     const { test } = roundTrip(
       {

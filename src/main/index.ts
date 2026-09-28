@@ -245,6 +245,8 @@ import {
   protectedEdgeTraceIds,
   type EdgeRunRecord
 } from './edgeRuns'
+import { capturePageWithin } from './captureGuard'
+import { downloadNameMatches, describeDownloadExpectation } from '../shared/downloadName'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -2516,11 +2518,26 @@ function createWindow(): void {
             }
           }
           try {
-            const image = preImage ?? (await currentWC.capturePage())
-            rec.screenshotFile = `step-${num}.png`
-            traceAssets.set(rec.screenshotFile, image.toPNG())
-            rec.thumbFile = `thumb-${num}.png`
-            traceAssets.set(rec.thumbFile, image.resize({ width: 240 }).toPNG())
+            // The same deadline the failure shot uses, for the same reason —
+            // see capturePageWithin. This one runs on EVERY step, so an
+            // un-timed await here can stall a run that hasn't even failed.
+            // A trace row with no picture is still a trace row; a frozen run
+            // is nothing at all.
+            const image = preImage ?? (await capturePageWithin(currentWC, 3000))
+            if (image) {
+              rec.screenshotFile = `step-${num}.png`
+              traceAssets.set(rec.screenshotFile, image.toPNG())
+              rec.thumbFile = `thumb-${num}.png`
+              traceAssets.set(rec.thumbFile, image.resize({ width: 240 }).toPNG())
+            } else {
+              // Onto THIS row, not the shared list: `rec` was built from a
+              // cursor into consoleErrors a few lines above, so anything pushed
+              // there now would surface against the NEXT step and blame the
+              // wrong one.
+              rec.consoleErrors.push(
+                `trace: this step has no screenshot — the page never produced a frame within 3s.`
+              )
+            }
           } catch {
             // capture can fail if the page is gone — keep the row without a shot
           }
@@ -4269,8 +4286,16 @@ function createWindow(): void {
             if (got.bytes <= 0) {
               throw new Error(`Downloaded file "${got.name}" is empty (0 bytes)`)
             }
-            if (expectName && !got.name.includes(expectName)) {
-              throw new Error(`Expected download "${expectName}" but got "${got.name}"`)
+            // Round 13: digits are wildcards unless the step opted out — a
+            // filename carrying the time it was generated must not pin the test
+            // to the second it was recorded. See shared/downloadName.ts.
+            if (!downloadNameMatches(expectName, got.name, step.downloadExact)) {
+              throw new Error(
+                `Expected download ${describeDownloadExpectation(
+                  expectName,
+                  step.downloadExact
+                )} but got "${got.name}"`
+              )
             }
           } else if (step.type === 'upload') {
             // Day 16: set the file(s) on the input. JavaScript can't assign a
@@ -4807,7 +4832,12 @@ function createWindow(): void {
             // The page didn't cause an HTTP failure and must not be annotated as
             // if it had — that was the misleading part, not the picture itself.
             try {
-              annotatedImage = await currentWC.capturePage()
+              // The same deadline as the plain-failure branch below — this is
+              // the API-step sibling on the SAME failure path, and an un-timed
+              // await here freezes the run in exactly the same way. Fixing one
+              // branch and not its neighbour is how this class of bug survives.
+              annotatedImage = (await capturePageWithin(currentWC, 3000)) ?? undefined
+              if (!annotatedImage) throw new Error('no frame within 3s')
               const dir = join(libraryDir(), '_failures')
               await mkdir(dir, { recursive: true })
               screenshotPath = join(dir, `failure-${Date.now()}.png`)
@@ -4888,18 +4918,40 @@ function createWindow(): void {
                   }
                 }
               }
-              annotatedImage = await currentWC.capturePage()
-              const dir = join(libraryDir(), '_failures')
-              await mkdir(dir, { recursive: true })
-              screenshotPath = join(dir, `failure-${Date.now()}.png`)
-              await writeFile(screenshotPath, annotatedImage.toPNG())
+              // A deadline, not a bare await — see capturePageWithin. This is
+              // the exact line that froze a run on 2026-09-23: the banner above
+              // was painted, this never returned, and the recovery panel below
+              // was never offered.
+              const shot = await capturePageWithin(currentWC, 3000)
+              if (shot) {
+                annotatedImage = shot
+                const dir = join(libraryDir(), '_failures')
+                await mkdir(dir, { recursive: true })
+                screenshotPath = join(dir, `failure-${Date.now()}.png`)
+                await writeFile(screenshotPath, annotatedImage.toPNG())
+              } else {
+                // Say it out loud. The failure shot is the thing a user pastes
+                // into a ticket, so its absence has to be explained where they
+                // are already looking, not left as a blank space.
+                addEvidence(
+                  consoleErrors,
+                  'failure-screenshot: the page never produced a frame within 3s, so this failure has no screenshot. The run carried on.'
+                )
+              }
             } catch {
               screenshotPath = undefined
-            }
-            try {
-              await currentWC.executeJavaScript(removeFailureMarkScript(), true)
-            } catch {
-              // page may be gone — nothing to clean
+            } finally {
+              // Erase the marks WHATEVER happened above. They were appended to
+              // the live page, not to a copy: leaving them on means the red
+              // banner stays burnt across the page under test for the rest of
+              // the session — which is precisely what the user saw when the
+              // capture above hung. A `finally` because the failure path is the
+              // one place that must not need everything to go right.
+              try {
+                await currentWC.executeJavaScript(removeFailureMarkScript(), true)
+              } catch {
+                // page may be gone — nothing to clean
+              }
             }
           }
           mainWindow.webContents.send('recorder:replay-progress', {

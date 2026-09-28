@@ -111,6 +111,10 @@ const STEP_KEY_ORDER = [
   'maxDiffPixels',
   'baselineId',
   'downloadPath',
+  // Round 13: without this, a YAML round trip silently turns an EXACT filename
+  // check back into a loose one — the flag would survive in .json and vanish in
+  // .yaml, which is the worst kind of difference between two save formats.
+  'downloadExact',
   'apiMethod',
   'apiHeaders',
   'apiBody',

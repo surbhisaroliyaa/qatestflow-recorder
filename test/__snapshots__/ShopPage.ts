@@ -20,6 +20,7 @@ export class ShopPage {
     await this.page.goto("/")
   }
 
+  /** Click Open help */
   async openHelp(): Promise<ShopPopup1Page> {
     const [popup] = await Promise.all([
       this.page.context().waitForEvent('page'),
@@ -28,6 +29,7 @@ export class ShopPage {
     return new ShopPopup1Page(popup)
   }
 
+  /** Type "4111" into Card number → Click Pay */
   async pay(): Promise<void> {
     await this.cardNumberInput.fill("4111")
     await this.payButton.click()

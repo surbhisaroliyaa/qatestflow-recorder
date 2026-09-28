@@ -1393,6 +1393,18 @@ declare global {
     // the on-replay file check). The step's `value` holds the EXPECTED filename
     // substring to verify (defaults to the recorded name; editable).
     downloadPath?: string
+    // Round 13: compare the expected filename LITERALLY, digits included.
+    //
+    // The default is loose — runs of digits are wildcards — because a site that
+    // stamps a timestamp or an order id into a download (SauceDemo's receipt is
+    // `swag-labs-order-2026-09-23_08-46-16.pdf`) otherwise records a step that
+    // can only pass on the run that recorded it. See shared/downloadName.ts.
+    //
+    // Set this when the digits are part of WHAT is being checked — a statement
+    // for a particular year, an invoice with a known number. Loose matching
+    // cannot tell `statement-2024.pdf` from `statement-2025.pdf`, and a check
+    // that cannot fail is not a check.
+    downloadExact?: boolean
     // Day 19 (visual regression): a `snapshot` step's baseline image id (file
     // in _baselines). `value` holds the allowed diff threshold as a percent.
     baselineId?: string

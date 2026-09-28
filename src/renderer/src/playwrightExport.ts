@@ -13,6 +13,7 @@ import { isControlStep, conditionText, repeatText } from '../../shared/controlFl
 // QF-005: shared with main's fixture copier, so the name the spec references
 // and the name written to disk are produced by the same rule on every OS.
 import { portableBasename } from '../../shared/portablePath'
+import { downloadNameRegexSource } from '../../shared/downloadName'
 // Sensitive data cells: which env var each one reads in an exported spec.
 import { isSecretForDisplay, isSensitiveColumn, planSecretEnv } from '../../shared/secretCells'
 
@@ -103,6 +104,25 @@ ${projects}
 // Safely wrap a value in quotes (handles quotes/newlines inside it).
 function quote(value: string): string {
   return JSON.stringify(value)
+}
+
+/**
+ * The assertion tail for a download step's filename — `.toContain("…")` or
+ * `.toMatch(/…/)`.
+ *
+ * Round 13: a recorded filename usually carries the moment it was generated
+ * (`swag-labs-order-2026-09-23_08-46-16.pdf`), so asserting it literally writes
+ * a spec that can never pass again. Digits become `\d+` unless the step asked
+ * for an exact comparison.
+ *
+ * The regex comes from shared/downloadName.ts — the SAME function the in-app
+ * replay engine judges with. Before this there were three literal comparisons
+ * in three files, which is how the August export bugs happened: one behaviour,
+ * copied, fixed in one place.
+ */
+function downloadNameAssertion(want: string, exact?: boolean): string {
+  if (exact || !/\d/.test(want)) return `.toContain(${quote(want)})`
+  return `.toMatch(/${downloadNameRegexSource(want)}/)`
 }
 
 // F24: "Name: value" header lines → [name, value] pairs (mirrors main/apiStep
@@ -974,6 +994,20 @@ export function stepText(step: RecorderStep): string {
 // so a value's internal line breaks were never meaningful here.
 function stepComment(step: RecorderStep): string {
   return stepText(step).replace(/\s*[\r\n]+\s*/g, ' ')
+}
+
+/**
+ * The doc comment above a page-object method: what it does, in the step list's
+ * own words. One line when it fits, one step per line when it doesn't. A
+ * star-slash inside a recorded value (a label, a typed string) would end the
+ * comment early and break the file, so it is split apart.
+ */
+export function methodDoc(steps: string[]): string[] {
+  if (!steps.length) return []
+  const safe = steps.map((s) => s.replace(/\*\//g, '* /'))
+  const oneLine = safe.join(' → ')
+  if (oneLine.length <= 90) return [`  /** ${oneLine} */`]
+  return ['  /**', ...safe.map((s) => `   * ${s}`), '   */']
 }
 
 /**
@@ -1855,7 +1889,7 @@ export function generatePlaywrightTest(
       lines.push(
         `  // ${stepComment(step)}\n` +
           `  const download${i} = await download${i}Promise\n` +
-          `  expect(download${i}.suggestedFilename()).toContain(${quote(want)})\n` +
+          `  expect(download${i}.suggestedFilename())${downloadNameAssertion(want, step.downloadExact)}\n` +
           `  expect(fs.statSync(await download${i}.path()).size).toBeGreaterThan(0)`
       )
       continue
@@ -2355,6 +2389,9 @@ export function generatePageObjectTest(
     methods: {
       name: string
       body: string[]
+      // What the method does, in the step list's own words — emitted as its
+      // doc comment (see classFile).
+      steps: string[]
       usesData: boolean
       returns?: { type: string; expr: string }
     }[]
@@ -2460,6 +2497,11 @@ export function generatePageObjectTest(
   // F24.4: which specBody lines are 🧹 teardown (hoisted into a `finally` below).
   const specTeardownIdx = new Set<number>()
   let buffer: string[] = []
+  // The step list's own wording for each buffered step, for the method's doc
+  // comment. A method is named after the button that ends it, so a name can
+  // only ever tell part of the story (an `addToCart3()` that also changes the
+  // sort order); the comment tells the rest instead of guessing a better name.
+  let bufferSteps: string[] = []
   let bufferUsesData = false
   let lastActionLabel = ''
   // Which tab the buffered actions belong to — a method lives on exactly one
@@ -2482,6 +2524,7 @@ export function generatePageObjectTest(
     ctx.methods.push({
       name,
       body: buffer,
+      steps: bufferSteps,
       usesData: bufferUsesData,
       returns: returns ? { type: returns.type, expr: returns.expr } : undefined
     })
@@ -2491,6 +2534,7 @@ export function generatePageObjectTest(
     const call = `${tabVar(bufferTab)}.${name}(${bufferUsesData ? 'data' : ''})`
     specBody.push(`${ind()}${returns ? `const ${returns.assignTo} = ` : ''}await ${call}`)
     buffer = []
+    bufferSteps = []
     bufferUsesData = false
     lastActionLabel = ''
   }
@@ -2535,7 +2579,9 @@ export function generatePageObjectTest(
     if (step.type === 'download') {
       const want = (step.value ?? step.label ?? 'file').trim()
       const v = `download${downloadSeq}`
-      specBody.push(`${ind()}expect(${v}.suggestedFilename()).toContain(${quote(want)})`)
+      specBody.push(
+        `${ind()}expect(${v}.suggestedFilename())${downloadNameAssertion(want, step.downloadExact)}`
+      )
       specBody.push(`${ind()}expect(fs.statSync(await ${v}.path()).size).toBeGreaterThan(0)`)
       continue
     }
@@ -2656,6 +2702,28 @@ export function generatePageObjectTest(
       step.type === 'snapshot' ||
       (step.type === 'scroll' && step.scrollKind !== 'element')
     ) {
+      // Round 13: a page scroll in the MIDDLE of a method stays in the method.
+      // It used to end it, so a checkout form recorded as "click Zip, scroll,
+      // type into Zip, click Continue" was cut in half — an unnamed actions1()
+      // with First/Last Name, then a continue() that also typed the zip. Only a
+      // scroll that falls BETWEEN methods lives in the spec, as before, so no
+      // method is ever made of nothing but a scroll.
+      if (step.type === 'scroll' && buffer.length && tabOf(step) === bufferTab) {
+        const inMethod = actionFor(
+          step,
+          baseURL,
+          'this.page',
+          undefined,
+          columns,
+          idPolicy.portable
+        )
+        if (inMethod) {
+          buffer.push(padAll(inMethod, '    '))
+          bufferSteps.push(stepComment(step))
+        }
+        if (stepUsesData(step)) bufferUsesData = true
+        continue
+      }
       flush()
       const line = actionFor(step, baseURL, pageOf(), undefined, columns, idPolicy.portable)
       if (line) specBody.push(padAll(line, ind()))
@@ -2682,7 +2750,10 @@ export function generatePageObjectTest(
     if (step.type === 'wait' || step.type === 'back') {
       flushIfTabChanges(tabOf(step))
       const line = actionFor(step, baseURL, 'this.page', undefined, columns, idPolicy.portable)
-      if (line) buffer.push(padAll(line, '    '))
+      if (line) {
+        buffer.push(padAll(line, '    '))
+        bufferSteps.push(stepComment(step))
+      }
       if (stepUsesData(step)) bufferUsesData = true
       continue
     }
@@ -2702,7 +2773,10 @@ export function generatePageObjectTest(
       buffer.push(`    const downloadPromise = this.page.waitForEvent('download')`)
     }
     const line = actionFor(step, baseURL, 'this.page', `this.${name}`, columns, idPolicy.portable)
-    if (line) buffer.push(step.optional ? wrapOptional(line, '    ') : padAll(line, '    '))
+    if (line) {
+      buffer.push(step.optional ? wrapOptional(line, '    ') : padAll(line, '    '))
+      bufferSteps.push(stepComment(step))
+    }
     if (stepUsesData(step)) bufferUsesData = true
     // Day 17: this click opens a tab. The method awaits the new page alongside
     // the click (arming the wait first, as Playwright requires) and hands back
@@ -2821,6 +2895,7 @@ export function generatePageObjectTest(
       // A data-using method receives the current row; its body already references
       // `data.column` (env tokens read process.env directly, so they need no arg).
       const params = m.usesData ? 'data: Record<string, string>' : ''
+      for (const d of methodDoc(m.steps)) lines.push(d)
       lines.push(`  async ${m.name}(${params}): Promise<${m.returns?.type ?? 'void'}> {`)
       for (const b of m.body) lines.push(b)
       if (m.returns) lines.push(`    return ${m.returns.expr}`)

@@ -2396,6 +2396,29 @@ body {
   text-align: left;
 }
 
+/* Plain-text buttons under a download step (📂 Show in folder, 🔢 numbers
+   may differ). They used to borrow .step-selector, which colours only its
+   <code> child — so their bare text fell back to Chromium's default button
+   colour, black on the dark panel, and could not be read. */
+.step-download-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid #333;
+  border-radius: 4px;
+  color: #aab;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.step-download-action:hover {
+  border-color: #555;
+  color: #dde;
+}
+
 .step-selector:hover code {
   border-color: #555;
   color: #acc;
@@ -3335,7 +3358,8 @@ body {
   color: #777;
 }
 
-.step-item.disabled .step-selector {
+.step-item.disabled .step-selector,
+.step-item.disabled .step-download-action {
   opacity: 0.45;
 }
 

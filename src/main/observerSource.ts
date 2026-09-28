@@ -1561,7 +1561,14 @@ export function createObserver(
   // separates a drag from a click with a shaky hand; below it the normal click
   // listener records a click, as it should.
   const DRAG_MIN_PX = 12
-  let pressAt: { x: number; y: number; el: Element; frac?: string } | null = null
+  let pressAt: {
+    x: number
+    y: number
+    el: Element
+    frac?: string
+    fx?: number
+    fy?: number
+  } | null = null
   document.addEventListener(
     'pointerdown',
     (event) => {
@@ -1572,15 +1579,17 @@ export function createObserver(
       // Where inside the element the press landed, as a fraction of its box.
       // See RecorderStep.dragFrom — this is what makes a slider replay from the
       // knob rather than from the middle of the track.
+      //
+      // Kept as NUMBERS as well as the string: pointerup needs to judge whether
+      // the fractions are inside the box at all, and re-parsing a string it
+      // just formatted would be two chances to get the same answer.
       const box = pressEl.getBoundingClientRect()
+      const measured = box.width > 0 && box.height > 0
+      const fx = measured ? (event.clientX - box.left) / box.width : undefined
+      const fy = measured ? (event.clientY - box.top) / box.height : undefined
       const frac =
-        box.width > 0 && box.height > 0
-          ? `${((event.clientX - box.left) / box.width).toFixed(3)},${(
-              (event.clientY - box.top) /
-              box.height
-            ).toFixed(3)}`
-          : undefined
-      pressAt = { x: event.clientX, y: event.clientY, el: pressEl, frac }
+        fx !== undefined && fy !== undefined ? `${fx.toFixed(3)},${fy.toFixed(3)}` : undefined
+      pressAt = { x: event.clientX, y: event.clientY, el: pressEl, frac, fx, fy }
     },
     true
   )
@@ -1597,6 +1606,54 @@ export function createObserver(
       // An HTML5 drag also produces pointer events; it has already been recorded
       // by the drop listener above, so don't record it twice.
       if (dragSource) return
+
+      // === Not every held-and-moved pointer is a drag OF something ===
+      //
+      // Until now the only question asked was "did it move far enough?". It
+      // never asked WHAT had been dragged. Round 13: Surbhi dragged the page's
+      // SCROLLBAR and the recorder wrote
+      //   Drag Open Menu by -44,-27 pixels   →  locator('html')
+      // a step naming a button it had nothing to do with, aimed at the whole
+      // document. Replay then refused it ("no reliable selector"), correctly,
+      // and the run stopped.
+      //
+      // The scroll listener already knew about this exact gesture — see
+      // pointerHeld above, whose comment calls it "the scrollbar-drag case".
+      // Two listeners watch one gesture and only one of them had been told.
+      //
+      // A grip OUTSIDE the element's own box is the scrollbar gutter by
+      // definition: the pointer was over the element's scrollbar, which sits
+      // inside its bounding box but is not its content. Surbhi's step recorded
+      // dragFrom "1.007,0.498" — a hair past the right edge, halfway down. That
+      // is a vertical scrollbar and nothing else.
+      //
+      // The click is suppressed along with it: a scrollbar is browser chrome,
+      // not part of the page, so neither a drag step nor a click step is a
+      // faithful record of touching one.
+      // The other shape is a press that lands on the document root itself —
+      // the page background. Swiping it is a text selection or a stray gesture,
+      // never a drag of an element.
+      //
+      // Both are ONE rule, and the click is suppressed for both: a gesture that
+      // travelled a real distance from the document root is not a test step in
+      // any form. Emitting a click instead of a drag was tried and is worse —
+      // it produces `click` on `{tag: 'html'}`, a bare-tag ladder that replay
+      // refuses for exactly the reason it refused the drag. Trading a wrong
+      // drag step for a wrong click step is not a fix.
+      //
+      // Nothing real is lost by suppressing it. The pattern this might seem to
+      // cost — "click the background to close the dropdown" — is a CLICK, with
+      // no movement, so it never reaches this branch at all: it stops at the
+      // DRAG_MIN_PX check above and the click listener records it as it always
+      // has.
+      const outsideBox =
+        (start.fx !== undefined && (start.fx < 0 || start.fx > 1)) ||
+        (start.fy !== undefined && (start.fy < 0 || start.fy > 1))
+      const pressTag = start.el.tagName ? start.el.tagName.toLowerCase() : ''
+      if (outsideBox || pressTag === 'html' || pressTag === 'body') {
+        suppressClickUntil = Date.now() + 500
+        return
+      }
       const upTarget = realTarget(event)
       const dropOn = upTarget ? meaningfulTarget(upTarget) : null
       // The click this gesture is about to fire is part of the drag, not a

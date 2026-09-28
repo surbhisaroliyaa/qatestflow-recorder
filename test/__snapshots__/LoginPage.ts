@@ -19,6 +19,7 @@ export class LoginPage {
     await this.page.goto("/")
   }
 
+  /** Type "standard_user" into Username → Type "••••••••" into Password → Click Login */
   async login(): Promise<void> {
     await this.usernameInput.fill("standard_user")
     await this.passwordInput.fill(process.env.PASSWORD ?? '') // password field — set the PASSWORD env var

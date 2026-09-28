@@ -11,6 +11,7 @@ export class ShopPopup1Page {
     this.contactUsButton = page.locator("[data-test=\"contact-us\"], [data-testid=\"contact-us\"]")
   }
 
+  /** Click Contact us */
   async contactUs(): Promise<void> {
     await this.contactUsButton.click()
   }

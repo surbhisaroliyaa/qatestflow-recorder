@@ -731,6 +731,66 @@ test.describe('dragging', () => {
     expect(all.filter((s) => s.type === 'drag')).toEqual([])
     expect(all.filter((s) => s.type === 'click')).toHaveLength(1)
   })
+
+  // ── Round 13: dragging the SCROLLBAR is not dragging the page ──────
+  //
+  // The real step this produced on SauceDemo:
+  //   Drag Open Menu by -44,-27 pixels   →   locator('html')
+  // a step named after a button it had never touched, aimed at the whole
+  // document. Replay refused it ("no reliable selector") and the run stopped.
+  //
+  // The tell was dragFrom "1.007,0.498": the grip was 0.7% PAST the right edge
+  // of the element's box — inside its scrollbar gutter, which is browser chrome
+  // and not content.
+  // -- NOT AUTOMATED HERE: the scrollbar-gutter half of the guard ------
+  //
+  // The guard has two conditions. The root-tag one (<html>/<body>) is covered
+  // by the test below. The gutter one -- a grip whose fraction falls OUTSIDE
+  // the element's box, which is what Surbhi's "1.007,0.498" was -- cannot be
+  // exercised in this harness, and a test that cannot reach its branch is worse
+  // than no test: it reports green forever.
+  //
+  // Why it cannot: headless Chromium draws OVERLAY scrollbars, which occupy no
+  // layout space. Probed directly on a 200px overflow:scroll pane,
+  // clientWidth === offsetWidth === 200 -- there is no gutter, so the fraction
+  // can never exceed 1. Neither ::-webkit-scrollbar styling nor launching with
+  // --disable-features=OverlayScrollbar changes it. The neighbouring scroll
+  // test concedes the same ground by guarding its assertion with
+  // "if (movedAtAll)".
+  //
+  // What covers it instead: the reported case pressed on <html>, so BOTH
+  // conditions catch it, and the automated test below is a faithful stand-in
+  // for the bug as it actually occurred. What stays uncovered is the scrollbar
+  // of an INNER scrollable pane -- real, and a hand-check on a real browser
+  // rather than a fixture that proves nothing.
+
+  // The same rule from the other direction: a swipe across the page background
+  // must produce NEITHER step.
+  //
+  // The first version of this guard emitted the click here, reasoning that
+  // "click the background to close the dropdown" is a real test step. This test
+  // is what showed that to be wrong twice over: what got recorded was `click`
+  // on `{tag: 'html'}` — a bare-tag ladder replay refuses for precisely the
+  // reason it refused the drag — and the dropdown pattern is a CLICK with no
+  // movement, which never reaches this branch anyway. So the assertion is that
+  // the step list stays EMPTY.
+  test('a swipe across the page background records nothing either', async ({ page }) => {
+    await record(page, '<div id="spacer" style="height:10px"></div>')
+    await page.mouse.move(200, 300)
+    await page.mouse.down()
+    await page.mouse.move(320, 300, { steps: 6 })
+    await page.mouse.up()
+    await page.waitForTimeout(300)
+    const all = await steps(page, 1)
+    expect(
+      all.filter((s) => s.type === 'drag'),
+      JSON.stringify(all)
+    ).toEqual([])
+    expect(
+      all.filter((s) => s.type === 'click'),
+      JSON.stringify(all)
+    ).toEqual([])
+  })
 })
 
 // ── The page that broke it (Round 2a) ────────────────────────────────

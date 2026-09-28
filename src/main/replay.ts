@@ -43,6 +43,11 @@ export interface ReplayStep {
   // popup). Replay uses a shorter find timeout for it, and a failure is treated
   // as a skip (not a test failure) — see the run loop in index.ts.
   optional?: boolean
+  // Round 13: a `download` step compares the filename LITERALLY, digits and
+  // all. The default is loose — runs of digits are wildcards — because a name
+  // carrying the moment it was generated otherwise pins the test to the second
+  // it was recorded. See shared/downloadName.ts.
+  downloadExact?: boolean
   // F24.4: a CLEANUP step — it runs even when an earlier step failed and ended
   // the run, so a broken test still deletes the data it created. API steps only.
   teardown?: boolean

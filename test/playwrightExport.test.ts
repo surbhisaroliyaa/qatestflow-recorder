@@ -13,6 +13,7 @@ import {
   repairSteps,
   runtimeTokenPreamble,
   runtimeTokenUse,
+  methodDoc,
   stepText,
   testIdPolicy
 } from '../src/renderer/src/playwrightExport'
@@ -786,6 +787,65 @@ describe('page objects for iframes, dialogs, downloads and tabs', () => {
       const { page } = orders()
       const method = page.slice(page.indexOf('async exportCsv('))
       expect(method.indexOf('waitForEvent')).toBeLessThan(method.indexOf('.click()'))
+    })
+
+    // === Round 13: a filename carrying the time it was generated ======
+    // SauceDemo's receipt is `swag-labs-order-2026-09-23_08-46-16.pdf`. Asserted
+    // literally, the exported spec could pass on exactly one run in history —
+    // and it failed in CI as "the app is broken" rather than "the test is
+    // wrong". Both exporters had their own copy of the literal comparison.
+    const RECEIPT = 'swag-labs-order-2026-09-23_08-46-16.pdf'
+    const receiptSteps = (exact?: boolean): ReturnType<typeof s>[] => [
+      s({ type: 'navigate', url: 'https://shop.test/' }),
+      s({ type: 'click', selector: "getByTestId('pdf')", label: 'Generate PDF order' }),
+      s({ type: 'download', value: RECEIPT, label: RECEIPT, downloadExact: exact })
+    ]
+
+    it('INLINE export wildcards the digits in a timestamped filename', () => {
+      const code = generatePlaywrightTest(receiptSteps(), { name: 'Receipt' })
+      expect(code).toContain(
+        'expect(download2.suggestedFilename()).toMatch(/swag-labs-order-\\d+-\\d+-\\d+_\\d+-\\d+-\\d+\\.pdf/)'
+      )
+      // The literal name must be GONE, or the spec still pins itself to one second.
+      expect(code).not.toContain(`toContain("${RECEIPT}")`)
+    })
+
+    it('PAGE OBJECT export wildcards them too — the two must not disagree', () => {
+      const { spec } = generatePageObjectTest(receiptSteps(), {
+        name: 'Receipt',
+        baseURL: 'https://shop.test'
+      })!
+      expect(spec).toContain(
+        'expect(download1.suggestedFilename()).toMatch(/swag-labs-order-\\d+-\\d+-\\d+_\\d+-\\d+-\\d+\\.pdf/)'
+      )
+      expect(spec).not.toContain(`toContain("${RECEIPT}")`)
+    })
+
+    it('both exporters fall back to a literal compare when the step asks for exact', () => {
+      const inline = generatePlaywrightTest(receiptSteps(true), { name: 'Receipt' })
+      const { spec } = generatePageObjectTest(receiptSteps(true), {
+        name: 'Receipt',
+        baseURL: 'https://shop.test'
+      })!
+      expect(inline).toContain(`toContain("${RECEIPT}")`)
+      expect(spec).toContain(`toContain("${RECEIPT}")`)
+      expect(inline).not.toContain('toMatch(')
+    })
+
+    // A generated regex that does not parse aborts the ENTIRE Playwright batch,
+    // not just its own spec — so this is worth asserting directly.
+    it('produces a regex that actually compiles, even for an awkward name', () => {
+      const code = generatePlaywrightTest(
+        [
+          s({ type: 'navigate', url: 'https://shop.test/' }),
+          s({ type: 'download', value: 'report (final) [v2].pdf', label: 'r' })
+        ],
+        { name: 'Awkward' }
+      )
+      const m = code.match(/toMatch\(\/(.+?)\/\)/)
+      expect(m, code).toBeTruthy()
+      expect(() => new RegExp(m![1])).not.toThrow()
+      expect(new RegExp(m![1]).test('report (final) [v7].pdf')).toBe(true)
     })
 
     it('a flow with neither imports neither type', () => {
@@ -1616,5 +1676,66 @@ describe('Phase 4: scrolling, dragging and notes export', () => {
     expect(stepText(HTML5_DRAG[1])).toBe('Drag Write the spec onto Done')
     expect(stepText(SLIDER_DRAG[1])).toBe('Drag Max price by 120,0 pixels')
     expect(stepText(NOTED[1])).toBe('💬 Checkout phase — card is a Stripe test number')
+  })
+})
+
+// =====================================================================
+// § POM method shape (Round 13). Surbhi's SauceDemo export had two methods
+// whose names hid what they did:
+//   - a page scroll in the middle of the checkout form cut it in half — an
+//     unnamed actions1() and a continue() that also typed the zip;
+//   - addToCart3() also changed the sort order, with nothing saying so.
+// Her calls: a scroll inside a method stays in it (A1), and every method
+// carries a doc comment in the step list's own words (B2).
+// =====================================================================
+const tid = (id: string): Record<string, unknown> => ({
+  selector: `getByTestId('${id}')`,
+  candidates: [{ kind: 'testId', testIdAttr: 'data-test', css: `[data-test="${id}"]` }]
+})
+const CHECKOUT = [
+  s({ type: 'navigate', url: 'https://www.saucedemo.com/checkout-step-one.html' }),
+  s({ type: 'scroll', scrollKind: 'top', label: 'page' }),
+  s({ type: 'select', value: 'Price (low to high)', label: 'Sort products', ...tid('sort') }),
+  s({ type: 'click', label: 'Add to cart', ...tid('add-onesie') }),
+  s({ type: 'type', value: 's', label: 'First Name', ...tid('firstName') }),
+  s({ type: 'click', label: 'Zip/Postal Code', ...tid('postalCode') }),
+  s({ type: 'scroll', scrollKind: 'bottom', label: 'page' }),
+  s({ type: 'type', value: '234123', label: 'Zip/Postal Code', ...tid('postalCode') }),
+  s({ type: 'click', label: 'Continue', ...tid('continue') })
+] as never as RecorderStep[]
+
+describe('§ POM method shape', () => {
+  const pom = generatePageObjectTest(CHECKOUT, { name: 'Checkout' })!
+
+  it('a scroll in the middle of a form stays inside the method', () => {
+    expect(pom.page).not.toMatch(/actions\d/)
+    const cont = pom.page.slice(pom.page.indexOf('async continue('))
+    const body = cont.slice(0, cont.indexOf('\n  }'))
+    expect(body).toContain('this.firstNameInput.fill')
+    expect(body).toContain('window.scrollTo(0, document.body.scrollHeight)')
+    expect(body).toContain('.fill("234123")')
+    expect(syntaxErrors(pom.page)).toEqual([])
+  })
+
+  it('a scroll between methods still lives in the spec, never a scroll-only method', () => {
+    expect(pom.spec).toContain('app.page.evaluate(() => window.scrollTo(0, 0))')
+  })
+
+  it('every method says what it really does, in the step list wording', () => {
+    expect(pom.page).toContain(
+      '  /** Select "Price (low to high)" in Sort products → Click Add to cart */\n  async addToCart('
+    )
+    // Long methods list one step per line.
+    expect(pom.page).toMatch(/ {3}\* Scroll to the bottom of the page\n/)
+  })
+
+  it('a */ in a recorded value cannot end the doc comment early', () => {
+    expect(methodDoc(['Type "a */ b" into Notes'])).toEqual(['  /** Type "a * / b" into Notes */'])
+    const nasty = [
+      ...CHECKOUT.slice(0, 1),
+      s({ type: 'type', value: 'x */ y', label: 'Notes', ...tid('notes') }),
+      s({ type: 'click', label: 'Save', ...tid('save') })
+    ] as never as RecorderStep[]
+    expect(syntaxErrors(generatePageObjectTest(nasty, { name: 'N' })!.page)).toEqual([])
   })
 })
