@@ -11,7 +11,16 @@
 //
 // It needs a desktop session and the Electron binary, so it is a local tool,
 // not a CI job. Run it before hand-testing anything that touches recording.
-import { _electron as electron } from 'playwright'
+//
+// It drives the app through tools/electron-cdp.mjs, not Playwright's _electron:
+// Playwright 1.56 hangs attaching to Electron 44. Same objects, same calls.
+//
+// It opens the app with YOUR data (your library, settings, drafts). To run it
+// against another folder, point SMOKE_APP at an app directory whose main sets
+// its own userData — e.g. a sandbox boot script:
+//
+//   SMOKE_APP=C:/path/to/sandbox/app node tools/e2e-smoke.mjs
+import { launchElectron } from './electron-cdp.mjs'
 import { createServer } from 'node:http'
 
 const PAGE1 = `<!doctype html><html lang="en"><head><title>Smoke 1</title></head><body style="font:16px sans-serif">
@@ -55,8 +64,7 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.once('listening', r))
 const base = `http://127.0.0.1:${server.address().port}/`
 
-const app = await electron.launch({ args: ['.'] })
-const ui = await app.firstWindow()
+const { app, ui } = await launchElectron({ args: [process.env.SMOKE_APP || '.'] })
 await ui.waitForLoadState('domcontentloaded')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const report = { base, problems: [] }

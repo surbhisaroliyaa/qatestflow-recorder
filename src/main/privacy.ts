@@ -14,7 +14,7 @@
 import { app } from 'electron'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
-import { DEFAULT_PRIVACY, type PrivacySettings } from '../shared/evidencePrivacy'
+import { cleanRetention, DEFAULT_PRIVACY, type PrivacySettings } from '../shared/evidencePrivacy'
 
 function privacyFile(): string {
   return join(app.getPath('userData'), 'evidence-privacy.json')
@@ -43,7 +43,10 @@ export async function loadPrivacy(): Promise<PrivacySettings> {
       // The one field whose default is true, so a file written by an older
       // build (which had no such field) keeps capturing the DOM rather than
       // silently losing it.
-      captureDom: parsed.captureDom !== false
+      captureDom: parsed.captureDom !== false,
+      // A file from before retention existed has neither field, and gets the
+      // old behaviour: 40 traces, nothing deleted by age.
+      ...cleanRetention(parsed)
     }
   } catch {
     return { ...DEFAULT_PRIVACY }
@@ -55,7 +58,8 @@ export async function savePrivacy(settings: PrivacySettings): Promise<PrivacySet
     builtins: settings.builtins === true,
     patterns: String(settings.patterns ?? ''),
     maskSelectors: String(settings.maskSelectors ?? ''),
-    captureDom: settings.captureDom !== false
+    captureDom: settings.captureDom !== false,
+    ...cleanRetention(settings)
   }
   await mkdir(app.getPath('userData'), { recursive: true })
   await writeFile(privacyFile(), JSON.stringify(clean, null, 2), 'utf-8')

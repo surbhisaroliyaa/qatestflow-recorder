@@ -138,6 +138,7 @@ export function RecoveryPanel({
                 className="shot-link"
                 onClick={() => window.api.library.openScreenshot(recovery.screenshotPath!)}
                 title="Open the failure screenshot"
+                aria-label="Open the failure screenshot"
               >
                 📷
               </button>
@@ -149,6 +150,7 @@ export function RecoveryPanel({
                 className="shot-link trace-link"
                 onClick={() => openTrace(recovery.traceId!)}
                 title="Open the full run recording (every step's screenshot, console & network)"
+                aria-label="Open the full run recording"
               >
                 ⏺
               </button>
@@ -168,6 +170,7 @@ export function RecoveryPanel({
                 )
               }
               title="Explain this failure: app bug, test bug, or just timing?"
+              aria-label="Explain this failure"
             >
               💡
             </button>

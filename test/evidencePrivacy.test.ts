@@ -61,6 +61,29 @@ describe('the built-in patterns', () => {
     expect(redact('x-api-key: sk_live_abc123', on())).toBe(REDACTED)
   })
 
+  // The pattern used to stop at the first space, so it took the SCHEME and left
+  // the credential: "Authorization: Bearer abc123" became "[redacted] abc123".
+  it('redacts the credential after an auth scheme, not just the scheme word', () => {
+    expect(redact('Authorization: Bearer abc123SECRET', on())).toBe(REDACTED)
+    expect(redact('authorization=Basic dXNlcjpwYXNz', on())).toBe(REDACTED)
+    expect(redact('Authorization: Token t-SECRET', on())).toBe(REDACTED)
+    expect(redact('Authorization: bearer lower-SECRET', on())).toBe(REDACTED)
+  })
+
+  it('redacts a quoted header value, as it appears in page source', () => {
+    const src = `headers: { Authorization: 'Bearer tok-SECRET-123' }, body`
+    expect(redact(src, on())).not.toContain('SECRET')
+    expect(redact(src, on())).toContain('body')
+  })
+
+  it('still redacts a bare header value with no scheme', () => {
+    expect(redact('Authorization: rawtoken-SECRET', on())).toBe(REDACTED)
+  })
+
+  it('does not swallow the next word when a scheme has no value', () => {
+    expect(redact('Authorization: Bearer', on())).toBe(REDACTED)
+  })
+
   it('redacts EVERY occurrence, not every other one', () => {
     // The invisible bug this module exists to avoid. A /g RegExp carries
     // lastIndex between calls, so a shared instance skips alternate matches —

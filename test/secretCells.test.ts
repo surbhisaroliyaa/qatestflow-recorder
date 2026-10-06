@@ -8,6 +8,7 @@ import {
   planSecretEnv,
   refsByStepId,
   secretCell,
+  secretSources,
   secretCellEnv,
   secretCellRef,
   stripRowSecrets,
@@ -324,5 +325,34 @@ describe('a bundle row set', () => {
   it('placeholders a stored {{secret:…}} cell too — a ref is meaningless on another machine', () => {
     const { rows } = placeholderRows([{ token: secretCell('sec_x') }])
     expect(rows[0].token).toBe('{{env:TOKEN}}')
+  })
+})
+
+describe('secretSources — every secret one test holds', () => {
+  it('collects refs from saved steps and protected cells, values from unsaved ones', () => {
+    const steps = [
+      { type: 'type', label: 'Password', secret: true, value: '', secretRef: 'sec_a1' },
+      { type: 'type', label: 'PIN', secret: true, value: 'unsaved-pin' },
+      { type: 'type', label: 'Password', selector: '#pwd', value: 'by-name-pw' }, // not marked
+      { type: 'type', label: 'User', value: 'jane' } // not a secret
+    ]
+    const rows = [
+      { username: 'jane', password: secretCell('sec_b2') },
+      { username: 'bob', password: 'row-plain-pw' }
+    ]
+    const { refs, values } = secretSources(steps, rows)
+    expect(refs.sort()).toEqual(['sec_a1', 'sec_b2'])
+    expect(values.sort()).toEqual(['by-name-pw', 'row-plain-pw', 'unsaved-pin'])
+  })
+
+  it('never treats a {{placeholder}} or an ordinary column as a secret value', () => {
+    const steps = [{ type: 'type', label: 'Password', secret: true, value: '{{env:PASSWORD}}' }]
+    const { refs, values } = secretSources(steps, [{ username: 'jane', city: 'Pune' }])
+    expect(refs).toEqual([])
+    expect(values).toEqual([])
+  })
+
+  it('copes with nothing at all', () => {
+    expect(secretSources(undefined)).toEqual({ refs: [], values: [] })
   })
 })

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { explainLoadError, loadErrorDetails } from '../src/shared/loadErrors'
 import {
   clampPaneWidth,
+  paneMaxWidth,
   readStoredPaneWidth,
   PANE_DEFAULT,
   PANE_MIN,
@@ -72,6 +73,11 @@ describe('the step pane width', () => {
 
   it('on a window too small for both, keeps the pane at its minimum rather than negative', () => {
     expect(clampPaneWidth(400, 600)).toBe(PANE_MIN)
+  })
+
+  it('reports the same maximum the clamp enforces (the divider announces it)', () => {
+    expect(paneMaxWidth(1280)).toBe(clampPaneWidth(5000, 1280))
+    expect(paneMaxWidth(600)).toBe(PANE_MIN)
   })
 
   it('opens at the default when nothing (or nonsense) was remembered', () => {

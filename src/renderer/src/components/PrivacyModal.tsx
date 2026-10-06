@@ -1,5 +1,12 @@
 import React from 'react'
-import { describePrivacy, isValidPattern } from '../../../shared/evidencePrivacy'
+import {
+  describePrivacy,
+  isValidPattern,
+  KEEP_TRACES_MAX,
+  KEEP_TRACES_MIN,
+  MAX_AGE_DAYS_MAX
+} from '../../../shared/evidencePrivacy'
+import { EvidenceStorageSection } from './EvidenceStorageSection'
 
 // =====================================================================
 // EVIDENCE PRIVACY — the settings screen  (Phase 4)
@@ -29,6 +36,8 @@ export interface EvidencePrivacySettings {
   patterns: string
   maskSelectors: string
   captureDom: boolean
+  keepTraces: number
+  maxAgeDays: number
 }
 
 export interface PrivacyModalProps {
@@ -36,13 +45,17 @@ export interface PrivacyModalProps {
   setPrivacy: React.Dispatch<React.SetStateAction<EvidencePrivacySettings | null>>
   onSave: () => Promise<void>
   onClose: () => void
+  /** Something was deleted from the storage section — the app's cached lists
+   *  (saved logins, the loaded test's edge runs) must be re-read. */
+  onStorageChanged?: () => void
 }
 
 export function PrivacyModal({
   privacy,
   setPrivacy,
   onSave,
-  onClose
+  onClose,
+  onStorageChanged
 }: PrivacyModalProps): React.JSX.Element | null {
   if (!privacy) return null
 
@@ -139,6 +152,16 @@ export function PrivacyModal({
             the failure messages and the step titles in the run recording. Not to screenshots — a
             screenshot is pixels; use the box above for those.
           </p>
+          {/* HAR: the same patterns reach a saved network capture, and the
+              cost is replay — spelled out, because a test that fails on
+              replay after this is switched on would otherwise look broken. */}
+          <p className="privacy-hint">
+            They also apply to network captures (HAR) when a test is saved with one: headers, query
+            strings, form posts and response bodies (the emails/tokens box above also blanks cookie
+            and authorization headers). Replay then serves <code>[redacted]</code> where the data
+            was, so a check on that exact value will fail on replay. URL paths are left as they are
+            — replay needs them to find the response.
+          </p>
           {badPatterns.length > 0 && (
             <p className="warn-title">
               ⚠ {badPatterns.length} of these {badPatterns.length === 1 ? 'is' : 'are'} not a valid
@@ -164,6 +187,52 @@ export function PrivacyModal({
             baked into an image that no selector covers stays readable. Treat evidence as sensitive
             even with this on.
           </p>
+
+          {/* Retention: how long evidence stays, saved with the policy. */}
+          <div className="privacy-label">How long evidence is kept</div>
+          <div className="evidence-age">
+            <span>Keep the last</span>
+            <input
+              type="number"
+              className="evidence-days"
+              min={KEEP_TRACES_MIN}
+              max={KEEP_TRACES_MAX}
+              value={privacy.keepTraces}
+              onChange={(e) => set({ keepTraces: Number(e.target.value) })}
+              aria-label="Run recordings to keep"
+            />
+            <span>run recordings (each with its screenshots and video)</span>
+          </div>
+          {/* The day box sits OUTSIDE the checkbox's <label>: inside it,
+              every click into the number would toggle the checkbox too. */}
+          <div className="evidence-age">
+            <label className="evidence-age">
+              <input
+                type="checkbox"
+                checked={privacy.maxAgeDays > 0}
+                onChange={(e) => set({ maxAgeDays: e.target.checked ? 30 : 0 })}
+              />
+              <span>After each run, delete evidence older than</span>
+            </label>
+            <input
+              type="number"
+              className="evidence-days"
+              min={1}
+              max={MAX_AGE_DAYS_MAX}
+              disabled={privacy.maxAgeDays <= 0}
+              value={privacy.maxAgeDays > 0 ? privacy.maxAgeDays : 30}
+              onChange={(e) => set({ maxAgeDays: Math.max(1, Number(e.target.value) || 1) })}
+              aria-label="Days to keep evidence"
+            />
+            <span>days</span>
+          </div>
+          <p className="privacy-hint">
+            Applies to the run-evidence folders listed below — not to saved logins or saved
+            edge-case runs — checked at most once an hour. Files a saved test needs are never
+            deleted by age. Both settings take effect when you press Save policy.
+          </p>
+
+          <EvidenceStorageSection onDeleted={onStorageChanged} />
         </div>
         <div className="modal-footer">
           <button className="modal-btn" onClick={onClose}>

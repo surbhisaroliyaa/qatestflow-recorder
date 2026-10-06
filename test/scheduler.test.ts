@@ -89,16 +89,26 @@ describe('§ the created task', () => {
     expect(cmd).toContain(' run ')
   })
 
+  it('selects the test by monitor id, never by a name substring', () => {
+    // `--grep "Login"` also ran "Login negative" and wrote its failures into
+    // Login's history. The CLI resolves --monitor to the monitor's own file.
+    const cmd = plan.args[plan.args.indexOf('/tr') + 1]
+    expect(cmd).toContain('--monitor "mon-7"')
+    expect(cmd).not.toContain('--grep')
+    expect(cmd).not.toContain('Checkout smoke')
+  })
+
   it('keeps a test name with a quote in it from breaking the command', () => {
+    // The name is no longer IN the command at all, which is the strongest
+    // form of this guarantee — but a quote in the id must still not escape.
     const nasty = buildCreateTask(
-      { monitorId: 'm', testName: 'The "big" flow', intervalMin: 5 },
+      { monitorId: 'm"x', testName: 'The "big" flow', intervalMin: 5 },
       EXE,
       REPORT
     )
     const cmd = nasty.args[nasty.args.indexOf('/tr') + 1]
-    // The inner quotes are gone rather than left to terminate the argument
-    // early and turn the rest of the command into something else.
-    expect(cmd).toContain('--grep "The big flow"')
+    expect(cmd).toContain('--monitor "mx"')
+    expect(cmd).not.toContain('big')
   })
 
   it('clamps the interval to what schtasks actually accepts', () => {
@@ -181,7 +191,9 @@ describe('the scheduled command records against its monitor', () => {
   })
 
   it('still runs the right test and writes the report', () => {
-    expect(tr).toContain('--grep "mozilla.org flow"')
+    // The right test is the monitor's own file, which the CLI resolves from
+    // the id — no name in the command to substring-match other tests.
+    expect(tr).not.toContain('--grep')
     expect(tr).toContain('--reporter junit')
     expect(tr).toContain(String.raw`--out "C:\Reports\out.xml"`)
   })

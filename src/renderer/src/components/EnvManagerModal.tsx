@@ -47,7 +47,7 @@ export function EnvManagerModal({
         setEnvDraft(null)
       }}
     >
-      <div className="env-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="env-modal" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">
             🌐 Environments

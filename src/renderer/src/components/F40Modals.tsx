@@ -1,4 +1,5 @@
 import React from 'react'
+import { plural } from '../../../shared/plural'
 
 // =====================================================================
 // F40 — the three bundle/secret dialogs: export result, import plan, and the
@@ -333,7 +334,7 @@ export function F40Modals({
                       <div className="import-name">
                         <strong>{t.name}</strong>
                         {t.suite && <span className="import-suite">{t.suite}</span>}
-                        <span className="import-meta">{t.stepCount} steps</span>
+                        <span className="import-meta">{plural(t.stepCount, 'step')}</span>
                         {(t.tags ?? []).map((tag) => (
                           <span key={tag} className="tag-chip">
                             {tag}
@@ -343,7 +344,7 @@ export function F40Modals({
                       {t.collidesWith ? (
                         <div className="import-choice">
                           <span className="import-warn">
-                            already exists ({t.existingStepCount} steps
+                            already exists ({plural(t.existingStepCount ?? 0, 'step')}
                             {t.existingUpdatedAt
                               ? `, edited ${new Date(t.existingUpdatedAt).toLocaleDateString()}`
                               : ''}

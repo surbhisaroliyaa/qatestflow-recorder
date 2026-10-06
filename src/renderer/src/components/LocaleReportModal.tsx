@@ -106,6 +106,8 @@ export function LocaleReportModal({
                             <button
                               className="ac-shot"
                               onClick={() => window.api.library.openScreenshot(r.screenshotPath!)}
+                              title={`Open the ${r.locale} screenshot`}
+                              aria-label={`Open the ${r.locale} screenshot`}
                             >
                               📷
                             </button>

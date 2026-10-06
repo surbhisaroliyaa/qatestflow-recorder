@@ -202,8 +202,9 @@ body {
    tool belt grouped by job.
    QF-007: the height is no longer fixed. At 800 px wide the tool row ran off
    the right edge (overflow: hidden) and Coverage / Net / Mock were simply
-   unreachable. The row now WRAPS onto another line instead, and the page view
-   moves down with it — the renderer measures `.browser-area` and main places
+   unreachable. The tool row now stays one line and overflows into a "More ⋯"
+   menu (ToolsRow). Wherever the toolbar ends, the page view starts below it —
+   the renderer measures `.browser-area` and main places
    the native view there (browser:setArea), so nothing has to be kept in
    lock-step by hand any more. 104 px stays the minimum: one row of each. */
 .chrome {
@@ -225,21 +226,103 @@ body {
   align-items: center;
   gap: 8px;
 }
+/* QF-007 "More ⋯": the tool row no longer wraps — a second line pushed the page
+   down — it stays ONE line and ToolsRow moves what doesn't fit into a menu.
+   `position: relative` anchors the hidden measuring copy below. */
 .chrome-row.tools {
+  position: relative;
   gap: 6px;
-  flex-wrap: wrap;
-  row-gap: 8px;
+  flex-wrap: nowrap;
+}
+
+/* The measuring copy of the whole row (ToolsRow). A zero-size clipping box so
+   the copy — wider than the window by design — takes no space and can never
+   cause a sideways scroll; `visibility: hidden` keeps it out of sight, the Tab
+   order and the accessibility tree while its buttons keep their real widths.
+   Its gap MUST match `.chrome-row.tools` or the arithmetic is off. */
+.tools-measure-box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+.tools-measure {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+}
+
+/* The More control sits after the last visible tool, behind the same divider
+   the groups use, and anchors its drop-down menu. */
+.tool-more {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid #444;
+}
+.tool-more-btn.open {
+  background: #3a3f4b;
+}
+
+/* The menu drops down over the page area. The page is a native view painted
+   above the window, so while this is open the app hides the page (see
+   ToolsRow) — the z-index only has to beat the app's own HTML. */
+.tool-more-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: 4px;
+  background: #2c2c2c;
+  border: 1px solid #555;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.chrome .tool-more-item {
+  text-align: left;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: #ddd;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chrome .tool-more-item:hover,
+.chrome .tool-more-item:focus-visible {
+  background: #3a3f4b;
+  outline: none;
+}
+.chrome .tool-more-item:focus-visible {
+  box-shadow: inset 0 0 0 2px #4a6cf7;
+}
+/* On/off tools (Net, Check) show their state in the menu too. */
+.chrome .tool-more-item.on {
+  color: #7ee787;
+}
+.chrome .tool-more-item[aria-disabled='true'] {
+  color: #777;
+  cursor: default;
 }
 
 /* A cluster of related tools; clusters are separated by a subtle divider so the
-   eye can group them (Author · Analyze · Network). A cluster wraps as a unit
-   first, and only splits internally if it alone is wider than the window. */
+   eye can group them (Author · Analyze · Network). Never wraps (QF-007): the
+   tools that don't fit go into the "More ⋯" menu instead. */
 .tool-group {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
-  row-gap: 8px;
+  flex-wrap: nowrap;
 }
 .tool-group + .tool-group {
   margin-left: 4px;
@@ -1405,6 +1488,9 @@ body {
 
 .step-item {
   display: flex;
+  /* Wraps so the edit bar (.step-actions) can take a line of its own under the
+     text — see there. */
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 10px;
   padding: 9px 10px;
@@ -2178,6 +2264,9 @@ body {
 }
 
 .test-name {
+  /* The workspace <h1> while the steps panel is showing (QF-004) — the
+     heading's default margins would push the test bar taller. */
+  margin: 0;
   flex: none;
   max-width: 45%;
   overflow: hidden;
@@ -3245,11 +3334,20 @@ body {
    hover the step, so the panel stays calm but the controls are always there. */
 /* This is a <fieldset> (so `disabled` can switch off all ten buttons at once while
    recording/replaying) — hence the border/padding/min-width reset a fieldset needs. */
+/* Its OWN LINE under the step text, not beside it. Beside it, thirteen buttons
+   took ~170px of a 340px panel and squeezed the text to nothing — one letter per
+   line. Full width (flex-basis 100% in the wrapping .step-item), indented past
+   .step-num (18px + the row's 10px gap) so it lines up with the text — the
+   basis subtracts that indent, or margin + 100% would overflow the row — and
+   wrapping itself if a narrow panel can't fit every button on one line. The
+   negative top margin pulls it up into the row's gap so the step doesn't grow
+   taller than it needs to. */
 .step-actions {
   display: flex;
-  flex: none;
+  flex-wrap: wrap;
+  flex: 1 0 calc(100% - 28px);
   gap: 1px;
-  margin: 0 0 0 6px;
+  margin: -6px 0 0 28px;
   padding: 0;
   border: 0;
   min-inline-size: 0;
@@ -4398,6 +4496,16 @@ body {
   accent-color: #3d6ea5;
   cursor: pointer;
 }
+/* The CI choice (None / GitHub / GitLab) — sized to sit in the footer row. */
+.export-ci-toggle select {
+  font-size: 12px;
+  padding: 2px 6px;
+  background: #1e1e1e;
+  color: #ddd;
+  border: 1px solid #555;
+  border-radius: 5px;
+  cursor: pointer;
+}
 
 /* A2 (scalable library): per-row select checkbox + the bulk-action bar. */
 /* F39.1: a headless red needs re-checking in the app before it's believed. */
@@ -5076,7 +5184,14 @@ body {
 
 /* The environment badge in the workspace test-bar. */
 .test-env-chip {
-  flex: none;
+  /* May shrink, with an ellipsis. It used to be `flex: none`, and in the
+     default 340px steps panel it sat 4px past the bar's edge — which put a
+     sideways scrollbar on the whole panel. The full name is in its tooltip. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   height: 22px;
   padding: 0 8px;
   background: #26303c;
@@ -5112,6 +5227,9 @@ body {
 .test-env-switch {
   position: relative;
   display: inline-flex;
+  /* The chip's wrapper has to be allowed to shrink too, or the chip can't. */
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .env-switch-backdrop {
   position: fixed;
@@ -6827,6 +6945,53 @@ body {
 .privacy-text:focus {
   outline: none;
   border-color: #58a6ff;
+}
+
+/* Evidence storage + retention (inside the privacy screen). A plain table:
+   what each folder holds, what it costs, and its delete button on the row. */
+.evidence-storage {
+  margin-top: 18px;
+  padding-top: 6px;
+  border-top: 1px solid #333;
+}
+
+.evidence-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.evidence-table td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid #2a2a2a;
+  vertical-align: top;
+}
+
+.evidence-num {
+  white-space: nowrap;
+  color: #d8d8d8;
+}
+
+.evidence-act {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.evidence-age {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.evidence-days {
+  width: 72px;
+  padding: 4px 6px;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #d8d8d8;
 }
 
 /* Phase 4 — "runs when closed" on a monitor row. Inline with the rest of the

@@ -213,6 +213,48 @@ function columnsOf(rows: Record<string, string>[]): string[] {
   return [...seen]
 }
 
+// ── every secret a test holds, for scrubbing other files ──────────────
+
+/**
+ * The secrets one test holds: refs already in the store, and plaintext values
+ * not yet moved there (a recording that hasn't been saved).
+ *
+ * For files that COPY what the page saw rather than what the test says — a
+ * network capture holds the login form's post body, password included, and no
+ * text pattern can recognise a password by its shape. The caller resolves the
+ * refs and blanks the values wherever they appear.
+ *
+ * The same rules as stripStepSecrets and stripRowSecrets — a step marked
+ * secret or named like a password, a cell in a sensitive column — so this
+ * cannot disagree with what the save itself protects.
+ */
+export function secretSources(
+  steps: unknown,
+  rows?: Record<string, string>[]
+): { refs: string[]; values: string[] } {
+  const refs = new Set<string>()
+  const values = new Set<string>()
+  for (const raw of Array.isArray(steps) ? steps : []) {
+    const s = raw as Record<string, unknown> | null
+    if (!s) continue
+    if (typeof s.secretRef === 'string' && s.secretRef) refs.add(s.secretRef)
+    if ((s.secret === true || looksLikePasswordStep(s)) && isPlainValue(s.value)) {
+      values.add(s.value)
+    }
+  }
+  if (Array.isArray(rows) && rows.length) {
+    const sensitive = columnsOf(rows).filter(isSensitiveColumn)
+    for (const r of rows) {
+      for (const [col, cell] of Object.entries(r ?? {})) {
+        const ref = secretCellRef(cell)
+        if (ref) refs.add(ref)
+        else if (sensitive.includes(col) && isPlainValue(cell)) values.add(cell)
+      }
+    }
+  }
+  return { refs: [...refs], values: [...values] }
+}
+
 // ── how the export names them ─────────────────────────────────────────
 
 /** `api-key` → `API_KEY`: a legal environment variable name. */

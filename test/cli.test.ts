@@ -1,15 +1,21 @@
 import { describe, it, expect } from 'vitest'
 import {
   CliError,
+  cliRunSummary,
   exitCodeFor,
   HELP_TEXT,
   formatJunit,
+  formatRefusal,
   formatReport,
   parseArgs,
   selectTests,
   summarize,
   describeMissingEnv,
+  envBatches,
   missingEnvRefs,
+  monitorSelection,
+  postbackProblem,
+  stepAtLine,
   type CliOptions,
   type SelectableTest
 } from '../src/main/cli'
@@ -439,5 +445,301 @@ describe('the --monitor flag', () => {
 
   it('stays out of the help text', () => {
     expect(HELP_TEXT).not.toContain('--monitor')
+  })
+})
+
+// =====================================================================
+// § exactly one test
+//
+// The scheduled task used to pick its test with `--grep "<name>"`, a
+// case-insensitive substring match: a monitor on "Login" also ran "Login
+// negative", and wrote that test's failures into Login's history.
+// =====================================================================
+describe('selecting exactly one test', () => {
+  const tests: SelectableTest[] = [
+    { fileName: 'E2E/login.json', name: 'Login', suite: 'E2E', project: '' },
+    { fileName: 'E2E/login-negative.json', name: 'Login negative', suite: 'E2E', project: '' },
+    { fileName: 'Mobile/E2E/login.json', name: 'Login', suite: 'E2E', project: 'Mobile' }
+  ]
+
+  it('--test matches the file path exactly, not as a substring', () => {
+    expect(selectTests(tests, opts({ test: 'E2E/login.json' })).map((t) => t.fileName)).toEqual([
+      'E2E/login.json'
+    ])
+  })
+
+  it('accepts Windows separators and any case, as the file system does', () => {
+    expect(selectTests(tests, opts({ test: 'e2e\\LOGIN.json' }))).toHaveLength(1)
+  })
+
+  it('is parsed from the command line', () => {
+    expect(parseArgs(['run', '--test', 'E2E/login.json'])?.test).toBe('E2E/login.json')
+    expect(HELP_TEXT).toContain('--test')
+  })
+
+  it('a monitor run ignores an old task’s --grep and runs only its own file', () => {
+    // What a task created before this fix still passes. Here the old filters
+    // select nothing at all; the monitor's file selects exactly one.
+    const old = opts({ grep: 'Login', monitorId: 'mon-1', tags: ['@smoke'], suite: 'Other' })
+    expect(selectTests(tests, old)).toHaveLength(0)
+    const sel = monitorSelection(old, 'Mobile/E2E/login.json')
+    expect(selectTests(tests, sel).map((t) => t.fileName)).toEqual(['Mobile/E2E/login.json'])
+    expect(sel.monitorId).toBe('mon-1')
+  })
+})
+
+describe('real per-test durations reach the JUnit file', () => {
+  it('writes each test’s own time, not 0', () => {
+    const xml = formatJunit(
+      summarize([{ name: 'Login', fileName: 'a', ok: true, durationMs: 2345 }], 3000)
+    )
+    expect(xml).toContain('<testcase name="Login" classname="a" time="2.345"')
+  })
+})
+
+describe('the CLI’s postback', () => {
+  it('is the same RunSummary the app sends, rows folded in', () => {
+    const s = cliRunSummary(
+      {
+        name: 'Login',
+        fileName: 'E2E/login.json',
+        ok: false,
+        durationMs: 900,
+        error: 'boom',
+        rows: { total: 3, failed: 1 }
+      },
+      { suite: 'E2E', project: '', tags: ['@smoke'], stepCount: 7 }
+    )
+    expect(s).toEqual({
+      testName: 'Login',
+      ok: false,
+      total: 7,
+      failed: 1,
+      durationMs: 900,
+      error: 'boom',
+      suite: 'E2E',
+      project: undefined,
+      tags: ['@smoke'],
+      rows: { total: 3, failed: 1 }
+    })
+    // No step number is invented: the headless run does not know one.
+    expect(s.failedAtStep).toBeUndefined()
+  })
+
+  it('a lost postback is reported in text and JSON, and never changes the exit code', () => {
+    const r = summarize(
+      [
+        { name: 'Login', fileName: 'a', ok: true, durationMs: 1, postback: { ok: true } },
+        {
+          name: 'Pay',
+          fileName: 'b',
+          ok: true,
+          durationMs: 1,
+          postback: { ok: false, error: 'The receiver returned 500' }
+        }
+      ],
+      2
+    )
+    expect(formatReport(r, 'text')).toContain('postback not delivered: The receiver returned 500')
+    expect(postbackProblem(r)).toContain('1 of 2')
+    expect(JSON.parse(formatReport(r, 'json')).results[1].postback.ok).toBe(false)
+    expect(exitCodeFor(r, opts())).toBe(0)
+  })
+
+  it('says nothing when every attempted postback arrived', () => {
+    const r = summarize(
+      [{ name: 'Login', fileName: 'a', ok: true, durationMs: 1, postback: { ok: true } }],
+      1
+    )
+    expect(postbackProblem(r)).toBeNull()
+    expect(formatReport(r, 'text')).not.toContain('postback')
+  })
+})
+
+// =====================================================================
+// Which step failed, on the path nobody watches.
+//
+// A command-line or scheduled failure used to reach a receiver as `failed` and
+// nothing else. The spec the CLI generates carries a `// qtf:step <n>` marker
+// above each step's code; Playwright reports the LINE a failure was raised on,
+// and the nearest marker above it is the step. These tests use the REAL
+// exporter, because a marker the exporter stopped emitting would otherwise
+// only show up as every failure quietly losing its step number.
+// =====================================================================
+describe('tracing a failure back to its step', () => {
+  type Steps = Parameters<typeof generatePlaywrightTest>[0]
+  const steps = [
+    { type: 'navigate', url: 'https://www.saucedemo.com/' },
+    { type: 'type', value: 'standard_user', selector: "getByTestId('username')" },
+    { type: 'click', selector: "getByTestId('skip-me')", disabled: true },
+    { type: 'type', value: '', secret: true, selector: "getByTestId('password')" },
+    { type: 'click', selector: "getByTestId('login-button')" },
+    { type: 'assert', assertKind: 'visible', selector: "getByText('Products')" }
+  ] as unknown as Steps
+  // getByTestId is rewritten to a portable CSS locator, so the needles below
+  // are the parts of a line that survive that: the value, or the quoted id.
+  const lineOf = (code: string, needle: string): number =>
+    code.split('\n').findIndex((l) => l.includes(needle)) + 1
+
+  it('an exported spec is unchanged — markers are for the CLI’s own copy only', () => {
+    expect(generatePlaywrightTest(steps, { name: 'T' })).not.toContain('qtf:step')
+  })
+
+  it('names the step the failing line belongs to, numbered as the editor numbers it', () => {
+    const code = generatePlaywrightTest(steps, { name: 'T', stepMarkers: true })
+    // The login click is the FIFTH row in the editor — the disabled row above
+    // it still counts, as it does on screen.
+    expect(stepAtLine(code, lineOf(code, '"login-button'))).toBe(5)
+    expect(stepAtLine(code, lineOf(code, 'fill("standard_user")'))).toBe(2)
+    expect(stepAtLine(code, lineOf(code, 'process.env.PASSWORD'))).toBe(4)
+  })
+
+  it('reports a step inside a linked block as the block’s own row', () => {
+    // Flat steps 1–2 came from a block on display row 1 (0-based), so a
+    // failure in either is "step 2" — the row a person can find.
+    const code = generatePlaywrightTest(steps.slice(0, 3), { name: 'T', stepMarkers: true })
+    const planMap = [0, 1, 1]
+    expect(stepAtLine(code, lineOf(code, 'fill("standard_user")'), planMap)).toBe(2)
+  })
+
+  it('says nothing rather than blame step 1 for a failure above the first step', () => {
+    const code = generatePlaywrightTest(steps, { name: 'T', stepMarkers: true })
+    expect(stepAtLine(code, lineOf(code, 'test.use('))).toBeUndefined()
+    expect(stepAtLine(code, undefined)).toBeUndefined()
+  })
+
+  it('still marks the right step in a data-driven spec, which is re-indented', () => {
+    const data = [
+      { type: 'navigate', url: 'https://www.saucedemo.com/' },
+      { type: 'type', value: '{{username}}', selector: "getByTestId('username')" }
+    ] as unknown as Steps
+    const code = generatePlaywrightTest(data, {
+      name: 'T',
+      stepMarkers: true,
+      data: { columns: dataColumns(data), rows: [{ username: 'a' }, { username: 'b' }] }
+    })
+    expect(stepAtLine(code, lineOf(code, '.fill(data.username)'))).toBe(2)
+  })
+
+  it('the marked spec is still valid TypeScript, loops included', async () => {
+    const ts = (await import('typescript')).default
+    const code = generatePlaywrightTest(
+      [
+        { type: 'repeat', value: '2' },
+        { type: 'click', selector: "getByTestId('add')" },
+        { type: 'endRepeat' },
+        ...steps
+      ] as unknown as Steps,
+      { name: 'T', stepMarkers: true }
+    )
+    const sf = ts.createSourceFile('s.ts', code, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+    const diags = (sf as unknown as { parseDiagnostics?: unknown[] }).parseDiagnostics ?? []
+    expect(diags).toEqual([])
+    expect(stepAtLine(code, lineOf(code, '"add'))).toBe(2)
+  })
+
+  it('the step reaches the postback summary and every reporter', () => {
+    const r = {
+      name: 'Login',
+      fileName: 'E2E/login.json',
+      ok: false,
+      durationMs: 900,
+      error: 'locator.click: Timeout 30000ms exceeded.',
+      failedAtStep: 5
+    }
+    expect(cliRunSummary(r, { stepCount: 6 }).failedAtStep).toBe(5)
+    const report = summarize([r], 900)
+    expect(formatReport(report, 'text')).toContain('step 5: locator.click: Timeout')
+    expect(JSON.parse(formatReport(report, 'json')).results[0].failedAtStep).toBe(5)
+    expect(formatJunit(report)).toContain('>Failed at step 5</failure>')
+  })
+
+  it('a failure with no traceable step keeps its message everywhere, and invents no number', () => {
+    const r = { name: 'Login', fileName: 'a', ok: false, durationMs: 1, error: 'boom' }
+    expect(cliRunSummary(r, { stepCount: 3 }).failedAtStep).toBeUndefined()
+    expect(formatReport(summarize([r], 1), 'text')).toContain('\n      boom')
+    expect(formatJunit(summarize([r], 1))).toContain('<failure message="boom"></failure>')
+  })
+})
+
+// =====================================================================
+// A saved password on the command line.
+//
+// Each test is now run with its OWN environment — its stored password filled
+// in — so the refusal has to check each spec against the environment it will
+// actually get, and a batch can only share an environment its tests agree on.
+// =====================================================================
+describe('per-test environments', () => {
+  const pw = { name: 'Login', code: "await p.fill(process.env.PASSWORD ?? '')" }
+  const other = { name: 'Checkout', code: "await p.fill(process.env.PASSWORD ?? '')" }
+
+  it('a stored password filled for one test does not excuse another that has none', () => {
+    const missing = missingEnvRefs([pw, other], {}, [{ PASSWORD: 'x' }, undefined])
+    expect(missing).toEqual([{ name: 'PASSWORD', tests: ['Checkout'] }])
+  })
+
+  it('is satisfied when every test has its value, from wherever it came', () => {
+    expect(missingEnvRefs([pw, other], { PASSWORD: 'from-os' }, [{ PASSWORD: 'x' }])).toEqual([])
+  })
+
+  it('the refusal names the variable and never a value', () => {
+    const text = describeMissingEnv([{ name: 'PASSWORD', tests: ['Login'] }])
+    expect(text).toContain('PASSWORD')
+    expect(text).toContain('saved password')
+  })
+
+  it('tests that agree share one run; a different password gets its own', () => {
+    const batches = envBatches([
+      { id: 'a', env: { BASE_URL: 'u', PASSWORD: 'one' } },
+      { id: 'b', env: { BASE_URL: 'u', PASSWORD: 'two' } },
+      { id: 'c', env: { BASE_URL: 'u', PASSWORD: 'one' } },
+      { id: 'd', env: { BASE_URL: 'u' } }
+    ])
+    expect(batches.map((b) => b.ids)).toEqual([['a', 'c', 'd'], ['b']])
+    expect(batches[1].env.PASSWORD).toBe('two')
+  })
+
+  it('one test, one run — the scheduled monitor case', () => {
+    expect(envBatches([{ id: 'm', env: { PASSWORD: 'p' } }])).toEqual([
+      { ids: ['m'], env: { PASSWORD: 'p' } }
+    ])
+  })
+})
+
+// A refused run (exit 2) used to write NO --out file; the reason went only to
+// stdout, which a packaged Windows app may never show. Found 2026-10-06: a
+// missing PASSWORD gave a pipeline exit 2 and no explanation anywhere.
+describe('formatRefusal — the --out file for a run that could not happen', () => {
+  const reason =
+    'Cannot run: 1 environment variable is not set.\n\n  PASSWORD   needed by 1 test, e.g. "Login <admin> & co"\n'
+
+  it('JUnit: one errored testcase carrying the reason, so CI shows it red WITH the why', () => {
+    const out = formatRefusal(reason, 'junit')
+    expect(out).toContain('tests="1" failures="0" errors="1"')
+    expect(out).toContain('<error message="Cannot run: 1 environment variable is not set.">')
+    expect(out).toContain('PASSWORD')
+    // escaped, so the file stays parseable
+    expect(out).toContain('&quot;Login &lt;admin&gt; &amp; co&quot;')
+    expect(out).not.toMatch(/<admin>/)
+  })
+
+  it('JUnit: strips control characters, like the normal report', () => {
+    // Asserting the ABSENCE of control characters necessarily means naming them.
+    // eslint-disable-next-line no-control-regex
+    expect(formatRefusal('bad\u0001byte', 'junit')).not.toMatch(/[\u0000-\u0008]/)
+  })
+
+  it('JSON: says it did not run, and why', () => {
+    const j = JSON.parse(formatRefusal(reason, 'json'))
+    expect(j.notRun).toBe(true)
+    expect(j.reason).toContain('PASSWORD')
+    expect(j.total).toBe(0)
+    expect(j.results).toEqual([])
+  })
+
+  it('text: the reason, headed NOT RUN', () => {
+    const out = formatRefusal(reason, 'text')
+    expect(out.startsWith('NOT RUN')).toBe(true)
+    expect(out).toContain('PASSWORD')
   })
 })

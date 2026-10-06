@@ -203,6 +203,7 @@ export function BlocksPanel({
                         className="block-mini"
                         onClick={() => handleInsertBlock(b.fileName)}
                         title="Insert a one-time COPY (snapshot, not linked)"
+                        aria-label={`Insert a copy of ${b.name}`}
                       >
                         ⧉
                       </button>
@@ -211,6 +212,7 @@ export function BlocksPanel({
                         className="block-mini"
                         onClick={() => handleEditBlock(b)}
                         title={`Edit "${b.name}" — updates every test linked to it`}
+                        aria-label={`Edit block ${b.name}`}
                       >
                         ✎
                       </button>

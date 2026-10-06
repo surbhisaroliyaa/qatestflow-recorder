@@ -234,6 +234,7 @@ export function SavePanel({
                 className="tag-x"
                 onClick={() => setTags(tags.filter((x) => x !== t))}
                 title={`Remove ${t}`}
+                aria-label={`Remove tag ${t}`}
               >
                 ×
               </button>

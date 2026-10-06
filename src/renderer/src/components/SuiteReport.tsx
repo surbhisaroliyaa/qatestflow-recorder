@@ -406,6 +406,7 @@ export function SuiteReport({
                             className="shot-link"
                             onClick={() => window.api.library.openScreenshot(x.screenshotPath!)}
                             title="Open the failure screenshot"
+                            aria-label={`Open the failure screenshot for ${x.name}`}
                           >
                             📷
                           </button>

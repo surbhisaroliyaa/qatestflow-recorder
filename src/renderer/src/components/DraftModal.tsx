@@ -1,4 +1,5 @@
 import React from 'react'
+import { plural } from '../../../shared/plural'
 
 // =====================================================================
 // DraftModal — lifted out of App.tsx verbatim.
@@ -111,7 +112,8 @@ export function DraftModal({
           {draftResult && (
             <>
               <div className="ac-summary">
-                Draft: <strong>{draftResult.title}</strong> · {draftResult.steps.length} steps
+                Draft: <strong>{draftResult.title}</strong> ·{' '}
+                {plural(draftResult.steps.length, 'step')}
               </div>
               <ul className="ac-list">
                 {draftResult.steps.map((s, i) => {
@@ -160,7 +162,7 @@ export function DraftModal({
                 onClick={handleInsertDraft}
                 disabled={draftBusy}
               >
-                ＋ Insert {draftResult.steps.length} steps
+                ＋ Insert {plural(draftResult.steps.length, 'step')}
               </button>
             </>
           ) : (

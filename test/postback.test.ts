@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   DEFAULT_POSTBACK,
   buildRunPayload,
+  deliverPostback,
   redactRunSummary,
   gitlabConfigError,
   gitlabIssuesUrl,
@@ -9,6 +10,7 @@ import {
   parseHeaders,
   postbackUrlError,
   shouldPost,
+  type PostbackIo,
   type RunSummary
 } from '../src/shared/postback'
 
@@ -75,6 +77,41 @@ describe('§ the payload is a contract', () => {
       durationMs: 4310,
       failure: { step: 7, message: 'Button not found' },
       traceId: 'trace-9'
+    })
+  })
+
+  it('a headless failure with no traceable step still says why — the step is simply absent', () => {
+    // A command-line or scheduled run learns where it failed from Playwright's
+    // report, and cannot always trace that to a step. It used to send a bare
+    // `status: failed` with nothing to act on; now the message goes on its own.
+    const payload = buildRunPayload(
+      { ...RUN, ok: false, failed: 1, error: 'Test timeout of 30000ms exceeded.' },
+      AT
+    )
+    expect(payload).toEqual({
+      schema: 'qatestflow.run/1',
+      sentAt: '2026-09-21T10:30:00.000Z',
+      test: 'SauceDemo login',
+      suite: 'E2E',
+      project: 'Checkout',
+      tags: ['@smoke'],
+      status: 'failed',
+      steps: { total: 12, failed: 1 },
+      durationMs: 4310,
+      failure: { message: 'Test timeout of 30000ms exceeded.' }
+    })
+    // Absent, not `undefined` under the key: a receiver's `'step' in failure`
+    // must be false, and the JSON on the wire must not carry it.
+    expect('step' in payload.failure!).toBe(false)
+    expect(JSON.parse(JSON.stringify(payload)).failure).toEqual({
+      message: 'Test timeout of 30000ms exceeded.'
+    })
+    expect(payload.schema).toBe('qatestflow.run/1')
+  })
+
+  it('a failure with no message at all still carries a message a receiver can show', () => {
+    expect(buildRunPayload({ ...RUN, ok: false, failed: 1 }, AT).failure).toEqual({
+      message: 'Test failed'
     })
   })
 
@@ -306,6 +343,15 @@ describe('the evidence-privacy policy over a run summary', () => {
     expect(JSON.stringify(payload)).not.toContain('standard_user')
   })
 
+  it('reaches a headless failure that has no step number too', () => {
+    // The message-only failure block is new; it must not be a way around the
+    // scrubbing the step-numbered one always had.
+    const payload = buildRunPayload(redactRunSummary({ ...run, failedAtStep: undefined }, scrub))
+    expect(payload.failure).toEqual({
+      message: 'Expected "Products" — actual: "[redacted] is locked out"'
+    })
+  })
+
   it('leaves a run with no error alone, object identity and all', () => {
     const passing = { ...run, ok: true, error: undefined }
     expect(redactRunSummary(passing, scrub)).toBe(passing)
@@ -316,5 +362,104 @@ describe('the evidence-privacy policy over a run summary', () => {
     // not an oversight — see the note on redactRunSummary.
     const out = redactRunSummary({ ...run, testName: 'standard_user login' }, scrub)
     expect(out.testName).toBe('standard_user login')
+  })
+})
+
+// =====================================================================
+// § delivery — the ONE sender the app and the command line share.
+// It used to live inside the IPC handler, out of the CLI's reach, so a
+// scheduled or pipeline run sent no postback at all.
+// =====================================================================
+describe('§ delivering a postback', () => {
+  const SETTINGS = { when: 'always' as const, url: 'https://hooks.example.com/run', headers: '' }
+  const io = (
+    responses: ({ status: number } | Error)[]
+  ): {
+    io: PostbackIo
+    calls: { url: string; body: string; headers: Record<string, string> }[]
+    waits: number[]
+  } => {
+    const calls: { url: string; body: string; headers: Record<string, string> }[] = []
+    const waits: number[] = []
+    let i = 0
+    return {
+      calls,
+      waits,
+      io: {
+        fetch: async (url, init) => {
+          calls.push({ url, body: init.body, headers: init.headers })
+          const r = responses[Math.min(i++, responses.length - 1)]
+          if (r instanceof Error) throw r
+          return { ok: r.status < 300, status: r.status, statusText: '' }
+        },
+        wait: async (ms) => {
+          waits.push(ms)
+        },
+        redact: (t) => t.replace(/secret-\w+/g, '[redacted]'),
+        reachError: () => 'Could not reach hooks.example.com',
+        now: AT
+      }
+    }
+  }
+
+  it('sends nothing when the policy says not to', async () => {
+    const t = io([{ status: 200 }])
+    const out = await deliverPostback({ ...SETTINGS, when: 'failure' }, RUN, t.io)
+    expect(out).toEqual({ ok: true, skipped: true })
+    expect(t.calls).toHaveLength(0)
+  })
+
+  it('armed without a URL is UNCONFIGURED, not a failed delivery', async () => {
+    const t = io([{ status: 200 }])
+    const out = await deliverPostback({ ...SETTINGS, url: '' }, RUN, t.io)
+    expect(out.unconfigured).toBe(true)
+    expect(t.calls).toHaveLength(0)
+  })
+
+  it('posts the redacted payload, rows included', async () => {
+    const t = io([{ status: 204 }])
+    const out = await deliverPostback(
+      SETTINGS,
+      {
+        ...RUN,
+        ok: false,
+        failed: 1,
+        failedAtStep: 2,
+        error: 'saw secret-abc',
+        rows: { total: 3, failed: 1 }
+      },
+      t.io
+    )
+    expect(out).toEqual({ ok: true, status: 204 })
+    const body = JSON.parse(t.calls[0].body)
+    expect(body.failure.message).toBe('saw [redacted]')
+    expect(body.rows).toEqual({ total: 3, failed: 1 })
+    expect(t.calls[0].headers['Content-Type']).toBe('application/json')
+  })
+
+  it('retries a 5xx or a network error, three attempts in all', async () => {
+    const t = io([new Error('ECONNRESET'), { status: 503 }, { status: 503 }])
+    const out = await deliverPostback(SETTINGS, RUN, t.io)
+    expect(t.calls).toHaveLength(3)
+    expect(t.waits).toEqual([1000, 2000])
+    expect(out.ok).toBe(false)
+    expect(out.status).toBe(503)
+  })
+
+  it('does not retry a 4xx — it will be the same answer next time', async () => {
+    const t = io([{ status: 401 }])
+    const out = await deliverPostback(SETTINGS, RUN, t.io)
+    expect(t.calls).toHaveLength(1)
+    expect(out.error).toContain('401')
+  })
+
+  it('names the host when it could not be reached at all', async () => {
+    const t = io([new Error('ENOTFOUND')])
+    const out = await deliverPostback(SETTINGS, RUN, t.io)
+    expect(out).toEqual({
+      ok: false,
+      status: undefined,
+      error: 'Could not reach hooks.example.com'
+    })
   })
 })

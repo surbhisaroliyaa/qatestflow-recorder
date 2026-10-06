@@ -31,9 +31,19 @@ export function TraceViewerModal({
   if (!traceView) return null
   return (
     <div className="modal-backdrop" onClick={closeTrace}>
-      <div className="trace-modal" onClick={(e) => e.stopPropagation()}>
+      {/* Not `.modal` — that class would override this viewer's own size and
+          colours — so it declares itself to the shared focus trap by markup:
+          role="dialog" here and data-modal-close on ✕ (see modalA11y.ts).
+          Without them the trap marked the backdrop and Escape did nothing. */}
+      <div
+        className="trace-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="trace-viewer-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="trace-header">
-          <span className="trace-title">
+          <span className="trace-title" id="trace-viewer-title">
             ⏺ Run recording{traceView.testName ? ` — ${traceView.testName}` : ''}
           </span>
           <span className={`trace-result ${traceView.ok ? 'ok' : 'fail'}`}>
@@ -54,7 +64,12 @@ export function TraceViewerModal({
               💾 Save recording
             </button>
           )}
-          <button className="trace-close" onClick={closeTrace} aria-label="Close">
+          <button
+            className="trace-close"
+            data-modal-close
+            onClick={closeTrace}
+            aria-label="Close run recording"
+          >
             ✕
           </button>
         </div>

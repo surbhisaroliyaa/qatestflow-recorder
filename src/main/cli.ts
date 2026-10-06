@@ -34,6 +34,8 @@
 // index.ts, so every rule here is testable without an Electron app.
 // =====================================================================
 
+import type { RunSummary } from '../shared/postback'
+
 export interface CliOptions {
   command: 'run' | 'list' | 'help'
   /** Only tests in this suite (folder). */
@@ -44,6 +46,13 @@ export interface CliOptions {
   tags: string[]
   /** Only tests whose name or path contains this, case-insensitively. */
   grep?: string
+  /**
+   * Exactly this one test, by its library-relative file path
+   * (e.g. `E2E/login.json`, as `list` prints it). --grep is a substring match,
+   * which is right for a person narrowing a list and wrong for anything that
+   * must run ONE test: "Login" also matches "Login negative".
+   */
+  test?: string
   reporter: 'text' | 'json' | 'junit'
   /** Write the report here instead of (only) stdout. */
   out?: string
@@ -74,6 +83,7 @@ const VALUE_FLAGS = new Set([
   '--project',
   '--tag',
   '--grep',
+  '--test',
   '--reporter',
   '--out',
   '--workers',
@@ -161,6 +171,9 @@ export function parseArgs(argv: string[]): CliOptions | null {
       case '--grep':
         opts.grep = value
         break
+      case '--test':
+        opts.test = value
+        break
       case '--reporter':
         if (value !== 'text' && value !== 'json' && value !== 'junit') {
           throw new CliError(`Unknown reporter "${value}". Use text, json or junit.`)
@@ -205,7 +218,9 @@ export interface SelectableTest {
  */
 export function selectTests(tests: SelectableTest[], opts: CliOptions): SelectableTest[] {
   const grep = opts.grep?.toLowerCase()
+  const exact = opts.test ? samePath(opts.test) : undefined
   return tests.filter((t) => {
+    if (exact !== undefined && samePath(t.fileName) !== exact) return false
     if (opts.suite && t.suite !== opts.suite) return false
     if (opts.project && t.project !== opts.project) return false
     if (opts.tags.length && !opts.tags.every((tag) => (t.tags ?? []).includes(tag))) return false
@@ -214,12 +229,62 @@ export function selectTests(tests: SelectableTest[], opts: CliOptions): Selectab
   })
 }
 
+/**
+ * A library path in the one form two spellings of it can be compared in.
+ * Windows users type `E2E\login.json`, `list` prints `E2E/login.json`, and the
+ * file system does not care about case — so neither does this.
+ */
+function samePath(p: string): string {
+  return p
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.?\/+/, '')
+    .toLowerCase()
+}
+
+/**
+ * The options a run for a MONITOR actually uses: exactly the monitor's own
+ * test, and nothing else.
+ *
+ * Every other filter is dropped, on purpose. Scheduled tasks created before
+ * this existed carry `--grep "<test name>" --monitor <id>`; the grep was a
+ * substring match that also ran "Login negative" for a monitor on "Login". With
+ * the file pinned exactly, keeping the grep could only ever HIDE the right test
+ * — after a rename, the old name no longer matches and the task would run
+ * nothing. So an old task keeps working, exactly, with no re-creation.
+ */
+export function monitorSelection(opts: CliOptions, fileName: string): CliOptions {
+  return {
+    ...opts,
+    test: fileName,
+    grep: undefined,
+    suite: undefined,
+    project: undefined,
+    tags: []
+  }
+}
+
 export interface CliTestResult {
   name: string
   fileName: string
   ok: boolean
   durationMs: number
   error?: string
+  /**
+   * The step the failure happened on, 1-based and numbered the way the editor
+   * numbers the saved test — so "step 4" here is the fourth row the user sees.
+   * Absent when the failure could not be traced to a step; see stepAtLine.
+   */
+  failedAtStep?: number
+  /** A data-driven test: how many rows ran and how many failed. */
+  rows?: { total: number; failed: number }
+  /**
+   * This test's postback, when one was attempted. Absent when postbacks are
+   * off or the policy skipped this result. A failed delivery never changes the
+   * exit code — the tests' outcome is the truth — but it is REPORTED, because a
+   * postback nobody hears about failing is the exact problem it exists to solve.
+   */
+  postback?: { ok: boolean; error?: string }
 }
 
 export interface CliRunReport {
@@ -268,8 +333,8 @@ export function formatJunit(report: CliRunReport, suiteName = 'QATestFlow'): str
     // Matching control characters is the POINT here: they are legal in a JS
     // string and illegal in XML 1.0, and one of them makes the whole report
     // unparseable. This is the one place that should contain this range.
-    // eslint-disable-next-line no-control-regex, no-irregular-whitespace
-    xml(s.replace(/[ --]/g, ''))
+    // eslint-disable-next-line no-control-regex
+    xml(s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, ''))
   const lines: string[] = ['<?xml version="1.0" encoding="UTF-8"?>']
   lines.push(
     `<testsuite name="${xml(suiteName)}" tests="${report.total}" failures="${report.failed}" time="${(report.durationMs / 1000).toFixed(3)}">`
@@ -280,7 +345,10 @@ export function formatJunit(report: CliRunReport, suiteName = 'QATestFlow'): str
       lines.push(`${open} />`)
     } else {
       lines.push(`${open}>`)
-      lines.push(`    <failure message="${clean(r.error ?? 'Test failed')}"></failure>`)
+      // The step goes in the element's text, not the message attribute: CI
+      // systems show the message as the headline and it should stay the error.
+      const at = r.failedAtStep !== undefined ? `Failed at step ${r.failedAtStep}` : ''
+      lines.push(`    <failure message="${clean(r.error ?? 'Test failed')}">${at}</failure>`)
       lines.push('  </testcase>')
     }
   }
@@ -294,21 +362,151 @@ export function formatJson(report: CliRunReport): string {
 
 /** Human-readable, for someone running it by hand. */
 export function formatText(report: CliRunReport): string {
-  const lines = report.results.map(
-    (r) => `${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.ok ? '' : `\n      ${r.error ?? ''}`}`
-  )
+  const lines = report.results.map((r) => {
+    let line = `${r.ok ? 'PASS' : 'FAIL'}  ${r.name}`
+    if (r.rows) line += `  (${r.rows.total - r.rows.failed}/${r.rows.total} rows passed)`
+    if (!r.ok) {
+      const at = r.failedAtStep !== undefined ? `step ${r.failedAtStep}: ` : ''
+      line += `\n      ${at}${r.error ?? ''}`
+    }
+    if (r.postback && !r.postback.ok) {
+      line += `\n      postback not delivered: ${r.postback.error ?? 'no reason given'}`
+    }
+    return line
+  })
   lines.push('')
   lines.push(
     `${report.passed} passed, ${report.failed} failed, ${report.total} total ` +
       `(${(report.durationMs / 1000).toFixed(1)}s)`
   )
+  const pb = postbackProblem(report)
+  if (pb) lines.push(pb)
   return lines.join('\n') + '\n'
+}
+
+/**
+ * One line saying which postbacks did not arrive, or null when every attempted
+ * one did. Shared by the text report and the monitor history, so the two can
+ * never describe the same failure differently.
+ */
+export function postbackProblem(report: CliRunReport): string | null {
+  const tried = report.results.filter((r) => r.postback)
+  const lost = tried.filter((r) => !r.postback!.ok)
+  if (!lost.length) return null
+  return (
+    `Postback not delivered for ${lost.length} of ${tried.length} ` +
+    `test${tried.length === 1 ? '' : 's'} — e.g. ${lost[0].name}: ` +
+    `${lost[0].postback!.error ?? 'no reason given'}`
+  )
+}
+
+/**
+ * The postback's view of one CLI result — the same fields the in-app run
+ * sends, so a receiver cannot tell (and need not care) which path ran it.
+ *
+ * `failedAtStep` is set only when the failure was traced back to a recorded
+ * step (see stepAtLine). When it was not, it stays unset rather than guessed —
+ * a wrong number sends a receiver to the wrong step — and the payload still
+ * carries the message on its own.
+ */
+export function cliRunSummary(
+  r: CliTestResult,
+  meta: { suite?: string; project?: string; tags?: string[]; stepCount: number }
+): RunSummary {
+  return {
+    testName: r.name,
+    ok: r.ok,
+    total: meta.stepCount,
+    failed: r.ok ? 0 : 1,
+    durationMs: r.durationMs,
+    failedAtStep: r.ok ? undefined : r.failedAtStep,
+    error: r.ok ? undefined : r.error,
+    suite: meta.suite || undefined,
+    project: meta.project || undefined,
+    tags: meta.tags?.length ? meta.tags : undefined,
+    // One postback per TEST, rows folded in — the model the in-app data run
+    // uses. Per-row postbacks gave a receiver N "runs" of the same test.
+    rows: r.rows
+  }
+}
+
+/**
+ * Which recorded step a failure on `line` of a generated spec belongs to.
+ *
+ * The CLI generates its specs with `stepMarkers`, which puts a
+ * `// qtf:step <n>` line above each step's code; the answer is the nearest
+ * marker at or above the failing line. `planMap` then turns that index — into
+ * the EXPANDED step list, where a linked block is already its inner steps —
+ * into the row the editor shows, exactly as the app's toDisplayIdx does. Every
+ * step inside a block therefore reports as the block's own row: the editor
+ * shows the block as one row, so that is the number a person can find. Which
+ * step inside the block failed is not recoverable from the number, the same
+ * limit the in-app run has.
+ *
+ * Returns the 1-based step number, or undefined when the line is above the
+ * first marker (the file's setup, a helper) or no line was reported — in which
+ * case the failure is sent without a step rather than pinned on step 1.
+ */
+export function stepAtLine(
+  code: string,
+  line: number | undefined,
+  planMap?: number[]
+): number | undefined {
+  if (line === undefined || !Number.isInteger(line) || line < 1) return undefined
+  const lines = code.split(/\r?\n/)
+  for (let n = Math.min(line, lines.length) - 1; n >= 0; n--) {
+    const m = /^\s*\/\/ qtf:step (\d+)\s*$/.exec(lines[n])
+    if (!m) continue
+    const flatIdx = Number(m[1])
+    const display = planMap ? planMap[flatIdx] : flatIdx
+    return display === undefined ? undefined : display + 1
+  }
+  return undefined
 }
 
 export function formatReport(report: CliRunReport, reporter: CliOptions['reporter']): string {
   if (reporter === 'json') return formatJson(report)
   if (reporter === 'junit') return formatJunit(report)
   return formatText(report)
+}
+
+/**
+ * The --out file for a run that could not happen at all (exit 2): no tests
+ * matched, a needed value is missing, the runner would not start.
+ *
+ * It used to write nothing, and the reason went only to stdout — which, on
+ * Windows, a packaged Electron app may never show (see the console caveat at
+ * the top). A pipeline then had an exit code of 2 and no explanation anywhere.
+ * So the reason goes into the file the pipeline already reads, in the format
+ * it asked for: JUnit as an <error> (a CI system shows it red, WITH the
+ * reason — not as a green "0 tests"), JSON with `notRun` and `reason`.
+ */
+export function formatRefusal(reason: string, reporter: CliOptions['reporter']): string {
+  const text = reason.trim()
+  if (reporter === 'json') {
+    return (
+      JSON.stringify(
+        { notRun: true, reason: text, total: 0, passed: 0, failed: 0, durationMs: 0, results: [] },
+        null,
+        2
+      ) + '\n'
+    )
+  }
+  if (reporter === 'junit') {
+    // eslint-disable-next-line no-control-regex
+    const clean = (s: string): string => xml(s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, ''))
+    const first = text.split('\n')[0]
+    return [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<testsuite name="QATestFlow" tests="1" failures="0" errors="1" time="0.000">',
+      `  <testcase name="QATestFlow could not run" classname="QATestFlow" time="0.000">`,
+      `    <error message="${clean(first)}">${clean(text)}</error>`,
+      '  </testcase>',
+      '</testsuite>',
+      ''
+    ].join('\n')
+  }
+  return `NOT RUN\n\n${text}\n`
 }
 
 /**
@@ -337,6 +535,7 @@ Selecting tests (all filters are ANDed; no filter means everything):
   --project <name>        Only this project (the folder above suites)
   --tag <@tag>            Only tests with this tag; repeat for AND
   --grep <text>           Only tests whose name or path contains this
+  --test <file>           Exactly this test, by the path \`list\` prints
 
 Running and reporting:
   --reporter <kind>       text (default), json, or junit
@@ -384,10 +583,14 @@ export interface MissingEnv {
 
 export function missingEnvRefs(
   specs: { name: string; code: string }[],
-  env: Record<string, string | undefined>
+  env: Record<string, string | undefined>,
+  /** Per spec, by position: the values that spec alone will be run with (its
+   *  stored password, say), layered over `env`. */
+  perSpec: (Record<string, string | undefined> | undefined)[] = []
 ): MissingEnv[] {
   const byName = new Map<string, string[]>()
-  for (const spec of specs) {
+  for (const [n, spec] of specs.entries()) {
+    const own = perSpec[n] ? { ...env, ...perSpec[n] } : env
     // A fresh lastIndex per spec: ENV_REF is a module-level /g regex, and a
     // shared one silently skips matches if it carries state between calls.
     ENV_REF.lastIndex = 0
@@ -397,7 +600,7 @@ export function missingEnvRefs(
       const name = m[1]
       // An empty string counts as unset. That is the whole point: "" is what a
       // missing password looks like by the time it reaches the page.
-      if (env[name]) continue
+      if (own[name]) continue
       if (seen.has(name)) continue
       seen.add(name)
       const list = byName.get(name) ?? []
@@ -418,8 +621,41 @@ export function describeMissingEnv(missing: MissingEnv[]): string {
     '',
     ...lines,
     '',
-    'A password is never written into a generated spec, so it has to come from',
-    'the environment. Set the variable and run again. Nothing was run.',
+    'A password is never written into a generated spec. It is taken from the',
+    "test's saved password when this Windows account can read it; otherwise it",
+    'has to come from the environment. Set the variable and run again.',
+    'Nothing was run.',
     ''
   ].join('\n')
+}
+
+/**
+ * Split tests into groups that can share ONE environment.
+ *
+ * A Playwright run hands every spec in it the same process environment, but
+ * each test's environment is its own — above all its stored password. Two
+ * tests whose PASSWORD differs cannot both be right in one run, so they go in
+ * separate runs; tests that agree (nearly always all of them) share one. A
+ * name only one side sets is not a conflict: a spec never reads a variable its
+ * test did not put there.
+ *
+ * Greedy and order-preserving: each test joins the first group it agrees with.
+ * The values are compared and never shown.
+ */
+export function envBatches(
+  items: { id: string; env: Record<string, string> }[]
+): { ids: string[]; env: Record<string, string> }[] {
+  const batches: { ids: string[]; env: Record<string, string> }[] = []
+  for (const item of items) {
+    const fits = batches.find((b) =>
+      Object.entries(item.env).every(([k, v]) => !(k in b.env) || b.env[k] === v)
+    )
+    if (fits) {
+      fits.ids.push(item.id)
+      Object.assign(fits.env, item.env)
+    } else {
+      batches.push({ ids: [item.id], env: { ...item.env } })
+    }
+  }
+  return batches
 }

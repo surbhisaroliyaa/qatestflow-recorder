@@ -22,6 +22,10 @@
 //                         step descriptions, bug reports
 //   · maskSelectors     — regions painted over in captured screenshots
 //   · captureDom: false — the biggest carrier of all, turned off wholesale
+//   · redactHar()       — a saved network capture (src/main/har.ts), using
+//                         redact() above on its headers, query and bodies
+//   · keepTraces / maxAgeDays — how long any of it stays on disk at all
+//                         (src/main/evidenceStorage.ts)
 //
 // == Why patterns AND selectors, rather than one of them ==
 //
@@ -54,6 +58,36 @@ export interface PrivacySettings {
   /** Capture the page's HTML into the trace at all. The single biggest PII
    *  carrier in the whole evidence set, because it is the literal data. */
   captureDom: boolean
+  /** Retention: how many run traces (screenshots, page HTML, video) to keep,
+   *  newest first. Was a hardcoded 40 in pruneTraces; 40 stays the default so
+   *  nobody's folder changes size on upgrade. */
+  keepTraces: number
+  /** Retention: delete run evidence older than this many days after each run.
+   *  0 = off. Files a saved test still needs are never deleted by age. */
+  maxAgeDays: number
+}
+
+/** Bounds for the retention numbers. A keep of 0 would delete the trace of
+ *  the run that just finished, before anyone could open it. */
+export const KEEP_TRACES_MIN = 1
+export const KEEP_TRACES_MAX = 5000
+export const MAX_AGE_DAYS_MAX = 3650
+
+/** Clamp a retention number from a settings box or an older file. Anything
+ *  that isn't a finite number falls back to the default, never to 0 — for
+ *  keepTraces a 0 would be "delete everything". */
+export function cleanRetention(settings: {
+  keepTraces?: unknown
+  maxAgeDays?: unknown
+}): Pick<PrivacySettings, 'keepTraces' | 'maxAgeDays'> {
+  const keep = Math.round(Number(settings.keepTraces))
+  const age = Math.round(Number(settings.maxAgeDays))
+  return {
+    keepTraces: Number.isFinite(keep)
+      ? Math.min(KEEP_TRACES_MAX, Math.max(KEEP_TRACES_MIN, keep))
+      : DEFAULT_PRIVACY.keepTraces,
+    maxAgeDays: Number.isFinite(age) ? Math.min(MAX_AGE_DAYS_MAX, Math.max(0, age)) : 0
+  }
 }
 
 export const DEFAULT_PRIVACY: PrivacySettings = {
@@ -64,7 +98,9 @@ export const DEFAULT_PRIVACY: PrivacySettings = {
   builtins: false,
   patterns: '',
   maskSelectors: '',
-  captureDom: true
+  captureDom: true,
+  keepTraces: 40,
+  maxAgeDays: 0
 }
 
 /** What a redacted span is replaced with. Fixed-width and obviously
@@ -85,8 +121,14 @@ export const BUILTIN_PATTERNS: { name: string; re: RegExp }[] = [
   // A bearer token / JWT: three base64url segments separated by dots.
   { name: 'token', re: /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g },
   // `Authorization: Bearer …` and friends, including the header name, because
-  // the value alone is not always shaped distinctively.
-  { name: 'auth-header', re: /\b(authorization|api[-_]?key|x-api-key)\s*[:=]\s*\S+/gi },
+  // the value alone is not always shaped distinctively. The value is often
+  // TWO words — a scheme, then the credential — so a known scheme (and an
+  // opening quote, as in page source) is taken along with the word after it.
+  // Without that, `\S+` stopped at "Bearer" and left the token readable.
+  {
+    name: 'auth-header',
+    re: /\b(authorization|api[-_]?key|x-api-key)\s*[:=]\s*['"]?(?:(?:bearer|basic|token|digest|negotiate|ntlm|apikey)\s+)?\S+/gi
+  },
   // An email address. Deliberately loose on the local part — real addresses
   // contain plus-tags, dots and apostrophes.
   { name: 'email', re: /\b[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
@@ -210,6 +252,11 @@ export function describePrivacy(settings: PrivacySettings): string {
     // were also left out of the redaction is what made a working policy look
     // like it had done nothing at all.
     surfaces.add('step titles')
+    // Listed only under this condition because this is the only condition
+    // under which har.ts redactHar() touches a saved archive — screen masks
+    // and "no page HTML" do nothing to a HAR, and saying otherwise is the
+    // overclaim described above.
+    surfaces.add('saved network captures (HAR)')
   }
   const sels = selectorList(settings.maskSelectors).length
   if (sels) {

@@ -32,6 +32,23 @@
 // recovery prompt) where every option has consequences — dismissing one of
 // those on a stray keypress would be worse than not handling the key at all,
 // so those are deliberately left alone.
+//
+// == Dialogs with their own styling ==
+//
+// A dialog that cannot wear `.modal` (the trace viewer has its own size and
+// colours, and `.modal` would override them) opts in by markup instead: the
+// dialog element carries `role="dialog"` and its close button carries
+// `data-modal-close`. Without that the trap marked the BACKDROP as the dialog
+// and Escape found no close button.
+//
+// == Stacked dialogs ==
+//
+// App.tsx switches the trap on when the FIRST overlay opens and off when the
+// last one closes. A second dialog opened on top of the first does not flip
+// that, so the trap watches the DOM itself: whenever a new dialog becomes the
+// topmost one it gets initial focus, and when it goes away focus returns to
+// the control that opened it (usually a button in the dialog underneath).
+// One mechanism for the first dialog and every one stacked on it.
 // =====================================================================
 
 /**
@@ -67,13 +84,19 @@ export function trapFocus(): () => void {
       (el) => el.offsetParent !== null || el === document.activeElement
     )
 
+  /** The dialog box inside a backdrop: the shared `.modal`, or a custom-styled
+   *  one that declares itself with role="dialog" (see the header). */
+  const DIALOG = '.modal, [role="dialog"]'
+  /** Its dismiss button — the shared class, or the opt-in attribute. */
+  const CLOSE = '.modal-close, [data-modal-close]'
+
   /** The topmost open dialog, or null. Last in the DOM wins — a modal opened on
    *  top of another is the one the user is actually looking at. */
   const currentDialog = (): HTMLElement | null => {
     const backdrops = document.querySelectorAll<HTMLElement>('.modal-backdrop')
     const backdrop = backdrops[backdrops.length - 1]
     if (!backdrop) return null
-    return backdrop.querySelector<HTMLElement>('.modal') ?? backdrop
+    return backdrop.querySelector<HTMLElement>(DIALOG) ?? backdrop
   }
 
   /**
@@ -101,14 +124,7 @@ export function trapFocus(): () => void {
     }
   }
 
-  // Where focus came from, so it can go back. Without this, closing a dialog
-  // drops the user at the top of the document and they have to tab all the way
-  // back to where they were.
-  const previous = document.activeElement as HTMLElement | null
-
-  const dialog = currentDialog()
-  if (dialog) {
-    markUpDialog(dialog)
+  const focusInitial = (dialog: HTMLElement): void => {
     const targets = focusableWithin(dialog)
     // Into the dialog — the fix for "focus stayed on BODY".
     //
@@ -117,16 +133,72 @@ export function trapFocus(): () => void {
     // drops a keyboard user onto "×" — offering to dismiss the dialog before
     // they have read it. Land on the first control that DOES something instead;
     // the close button is still one Shift+Tab away.
-    const preferred = targets.find((el) => !el.classList.contains('modal-close')) ?? targets[0]
+    const preferred = targets.find((el) => !el.matches(CLOSE)) ?? targets[0]
     ;(preferred ?? dialog).focus()
   }
+
+  /** Focus went away with a dialog that closed (it sits on BODY, or on a node
+   *  no longer in the document). Only then is it ours to move — if the user
+   *  has since clicked elsewhere, yanking them back would be worse. */
+  const focusLost = (): boolean => {
+    const active = document.activeElement
+    return !active || active === document.body || !document.body.contains(active)
+  }
+
+  // Every dialog that is open, bottom first, each with where focus came from
+  // when it appeared, so it can go back there. Without this, closing a dialog
+  // drops the user at the top of the document and they have to tab all the way
+  // back to where they were.
+  let stack: { dialog: HTMLElement; returnTo: HTMLElement | null }[] = []
+
+  /**
+   * Bring the stack in line with the DOM. Runs once now and again on every DOM
+   * change while the trap is on — that is what catches a dialog opened on top
+   * of another, or one closing to reveal the dialog beneath.
+   */
+  const sync = (): void => {
+    const gone = stack.filter((entry) => !entry.dialog.isConnected)
+    if (gone.length) stack = stack.filter((entry) => entry.dialog.isConnected)
+
+    const top = currentDialog()
+    if (top && !stack.some((entry) => entry.dialog === top)) {
+      // A new topmost dialog. If it REPLACED one in the same render (a modal
+      // swapping to its next screen), it inherits that one's return target —
+      // the control that opened it is gone or behind it.
+      const returnTo = gone.length
+        ? gone[0].returnTo
+        : (document.activeElement as HTMLElement | null)
+      stack.push({ dialog: top, returnTo })
+      markUpDialog(top)
+      focusInitial(top)
+      return
+    }
+
+    // A dialog closed and the one beneath is back on top: return focus to the
+    // control in it that opened the closed one.
+    if (gone.length && focusLost()) {
+      const target = gone[0].returnTo
+      if (target && target.isConnected) target.focus()
+      else if (top) focusInitial(top)
+    }
+  }
+
+  // Whatever had focus before the first dialog — where it goes back when the
+  // trap is switched off, however many dialogs were stacked in between.
+  const opener = document.activeElement as HTMLElement | null
+  sync()
+
+  // childList only: markUpDialog writes attributes, and watching those would
+  // make the trap react to itself.
+  const observer = new MutationObserver(sync)
+  observer.observe(document.body, { childList: true, subtree: true })
 
   const onKeyDown = (event: KeyboardEvent): void => {
     const live = currentDialog()
     if (!live) return
 
     if (event.key === 'Escape') {
-      const close = live.querySelector<HTMLElement>('.modal-close')
+      const close = live.querySelector<HTMLElement>(CLOSE)
       // No close button = a blocking decision. Leave it to the user.
       if (close) {
         event.preventDefault()
@@ -166,12 +238,13 @@ export function trapFocus(): () => void {
 
   return () => {
     document.removeEventListener('keydown', onKeyDown, true)
-    // Only restore if focus is still somewhere we put it — if the user has
-    // since clicked elsewhere, yanking them back would be worse.
-    const active = document.activeElement
-    if (previous && (!active || active === document.body || !document.body.contains(active))) {
+    // Drop pending notifications too — the dialogs just closed, and a late
+    // sync() must not try to move focus after this has already restored it.
+    observer.takeRecords()
+    observer.disconnect()
+    if (opener && focusLost()) {
       try {
-        previous.focus()
+        opener.focus()
       } catch {
         // the element that opened the dialog is gone — nothing to restore to
       }

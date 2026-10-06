@@ -122,6 +122,10 @@ const STEP_KEY_ORDER = [
   'apiExpectBody',
   'apiSave',
   'apiChecks',
+  // The captured response SHAPE (path → JSON type). Missing from this list
+  // until the lossless audit: a YAML round trip silently turned a contracted
+  // API step back into an uncontracted one, so a renamed field stopped failing.
+  'apiContract',
   'apiMaxMs',
   'apiTimeoutMs',
   'apiInjectCookies',
@@ -135,6 +139,83 @@ const STEP_KEY_ORDER = [
 // carrying them to someone else's checkout states a fact about their machine
 // that nobody has established.
 const DROPPED_ON_EXPORT = new Set(['id', 'healedByAi', 'revealValue'])
+
+/**
+ * What happens to EVERY field of the step model in the portable form.
+ *
+ * `apiContract` went missing from STEP_KEY_ORDER without anyone noticing,
+ * because nothing tied the list to the type: a field added to RecorderStep and
+ * forgotten here exported as nothing, and the round trip "worked". This map is
+ * keyed by the TYPE, so adding a field without deciding its fate is a compile
+ * error, and the round-trip test fails for any 'portable' field that the list
+ * above does not carry.
+ *
+ *   portable  — written on export, read back on import
+ *   dropped   — this machine's business (DROPPED_ON_EXPORT, above)
+ *   transient — exists only during a live recording and is never saved at all
+ *   do/target — the renamed type and label
+ */
+export const STEP_FIELD_FATE = {
+  type: 'do',
+  label: 'target',
+  blockRef: 'portable',
+  value: 'portable',
+  key: 'portable',
+  waitKind: 'portable',
+  dialogKind: 'portable',
+  assertKind: 'portable',
+  attrName: 'portable',
+  secret: 'portable',
+  secretRef: 'portable',
+  revealValue: 'dropped',
+  disabled: 'portable',
+  optional: 'portable',
+  teardown: 'portable',
+  createsData: 'portable',
+  scrollKind: 'portable',
+  loadedMore: 'transient',
+  scrollDir: 'transient',
+  dragKind: 'portable',
+  targetSelector: 'portable',
+  targetCandidates: 'portable',
+  targetLabel: 'portable',
+  dragFrom: 'portable',
+  repeatKind: 'portable',
+  condKind: 'portable',
+  url: 'portable',
+  downloadPath: 'portable',
+  downloadExact: 'portable',
+  baselineId: 'portable',
+  maskSelectors: 'portable',
+  freezeAnimations: 'portable',
+  maxDiffPixels: 'portable',
+  selector: 'portable',
+  candidates: 'portable',
+  frame: 'portable',
+  id: 'dropped',
+  windowId: 'portable',
+  opensWindow: 'portable',
+  healedByAi: 'dropped',
+  apiMethod: 'portable',
+  apiHeaders: 'portable',
+  apiBody: 'portable',
+  apiExpectStatus: 'portable',
+  apiExpectBody: 'portable',
+  apiSave: 'portable',
+  apiChecks: 'portable',
+  apiContract: 'portable',
+  apiMaxMs: 'portable',
+  apiTimeoutMs: 'portable',
+  apiInjectCookies: 'portable',
+  apiInjectStorage: 'portable'
+} as const satisfies Record<
+  keyof RecorderStep,
+  'do' | 'target' | 'portable' | 'dropped' | 'transient'
+>
+
+/** The step keys the portable form writes, in order — exported so the
+ *  round-trip test can hold STEP_FIELD_FATE and this list to each other. */
+export const PORTABLE_STEP_KEYS: readonly string[] = STEP_KEY_ORDER
 
 // ── the emitter ──────────────────────────────────────────────────────
 
@@ -168,10 +249,50 @@ function quote(s: string): string {
   return `'${s.replace(/'/g, "''")}'`
 }
 
-function emitScalar(v: Scalar, inline = false): string {
+// Control characters (a tab, a carriage return, a newline that cannot go in a
+// block literal) have no representation inside single quotes and would be
+// mangled by line splitting if written raw. Double quotes are the one YAML form
+// with escapes, so those values — and only those — are written that way.
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\x00-\x1f\x7f]/
+const DOUBLE_ESCAPES: Record<string, string> = {
+  '\n': 'n',
+  '\t': 't',
+  '\r': 'r',
+  '"': '"',
+  '\\': '\\'
+}
+
+function quoteDouble(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  const body = s.replace(/[\\"\x00-\x1f\x7f]/g, (c) =>
+    DOUBLE_ESCAPES[c]
+      ? `\\${DOUBLE_ESCAPES[c]}`
+      : `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`
+  )
+  return `"${body}"`
+}
+
+/** How a scalar sits: a value after `key:`, a value inside `{ … }`, or a bare
+ *  list item — where a colon would make it read back as a one-key map (a tag
+ *  `env:staging` came back as `{ env: staging }`). */
+type ScalarPlace = 'value' | 'inline' | 'item'
+
+function emitScalar(v: Scalar, place: ScalarPlace = 'value'): string {
   if (v === null) return 'null'
   if (typeof v === 'boolean' || typeof v === 'number') return String(v)
-  return needsQuotes(v, inline) ? quote(v) : v
+  if (CONTROL.test(v)) return quoteDouble(v)
+  if (place === 'item' && v.includes(':')) return quote(v)
+  return needsQuotes(v, place === 'inline') ? quote(v) : v
+}
+
+/** A map KEY. Field names never need this; the keys of an API contract
+ *  (`items[].sku`, or `[]` for a top-level array) and of a data row (a column
+ *  someone called `first name, last`) are data, and can hold anything. */
+function emitKey(k: string): string {
+  if (CONTROL.test(k)) return quoteDouble(k)
+  const risky = k === '' || k !== k.trim() || /[:,#'"{}]/.test(k) || /^[-?[\]&*!|>%@`]/.test(k)
+  return risky ? quote(k) : k
 }
 
 /** An inline map — `{ kind: role, score: 92 }`. Used for a selector candidate,
@@ -180,8 +301,21 @@ function emitScalar(v: Scalar, inline = false): string {
 function emitInline(o: Record<string, Value>): string {
   const parts = Object.entries(o)
     .filter(([, v]) => v !== undefined)
-    .map(([k, v]) => `${k}: ${emitScalar(v as Scalar, true)}`)
+    .map(([k, v]) => `${emitKey(k)}: ${emitScalar(v as Scalar, 'inline')}`)
   return `{ ${parts.join(', ')} }`
+}
+
+/** Can this multi-line string go out as a `|-` block literal and come back
+ *  identical? The block form is the readable one, but it cannot carry a
+ *  trailing newline (`|-` strips it), an indented first line (that indent is
+ *  what the block's own indent is measured from), a whitespace-only line, or a
+ *  control character. Those go out double-quoted instead: uglier, but exact. */
+function blockSafe(s: string): boolean {
+  if (/[\x00-\x09\x0b-\x1f\x7f]/.test(s)) return false // eslint-disable-line no-control-regex
+  if (s.endsWith('\n')) return false
+  const lines = s.split('\n')
+  if (!lines[0] || /^\s/.test(lines[0])) return false
+  return lines.every((l) => l === '' || l.trim() !== '')
 }
 
 function isPlainObject(v: unknown): v is Record<string, Value> {
@@ -208,10 +342,12 @@ function emitValue(v: Value, indent: string, out: string[], inlineItems = false)
     }
     for (const item of v) {
       if (isPlainObject(item)) {
-        if (inlineItems && allScalar(item)) {
+        const keys = Object.keys(item).filter((k) => item[k] !== undefined)
+        // An empty map has no first key to hang the dash on, so the block form
+        // below would write nothing at all and the item would vanish.
+        if ((inlineItems && allScalar(item)) || !keys.length) {
           out.push(`${indent}- ${emitInline(item)}`)
         } else {
-          const keys = Object.keys(item).filter((k) => item[k] !== undefined)
           out.push(`${indent}- ${keys[0]}:`)
           // Re-emit the first key properly, then the rest at the same level.
           out.pop()
@@ -223,7 +359,7 @@ function emitValue(v: Value, indent: string, out: string[], inlineItems = false)
           }
         }
       } else {
-        out.push(`${indent}- ${emitScalar(item as Scalar)}`)
+        out.push(`${indent}- ${emitScalar(item as Scalar, 'item')}`)
       }
     }
     return
@@ -240,24 +376,26 @@ function emitValue(v: Value, indent: string, out: string[], inlineItems = false)
 
 function emitPair(key: string, v: Value, prefix: string, childIndent: string, out: string[]): void {
   const inlineItems = INLINE_ITEM_KEYS.has(key)
+  const k = emitKey(key)
   // A multi-line string becomes a block literal. `|-` keeps the lines and drops
   // the trailing newline, which is what every multi-line field here means (an
-  // upload's file list, an API body, a mask-selector list).
-  if (typeof v === 'string' && v.includes('\n')) {
-    out.push(`${prefix}${key}: |-`)
-    for (const line of v.split('\n')) out.push(`${childIndent}  ${line}`)
+  // upload's file list, an API body, a mask-selector list). One the block form
+  // cannot carry exactly falls through to emitScalar's double quotes.
+  if (typeof v === 'string' && v.includes('\n') && blockSafe(v)) {
+    out.push(`${prefix}${k}: |-`)
+    for (const line of v.split('\n')) out.push(line ? `${childIndent}  ${line}` : '')
     return
   }
   if (Array.isArray(v) || isPlainObject(v)) {
     if (isPlainObject(v) && allScalar(v)) {
-      out.push(`${prefix}${key}: ${emitInline(v)}`)
+      out.push(`${prefix}${k}: ${emitInline(v)}`)
       return
     }
-    out.push(`${prefix}${key}:`)
+    out.push(`${prefix}${k}:`)
     emitValue(v, `${childIndent}  `, out, inlineItems)
     return
   }
-  out.push(`${prefix}${key}: ${emitScalar(v as Scalar)}`)
+  out.push(`${prefix}${k}: ${emitScalar(v as Scalar)}`)
 }
 
 /** Render a portable test as YAML. */
@@ -295,12 +433,12 @@ function parseScalar(raw: string, line: number): Scalar {
   }
   if (s.startsWith('"')) {
     if (!s.endsWith('"') || s.length < 2) throw new YamlError(line, 'unterminated quoted value')
-    return s
-      .slice(1, -1)
-      .replace(/\\n/g, '\n')
-      .replace(/\\t/g, '\t')
-      .replace(/\\"/g, '"')
-      .replace(/\\\\/g, '\\')
+    // One pass, not a chain of replaces: a chain read `\\n` (an escaped
+    // backslash, then the letter n — a Windows path segment) as a newline.
+    return s.slice(1, -1).replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, e: string) => {
+      if (e.length === 5) return String.fromCharCode(parseInt(e.slice(1), 16))
+      return { n: '\n', t: '\t', r: '\r', '"': '"', '\\': '\\', '0': '\0' }[e] ?? `\\${e}`
+    })
   }
   if (/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(s)) return Number(s)
   return s
@@ -315,6 +453,12 @@ function splitInline(body: string, line: number): string[] {
     const c = body[i]
     if (quoteCh) {
       cur += c
+      // A backslash escapes the next character inside double quotes, so `\"`
+      // does not end the value.
+      if (quoteCh === '"' && c === '\\' && i + 1 < body.length) {
+        cur += body[++i]
+        continue
+      }
       if (c === quoteCh) {
         // '' inside a single-quoted scalar is an escaped quote, not the end.
         if (c === "'" && body[i + 1] === "'") {
@@ -363,17 +507,57 @@ function parseInline(s: string, line: number): Value {
   if (!body) return {}
   const o: Record<string, Value> = {}
   for (const part of splitInline(body, line)) {
-    const at = part.indexOf(':')
-    if (at < 0) throw new YamlError(line, `expected "key: value" in { … }, got "${part.trim()}"`)
-    o[part.slice(0, at).trim()] = parseScalar(part.slice(at + 1), line)
+    const kv = splitKey(part.trim(), line)
+    if (!kv) throw new YamlError(line, `expected "key: value" in { … }, got "${part.trim()}"`)
+    o[kv[0]] = parseScalar(kv[1], line)
   }
   return o
+}
+
+/**
+ * Split `key: rest` into its key and the text after the colon, or null when the
+ * text is not a key/value pair at all.
+ *
+ * A key may be QUOTED (see emitKey — an API contract's keys are paths out of
+ * someone else's JSON, and can contain a colon); a quoted key ends at its
+ * closing quote, and only a colon after that separates it. An unquoted key ends
+ * at the first colon, as it always has, so every file written before quoted
+ * keys existed reads exactly as it did.
+ */
+function splitKey(text: string, line: number): [string, string] | null {
+  const q = text[0]
+  if (q === "'" || q === '"') {
+    let i = 1
+    for (; i < text.length; i++) {
+      if (q === '"' && text[i] === '\\') {
+        i++
+        continue
+      }
+      if (text[i] === q) {
+        if (q === "'" && text[i + 1] === "'") {
+          i++
+          continue
+        }
+        break
+      }
+    }
+    if (i >= text.length) throw new YamlError(line, 'unterminated quoted value')
+    const after = text.slice(i + 1).trimStart()
+    // A quoted SCALAR (a list item that happens to contain a colon) — not a key.
+    if (!after.startsWith(':')) return null
+    return [String(parseScalar(text.slice(0, i + 1), line)), after.slice(1).trim()]
+  }
+  const at = text.indexOf(':')
+  return at < 0 ? null : [text.slice(0, at).trim(), text.slice(at + 1).trim()]
 }
 
 interface Line {
   indent: number
   text: string
   n: number
+  // The raw body of a block literal (`key: |-`), gathered by readLines before
+  // comment stripping and blank-line removal could touch it — see there.
+  block?: string[]
 }
 
 /**
@@ -390,6 +574,10 @@ function stripComment(raw: string): string {
   for (let i = 0; i < raw.length; i++) {
     const c = raw[i]
     if (quoteCh) {
+      if (quoteCh === '"' && c === '\\') {
+        i++
+        continue
+      }
       if (c === quoteCh) {
         if (c === "'" && raw[i + 1] === "'") i++
         else quoteCh = ''
@@ -411,16 +599,46 @@ function stripComment(raw: string): string {
  *  wrote it. */
 function readLines(src: string): Line[] {
   const out: Line[] = []
-  src.split(/\r?\n/).forEach((raw, i) => {
+  const raws = src.split(/\r?\n/)
+  const indentOf = (raw: string): number => raw.length - raw.trimStart().length
+  for (let i = 0; i < raws.length; i++) {
+    const raw = raws[i]
     const n = i + 1
     if (raw.includes('\t') && !raw.trim().startsWith('#')) {
-      const beforeContent = raw.slice(0, raw.length - raw.trimStart().length)
+      const beforeContent = raw.slice(0, indentOf(raw))
       if (beforeContent.includes('\t')) throw new YamlError(n, 'tabs cannot be used to indent')
     }
     const withoutComment = stripComment(raw)
-    if (!withoutComment.trim()) return
-    out.push({ indent: raw.length - raw.trimStart().length, text: withoutComment.trim(), n })
-  })
+    if (!withoutComment.trim()) continue
+    const line: Line = { indent: indentOf(raw), text: withoutComment.trim(), n }
+    out.push(line)
+
+    // A block literal's body is TEXT, not YAML, so it is taken here, raw,
+    // before the rules above can reach it. They used to: a mask-selector list
+    // is one CSS selector per line, and `#clock` — the commonest selector there
+    // is — was stripped as a comment, while a blank line inside an API body
+    // simply vanished. The body is every following line indented past the
+    // KEY (for `- key: |-` that is past the key, not the dash), or blank.
+    if (!/:\s*[|>][-+]?$/.test(line.text)) continue
+    const keyCol = line.indent + (line.text.length - line.text.replace(/^(-\s+)+/, '').length)
+    const body: string[] = []
+    let j = i + 1
+    while (j < raws.length && (!raws[j].trim() || indentOf(raws[j]) > keyCol)) body.push(raws[j++])
+    // Trailing blank lines separate the block from what follows; `|-` drops them.
+    while (body.length && !body[body.length - 1].trim()) {
+      body.pop()
+      j--
+    }
+    const first = body.find((b) => b.trim())
+    const bodyIndent = first === undefined ? 0 : indentOf(first)
+    line.block = body.map((b, k) => {
+      if (b.slice(0, Math.min(bodyIndent, indentOf(b))).includes('\t')) {
+        throw new YamlError(i + 2 + k, 'tabs cannot be used to indent')
+      }
+      return b.trim() ? b.slice(Math.min(bodyIndent, indentOf(b))) : ''
+    })
+    i = j - 1
+  }
   return out
 }
 
@@ -446,31 +664,32 @@ function parseBlock(lines: Line[], start: number, indent: number): [Value, numbe
         i++
         continue
       }
-      const at = rest.indexOf(':')
-      if (at < 0) {
+      if (!splitKey(rest, lines[i].n)) {
         arr.push(parseScalar(rest, lines[i].n))
         i++
         continue
       }
       // "- key: value" opens a map whose remaining keys are indented to where
-      // that first key started.
+      // that first key started. Everything indented past the dash belongs to
+      // it. (This used to stop at the first nested "- " line and then take only
+      // further dash lines, so a list of MAPS inside a step — an iframe chain,
+      // `frame: [{ url, name }]` — cut the step off at the frame's second key.)
       const mapIndent = lines[i].indent + 2
-      const synthetic: Line[] = [{ indent: mapIndent, text: rest, n: lines[i].n }]
+      const synthetic: Line[] = [
+        { indent: mapIndent, text: rest, n: lines[i].n, block: lines[i].block }
+      ]
       let j = i + 1
-      while (j < lines.length && lines[j].indent >= mapIndent && !lines[j].text.startsWith('- ')) {
+      while (j < lines.length && lines[j].indent > lines[i].indent) {
         synthetic.push(lines[j])
         j++
       }
-      // A nested list under one of those keys sits at the map's own indent.
-      while (
-        j < lines.length &&
-        lines[j].indent > lines[i].indent &&
-        lines[j].text.startsWith('-')
-      ) {
-        synthetic.push(lines[j])
-        j++
+      const [v, used] = parseBlock(synthetic, 0, mapIndent)
+      if (used < synthetic.length) {
+        throw new YamlError(
+          synthetic[used].n,
+          `this line doesn't belong to anything above it — check its indentation ("${synthetic[used].text}")`
+        )
       }
-      const [v] = parseBlock(synthetic, 0, mapIndent)
       arr.push(v)
       i = j
     }
@@ -481,21 +700,15 @@ function parseBlock(lines: Line[], start: number, indent: number): [Value, numbe
   let i = start
   while (i < lines.length && lines[i].indent === indent && !lines[i].text.startsWith('- ')) {
     const { text, n } = lines[i]
-    const at = text.indexOf(':')
-    if (at < 0) throw new YamlError(n, `expected "key: value", got "${text}"`)
-    const key = text.slice(0, at).trim()
-    const rest = text.slice(at + 1).trim()
+    const kv = splitKey(text, n)
+    if (!kv) throw new YamlError(n, `expected "key: value", got "${text}"`)
+    const [key, rest] = kv
 
-    if (rest === '|' || rest === '|-' || rest === '>' || rest === '>-') {
-      const chunk: string[] = []
-      let j = i + 1
-      const bodyIndent = j < lines.length ? lines[j].indent : indent + 2
-      while (j < lines.length && lines[j].indent >= bodyIndent && lines[j].indent > indent) {
-        chunk.push(' '.repeat(lines[j].indent - bodyIndent) + lines[j].text)
-        j++
-      }
+    if (/^[|>][-+]?$/.test(rest)) {
+      // The body was gathered raw by readLines.
+      const chunk = lines[i].block ?? []
       o[key] = rest.startsWith('>') ? chunk.join(' ') : chunk.join('\n')
-      i = j
+      i++
       continue
     }
     if (rest.startsWith('{') || rest.startsWith('[')) {
@@ -504,6 +717,15 @@ function parseBlock(lines: Line[], start: number, indent: number): [Value, numbe
       continue
     }
     if (rest === '') {
+      // `key:` with nothing nested under it is null — not the start of a map
+      // made of its own SIBLINGS, which is what reading the next line's indent
+      // blindly used to produce.
+      const nx = lines[i + 1]
+      if (!nx || nx.indent < indent || (nx.indent === indent && !nx.text.startsWith('-'))) {
+        o[key] = null
+        i++
+        continue
+      }
       const [v, next] = parseBlock(
         lines,
         i + 1,
@@ -632,6 +854,36 @@ export function stepToPortable(step: Record<string, unknown>): Record<string, un
   return out
 }
 
+// The step fields the app keeps as numbers / booleans. Every OTHER scalar is
+// text, and an import puts it back to text (see stepFromPortable). Both maps
+// are checked against RecorderStep IN BOTH DIRECTIONS: a listed key must have
+// that type, and a number/boolean field left off the list is a compile error —
+// so a new numeric field can't silently be turned into text on import.
+type KeysOfType<T, V> = {
+  [K in keyof T]-?: Exclude<T[K], undefined> extends V ? K : never
+}[keyof T]
+const NUMBER_FIELD_MAP = {
+  id: true,
+  windowId: true,
+  opensWindow: true,
+  maxDiffPixels: true,
+  apiMaxMs: true,
+  apiTimeoutMs: true
+} as const satisfies Record<KeysOfType<RecorderStep, number>, true>
+const BOOLEAN_FIELD_MAP = {
+  secret: true,
+  revealValue: true,
+  disabled: true,
+  optional: true,
+  teardown: true,
+  loadedMore: true,
+  downloadExact: true,
+  freezeAnimations: true,
+  apiInjectCookies: true
+} as const satisfies Record<KeysOfType<RecorderStep, boolean>, true>
+const NUMBER_STEP_FIELDS: ReadonlySet<string> = new Set(Object.keys(NUMBER_FIELD_MAP))
+const BOOLEAN_STEP_FIELDS: ReadonlySet<string> = new Set(Object.keys(BOOLEAN_FIELD_MAP))
+
 /** The portable form → the step model. Returns the step plus any WARNINGS —
  *  things that parsed but will not work, which the importer shows rather than
  *  discovering at replay. */
@@ -649,6 +901,21 @@ export function stepFromPortable(
   for (const key of STEP_KEY_ORDER) {
     if (key === 'do' || key === 'target') continue
     if (p[key] !== undefined) step[key] = p[key]
+  }
+  // A hand-edited file says `apiExpectStatus: 200`, not '200' — and YAML reads
+  // that as a NUMBER. The app calls .trim() on its text fields, so one such
+  // line blanked the whole window when the imported test was opened. Put each
+  // scalar back in the type the app keeps it in.
+  for (const [key, v] of Object.entries(step)) {
+    if (key === 'type') continue
+    if (NUMBER_STEP_FIELDS.has(key)) {
+      if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)))
+        step[key] = Number(v)
+    } else if (BOOLEAN_STEP_FIELDS.has(key)) {
+      if (v === 'true' || v === 'false') step[key] = v === 'true'
+    } else if (typeof v === 'number' || typeof v === 'boolean') {
+      step[key] = String(v)
+    }
   }
 
   // The ladder. A file that still has one keeps it; a hand-written step gets one
@@ -780,7 +1047,18 @@ export function parsePortableTest(source: string, fileName = ''): ImportResult {
   if (typeof d.deviceId === 'string') test.deviceId = d.deviceId
   if (typeof d.storageState === 'string') test.storageState = d.storageState
   if (typeof d.har === 'string') test.har = d.har
-  if (Array.isArray(d.dataRows)) test.dataRows = d.dataRows as Record<string, string>[]
+  // Cells are text too: `password: 12345` in a hand-edited table is a number
+  // to YAML, and a run substitutes cells as strings.
+  if (Array.isArray(d.dataRows)) {
+    test.dataRows = (d.dataRows as unknown[]).map((row) =>
+      Object.fromEntries(
+        Object.entries((row ?? {}) as Record<string, unknown>).map(([k, v]) => [
+          k,
+          v === null || v === undefined ? '' : String(v)
+        ])
+      )
+    )
+  }
   return { test, steps, warnings }
 }
 

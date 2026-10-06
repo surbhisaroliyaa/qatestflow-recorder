@@ -1,4 +1,5 @@
 import React from 'react'
+import type { CiTarget } from '../playwrightExport'
 
 // =====================================================================
 // ExportCodeModal — lifted out of App.tsx verbatim.
@@ -10,7 +11,7 @@ import React from 'react'
 // =====================================================================
 
 export interface ExportCodeModalProps {
-  exportCi: boolean
+  exportCi: CiTarget
   exportCode: string | null
   exportEnvWarning: string[]
   exportPages: { fileName: string; source: string }[]
@@ -25,7 +26,7 @@ export interface ExportCodeModalProps {
   savedExtras: string[]
   savedPageOverwritten: boolean
   savedPath: string | null
-  setExportCi: React.Dispatch<React.SetStateAction<boolean>>
+  setExportCi: React.Dispatch<React.SetStateAction<CiTarget>>
   setExportCode: React.Dispatch<React.SetStateAction<string | null>>
   setExportTab: React.Dispatch<React.SetStateAction<string>>
   setExportXbrowser: React.Dispatch<React.SetStateAction<boolean>>
@@ -146,18 +147,24 @@ export function ExportCodeModal({
               )}
             </span>
           )}
-          {/* F33: opt-in — write a GitHub Actions workflow beside the spec so
-                  the exported tests run on every PR. */}
+          {/* F33: opt-in — write a CI file beside the spec so the exported
+                  tests run on every push. A choice rather than a checkbox: a
+                  team is on GitHub OR GitLab, and writing both would leave a
+                  file in their repo that nothing reads. */}
           <label
             className="export-ci-toggle"
-            title="Also write .github/workflows/playwright.yml — runs these tests on every push / PR"
+            title="Also write a CI file that runs these tests on every push: .github/workflows/playwright.yml for GitHub, .gitlab-ci.yml for GitLab"
           >
-            <input
-              type="checkbox"
-              checked={exportCi}
-              onChange={(e) => setExportCi(e.target.checked)}
-            />
-            ⚙️ CI workflow
+            ⚙️ CI
+            <select
+              value={exportCi}
+              onChange={(e) => setExportCi(e.target.value as CiTarget)}
+              aria-label="CI workflow to write beside the spec"
+            >
+              <option value="none">None</option>
+              <option value="github">GitHub Actions</option>
+              <option value="gitlab">GitLab CI</option>
+            </select>
           </label>
           {/* F17: opt-in — write a cross-browser playwright.config.ts beside
                   the spec so `npx playwright test` runs on all three engines. */}
@@ -194,7 +201,9 @@ export function ExportCodeModal({
             Copy
           </button>
           <button className="modal-btn primary" onClick={handleSaveExport}>
-            {exportPages.length || exportCi || exportXbrowser ? 'Save files' : 'Save .ts'}
+            {exportPages.length || exportCi !== 'none' || exportXbrowser
+              ? 'Save files'
+              : 'Save .ts'}
           </button>
         </div>
       </div>

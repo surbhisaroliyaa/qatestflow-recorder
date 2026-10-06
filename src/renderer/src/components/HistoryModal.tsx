@@ -1,4 +1,5 @@
 import React from 'react'
+import { plural } from '../../../shared/plural'
 import { diffSteps, diffCounts } from '../stepDiff'
 
 // =====================================================================
@@ -34,7 +35,7 @@ export function HistoryModal({
   if (!historyOpen) return null
   return (
     <div className="modal-backdrop" onClick={() => setHistoryOpen(false)}>
-      <div className="history-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="history-modal" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">🕘 Version history — {testName || 'this test'}</span>
           <button className="modal-close" onClick={() => setHistoryOpen(false)} aria-label="Close">
@@ -55,7 +56,7 @@ export function HistoryModal({
                     {vi === 0 ? 'Previous edit' : `Edit −${vi}`} · {new Date(v.at).toLocaleString()}
                   </span>
                   <span className="history-version-counts">
-                    {(v.steps as RecorderStep[]).length} steps
+                    {plural((v.steps as RecorderStep[]).length, 'step')}
                     {c.added > 0 && <span className="diff-add"> +{c.added}</span>}
                     {c.removed > 0 && <span className="diff-del"> −{c.removed}</span>}
                   </span>

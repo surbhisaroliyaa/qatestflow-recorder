@@ -4,6 +4,8 @@ import {
   anyApiChecks,
   dataRowTitles,
   generateCiWorkflow,
+  generateGitlabCi,
+  PLAYWRIGHT_IMAGE_VERSION,
   generateEdgeSuite,
   generatePageObjectTest,
   generatePlaywrightConfig,
@@ -17,6 +19,7 @@ import {
   stepText,
   testIdPolicy
 } from '../src/renderer/src/playwrightExport'
+import { parseYaml } from '../src/shared/testFormat'
 
 // =====================================================================
 // The exporter's output is a FILE OF CODE, so most of what can go wrong
@@ -1036,6 +1039,40 @@ describe('CI workflow', () => {
 
   it('omits the env block entirely when the tests need no secrets', () => {
     expect(generateCiWorkflow([])).not.toContain('secrets.')
+  })
+
+  // PRD: "CI integration (GitHub Actions / GitLab CI)". Parsed rather than
+  // grepped, so an indentation slip — which GitLab rejects before running
+  // anything — fails here instead of in the user's first pipeline.
+  it('the GitLab template is a well-formed job with JUnit wired to reports', () => {
+    const doc = parseYaml(generateGitlabCi(['PASSWORD'])) as Record<string, unknown>
+    expect(doc.stages).toEqual(['test'])
+    const job = doc.playwright as Record<string, unknown>
+    expect(job.stage).toBe('test')
+    expect(job.image).toBe(`mcr.microsoft.com/playwright:v${PLAYWRIGHT_IMAGE_VERSION}-noble`)
+    expect(job.script).toEqual([
+      'npm ci --cache .npm --prefer-offline',
+      'npx playwright test --reporter=line,junit,html'
+    ])
+    expect((job.variables as Record<string, unknown>).PLAYWRIGHT_JUNIT_OUTPUT_NAME).toBe(
+      'junit.xml'
+    )
+    const artifacts = job.artifacts as Record<string, unknown>
+    expect(artifacts.when).toBe('always')
+    expect(artifacts.paths).toEqual(['playwright-report/', 'junit.xml'])
+    // The file the reporter writes is the file GitLab reads.
+    expect(artifacts.reports).toEqual({ junit: 'junit.xml' })
+  })
+
+  it('the GitLab template names the variables to create, and never holds a value', () => {
+    const yml = generateGitlabCi(['PASSWORD', 'API_TOKEN'])
+    expect(yml).toContain('This test reads: PASSWORD, API_TOKEN')
+    expect(yml).not.toContain('secrets.')
+    expect(generateGitlabCi([])).not.toContain('This test reads')
+  })
+
+  it('the GitLab image follows the pinned Playwright version', () => {
+    expect(generateGitlabCi([], '1.99.1')).toContain('mcr.microsoft.com/playwright:v1.99.1-noble')
   })
 
   it('the config emits one project per requested browser', () => {

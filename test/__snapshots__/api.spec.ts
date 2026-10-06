@@ -91,9 +91,10 @@ function __why(body: unknown, headers: Record<string, string>, path: string, op:
       const n = value.length
       const target = Number(expected)
       if (!Number.isFinite(target)) return `"${expected}" is not a number`
-      if (op === 'count-eq') return n === target ? null : `"${path}" has ${n} items, expected ${target}`
-      if (op === 'count-gt') return n > target ? null : `"${path}" has ${n} items, expected more than ${target}`
-      return n < target ? null : `"${path}" has ${n} items, expected fewer than ${target}`
+      const items = `${n} item${n === 1 ? '' : 's'}`
+      if (op === 'count-eq') return n === target ? null : `"${path}" has ${items}, expected ${target}`
+      if (op === 'count-gt') return n > target ? null : `"${path}" has ${items}, expected more than ${target}`
+      return n < target ? null : `"${path}" has ${items}, expected fewer than ${target}`
     }
     case 'is-number':
     case 'is-string':

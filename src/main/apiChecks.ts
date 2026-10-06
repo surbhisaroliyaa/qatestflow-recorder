@@ -257,14 +257,17 @@ function runCheck(check: CheckLine, body: unknown, headers: Record<string, strin
       if (absent) return `"${path}" is not in the response`
       if (!Array.isArray(value)) return `"${path}" is ${show(value)}, which is not an array`
       const n = value.length
+      // "has 1 items" was the wording the audit flagged (QF-011); the exported
+      // spec builds the same message, so the two stay word-for-word alike.
+      const items = `${n} item${n === 1 ? '' : 's'}`
       const target = Number(expected)
       if (!Number.isFinite(target)) return `"${expected}" is not a number`
       if (op === 'count-eq')
-        return n === target ? null : `"${path}" has ${n} items, expected ${target}`
+        return n === target ? null : `"${path}" has ${items}, expected ${target}`
       if (op === 'count-gt') {
-        return n > target ? null : `"${path}" has ${n} items, expected more than ${target}`
+        return n > target ? null : `"${path}" has ${items}, expected more than ${target}`
       }
-      return n < target ? null : `"${path}" has ${n} items, expected fewer than ${target}`
+      return n < target ? null : `"${path}" has ${items}, expected fewer than ${target}`
     }
 
     case 'is-number':

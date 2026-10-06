@@ -23,7 +23,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:dom": "playwright test",
-    "test:export": "playwright test test-dom/exported-spec.spec.ts"
+    "test:export": "playwright test test-dom/exported-spec.spec.ts",
+    "test:scale": "vitest run --config vitest.scale.config.ts --reporter=verbose"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",

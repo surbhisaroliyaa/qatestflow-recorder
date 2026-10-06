@@ -1,4 +1,5 @@
 import React from 'react'
+import { plural } from '../../../shared/plural'
 import type { SuiteRunState } from '../suiteTypes'
 import { CATEGORY_LABELS } from '../uiLabels'
 import { trustScore } from '../trust'
@@ -431,7 +432,7 @@ export function SavedTestLibrary({
                   />
                 </label>
                 <span className="parallel-hint">
-                  Runs {parallelWorkers} tests at once through real Playwright, headless.{' '}
+                  Runs {plural(parallelWorkers, 'test')} at once through real Playwright, headless.{' '}
                   <strong>Not the in-app engine</strong> — no self-heal, no recovery pause. Tests
                   with AI checks, manual steps, a11y or visual snapshots run the normal way instead
                   (the report says which).
@@ -758,7 +759,7 @@ export function SavedTestLibrary({
                               </span>
                             ))}
                             <span className="library-meta">
-                              {test.stepCount} steps ·{' '}
+                              {plural(test.stepCount, 'step')} ·{' '}
                               {new Date(test.updatedAt).toLocaleDateString()}
                             </span>
                           </button>

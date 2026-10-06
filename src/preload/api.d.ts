@@ -125,8 +125,14 @@ interface RecorderAPI {
     // tab). All are written into pages/ beside the spec.
     pageFiles?: { fileName: string; source: string }[],
     harFile?: string, // F1: copy this .har into hars/ beside the exported spec
-    ciWorkflow?: string, // F33: write .github/workflows/playwright.yml beside the spec
-    configFile?: string // F17: write playwright.config.ts (cross-browser) beside the spec
+    ciWorkflow?: string, // F33: a CI file to write beside the spec (see ciKind)
+    configFile?: string, // F17: write playwright.config.ts (cross-browser) beside the spec
+    // Which CI system `ciWorkflow` is for: 'github' (the default, and what older
+    // callers meant) → .github/workflows/playwright.yml; 'gitlab' → .gitlab-ci.yml.
+    ciKind?: 'github' | 'gitlab',
+    // The open test's password refs and not-yet-saved values, so an exported
+    // network capture is scrubbed of them (scrubSecretValues, har.ts).
+    secrets?: { refs: string[]; values: string[] }
     // `alsoWrote` = every file written BESIDES the spec the dialog named (page
     // class, CI workflow, cross-browser config) — they land in folders the user
     // never chose, so the confirmation has to name them.
@@ -147,6 +153,8 @@ interface RecorderAPI {
     name: string
     baseURL?: string
     tags?: string[]
+    viewport?: { width: number; height: number }
+    deviceId?: string
     dataRows?: Record<string, string>[]
     steps: RecorderStep[]
     warnings: string[]
@@ -176,7 +184,10 @@ interface RecorderAPI {
     // F28: `locale` replays under a browser locale for the localization sweep.
     chaos?: { slowNetwork?: boolean; locale?: string },
     // F21b: pause per page during the ride to add a grounded check there.
-    authorChecks?: boolean
+    authorChecks?: boolean,
+    // FR-15 (▶ Run this step / from here): run on the page already open —
+    // skips the clean-slate start (popup close + cookie wipe) a full run does.
+    runOpts?: { fromCurrentPage?: boolean }
   ) => Promise<ReplayResult>
   onReplayProgress: (callback: (progress: ReplayProgress) => void) => () => void
   onReplayPaused: (callback: (info: ReplayPaused) => void) => () => void
@@ -635,6 +646,28 @@ interface EvidencePrivacy {
   /** Capture the page’s HTML into the trace at all — the biggest carrier of
    *  real data in the whole evidence set. */
   captureDom: boolean
+  /** Retention: run recordings kept, newest first (default 40). */
+  keepTraces: number
+  /** Retention: evidence older than this many days is deleted after runs;
+   *  0 = off. Anything a saved test uses is kept regardless. */
+  maxAgeDays: number
+}
+
+/** One evidence folder's footprint, for the storage section. */
+interface EvidenceUsage {
+  id: string
+  count: number
+  bytes: number
+  /** Items a saved test (or edge run) still uses — never deleted. */
+  inUse: number
+}
+
+interface EvidenceDeleteResult {
+  deleted: number
+  freedBytes: number
+  keptInUse: number
+  /** Locked or otherwise undeletable items. */
+  failed: number
 }
 
 interface API {
@@ -665,6 +698,20 @@ interface API {
   privacy: {
     get: () => Promise<EvidencePrivacy>
     save: (settings: EvidencePrivacy) => Promise<EvidencePrivacy>
+  }
+  // Evidence storage: sizes per evidence folder, and deleting by category (or
+  // 'all'), optionally only older than N days. Takes a category, never a path.
+  evidence: {
+    scan: () => Promise<EvidenceUsage[]>
+    delete: (which: string, olderThanDays?: number) => Promise<EvidenceDeleteResult>
+    /** Tell main what the open workspace (saved or not) uses, so Evidence
+     *  storage never deletes the login or upload files it depends on. */
+    setOpen: (openTest: {
+      storageState?: string
+      har?: string
+      steps: unknown[]
+      dataRows?: Record<string, string>[]
+    }) => void
   }
   // Phase 4: monitors that keep running with the app closed. Backed by the OS
   // scheduler invoking this app's own CLI, so there is one runner, not two.

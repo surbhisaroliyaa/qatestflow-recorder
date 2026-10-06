@@ -48,7 +48,9 @@ export interface RunSummary {
   total: number
   failed: number
   durationMs: number
-  /** The first failure's step number (1-based) and message, when there is one. */
+  /** The first failure's step number (1-based, as the editor numbers them) and
+   *  message. The number can be missing on a failed run — see PostbackPayload —
+   *  and the message then goes out on its own. */
   failedAtStep?: number
   error?: string
   suite?: string
@@ -66,7 +68,16 @@ export interface RunSummary {
 
 /** The wire format. Versioned because somebody else's code depends on it.
  *  `rows` was added later as an OPTIONAL field — a receiver written before it
- *  still reads every field it knew about, so the schema stays at /1. */
+ *  still reads every field it knew about, so the schema stays at /1.
+ *
+ *  `failure.step` is the 1-based step number as the editor shows it. It MAY BE
+ *  ABSENT on a failed run: a command-line or scheduled run learns where it
+ *  failed from Playwright's report, and when that cannot be traced back to a
+ *  recorded step (a failure before the first step, or inside a helper) the
+ *  number is left out rather than guessed. `failure.message` is always there
+ *  on a failed run. Additive for the same reason as `rows` — a receiver that
+ *  reads `failure.message` keeps working, one that reads `failure.step` has to
+ *  allow for it being missing — so the schema stays at /1. */
 export interface PostbackPayload {
   schema: 'qatestflow.run/1'
   sentAt: string
@@ -77,7 +88,7 @@ export interface PostbackPayload {
   status: 'passed' | 'failed'
   steps: { total: number; failed: number }
   durationMs: number
-  failure?: { step: number; message: string }
+  failure?: { step?: number; message: string }
   traceId?: string
   rows?: { total: number; failed: number }
 }
@@ -131,8 +142,14 @@ export function buildRunPayload(run: RunSummary, now = new Date()): PostbackPayl
   if (run.tags?.length) payload.tags = run.tags
   if (run.traceId) payload.traceId = run.traceId
   if (run.rows) payload.rows = { total: run.rows.total, failed: run.rows.failed }
-  if (!run.ok && run.failedAtStep !== undefined) {
-    payload.failure = { step: run.failedAtStep, message: run.error ?? 'Step failed' }
+  // A failed run always says WHY. It used to need a step number before it
+  // would say anything, so a headless failure — which does not always know one
+  // — reached the receiver as a bare `status: failed` with nothing to act on.
+  if (!run.ok) {
+    payload.failure =
+      run.failedAtStep !== undefined
+        ? { step: run.failedAtStep, message: run.error ?? 'Step failed' }
+        : { message: run.error ?? 'Test failed' }
   }
   return payload
 }
@@ -201,6 +218,85 @@ export function isRetryable(status: number | null): boolean {
   if (status === null) return true // no response at all — network
   if (status === 408 || status === 429) return true
   return status >= 500
+}
+
+/** What happened to one postback. `skipped` = the policy said not to send;
+ *  `unconfigured` = armed but no usable URL, so nothing was attempted. */
+export interface PostbackOutcome {
+  ok: boolean
+  skipped?: boolean
+  unconfigured?: boolean
+  status?: number
+  error?: string
+}
+
+/** The side effects delivery needs, handed in so the rules below can be tested
+ *  without a network, a clock or main's settings files. */
+export interface PostbackIo {
+  fetch: (
+    url: string,
+    init: { method: 'POST'; headers: Record<string, string>; body: string }
+  ) => Promise<{ ok: boolean; status: number; statusText: string }>
+  wait: (ms: number) => Promise<void>
+  /** The evidence-privacy policy, already loaded. */
+  redact: (text: string) => string
+  /** Turn a thrown network error into a sentence naming the host. */
+  reachError: (e: unknown, url: string) => string
+  now?: Date
+}
+
+/**
+ * Send one run's postback: policy, URL check, redaction, then up to three
+ * attempts.
+ *
+ * This is the ONLY implementation. It used to live inside the `postback:send`
+ * IPC handler, which meant the command line — the path that runs with nobody
+ * watching, where a machine-readable "it finished" matters most — could not
+ * reach it and sent nothing. Copying it for the CLI would have been two sets of
+ * retry and redaction rules to keep in step; the first time they drifted, a
+ * nightly run would leak a page quote the in-app run had scrubbed.
+ */
+export async function deliverPostback(
+  settings: PostbackSettings,
+  run: RunSummary,
+  io: PostbackIo
+): Promise<PostbackOutcome> {
+  if (!shouldPost(settings?.when ?? 'off', run.ok)) return { ok: true, skipped: true }
+  const urlError = postbackUrlError(settings.url)
+  // Flagged as UNCONFIGURED, not as a failed delivery. Nothing was sent, so
+  // "didn't arrive" would be false — and with the postback armed but no URL
+  // typed, every single run would say it. The Integrations panel already
+  // shows this error beside the URL box, which is where it gets fixed; a
+  // toast on every run would be noise in front of the one notice that has
+  // to be believed, a receiver that really did not answer.
+  if (urlError) return { ok: false, unconfigured: true, error: urlError }
+
+  // The failure message quotes the page, so the evidence-privacy policy has
+  // to reach it too — this payload LEAVES the machine, which the page HTML
+  // and console it already scrubs never do.
+  const body = JSON.stringify(buildRunPayload(redactRunSummary(run, io.redact), io.now))
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...parseHeaders(settings.headers ?? '')
+  }
+  // Three attempts with a widening gap. Enough to ride out a restart or a
+  // rate limit; short enough that a finished run isn't held open for long.
+  let lastError = ''
+  let lastStatus: number | null = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await io.wait(attempt * 1000)
+    try {
+      const res = await io.fetch(settings.url.trim(), { method: 'POST', headers, body })
+      lastStatus = res.status
+      if (res.ok) return { ok: true, status: res.status }
+      lastError = `The receiver returned ${res.status} ${res.statusText}`.trim()
+      if (!isRetryable(res.status)) break
+    } catch (e) {
+      lastStatus = null
+      lastError = io.reachError(e, settings.url)
+    }
+  }
+  return { ok: false, status: lastStatus ?? undefined, error: lastError }
 }
 
 // ── GitLab ───────────────────────────────────────────────────────────

@@ -10,7 +10,8 @@ that is a bug.
 | ✅ **Hand-verified** | Exercised by hand in the real app on the date given, **and** covered by automated tests. |
 | 🧪 **Automated**     | Covered by automated tests (named). Not re-checked by hand in the latest round.          |
 | ⚠️ **Partial**       | Works, with the limits stated.                                                           |
-| ❌ **Not built**     | Not in the product yet.                                                                  |
+| 📋 **Planned**       | Not in the product yet, but prepared — the row says what is still missing.               |
+| ❌ **Not built**     | Not in the product yet, and no work towards it in this repo.                             |
 
 Hand-test rounds referenced below: **2026-09-18** (audit remediation + Electron 44 checklist) and
 **Aug 2026** (integration rounds 1–11 across the whole app).
@@ -63,19 +64,19 @@ Test files: `test/` = unit (`npm test`), `test-dom/` = browser (`npm run test:do
 
 ## Test management and running
 
-| Capability                                          | Status        | Evidence                                                                 |
-| --------------------------------------------------- | ------------- | ------------------------------------------------------------------------ |
-| Library, suites, tags, search                       | ✅ Aug 2026   | integration rounds; `test/library.test.ts`                               |
-| Version history and rollback                        | 🧪            | `test/library.test.ts`                                                   |
-| Data-driven runs (per-row data tables)              | ✅ 2026-09-18 | hand-test A2 (6-row negative login); `test/dataDriven.test.ts`           |
-| Environments and `{{env:…}}` variables              | 🧪            | `test/runInputs.test.ts`, `test/osEnvNames.test.ts`                      |
-| Parallel suite runs (headless Playwright)           | 🧪            | `test/headless.test.ts`                                                  |
-| Cross-browser runs                                  | 🧪            | `test/xbrowser.test.ts`                                                  |
-| Monitors (scheduled runs)                           | ⚠️            | Aug 2026 rounds. **Only while the app is open** — no background service. |
-| Shareable bundles (git-committable)                 | 🧪            | `test/bundle.test.ts`                                                    |
-| Projects above suites                               | 🧪            | `test/library.test.ts`, `test/scale.test.ts`                             |
-| General CLI runner, GitLab issues, results postback | 🧪            | `test/cli.test.ts`, `test/postback.test.ts`                              |
-| 100+ test suites without stalling                   | 🧪            | `test/scale.test.ts` — a real 240-test library on disk                   |
+| Capability                                          | Status        | Evidence                                                                                                                                                                                                                  |
+| --------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Library, suites, tags, search                       | ✅ Aug 2026   | integration rounds; `test/library.test.ts`                                                                                                                                                                                |
+| Version history and rollback                        | 🧪            | `test/library.test.ts`                                                                                                                                                                                                    |
+| Data-driven runs (per-row data tables)              | ✅ 2026-09-18 | hand-test A2 (6-row negative login); `test/dataDriven.test.ts`                                                                                                                                                            |
+| Environments and `{{env:…}}` variables              | 🧪            | `test/runInputs.test.ts`, `test/osEnvNames.test.ts`                                                                                                                                                                       |
+| Parallel suite runs (headless Playwright)           | 🧪            | `test/headless.test.ts`                                                                                                                                                                                                   |
+| Cross-browser runs                                  | 🧪            | `test/xbrowser.test.ts`                                                                                                                                                                                                   |
+| Monitors (scheduled runs)                           | ⚠️            | Aug 2026 rounds (in-app). **With the app closed: Windows only** — 🌙 hands the schedule to Windows Task Scheduler, which runs the CLI (`test/scheduler.test.ts`). On macOS/Linux monitors run only while the app is open. |
+| Shareable bundles (git-committable)                 | 🧪            | `test/bundle.test.ts`                                                                                                                                                                                                     |
+| Projects above suites                               | 🧪            | `test/library.test.ts`, `test/scale.test.ts`                                                                                                                                                                              |
+| General CLI runner, GitLab issues, results postback | 🧪            | `test/cli.test.ts`, `test/postback.test.ts`                                                                                                                                                                               |
+| 100+ test suites without stalling                   | 🧪            | `test/scale.test.ts` lists 240; `test-scale/run-scale.test.ts` runs 120                                                                                                                                                   |
 
 ## Evidence and reporting
 
@@ -90,13 +91,13 @@ Test files: `test/` = unit (`npm test`), `test-dom/` = browser (`npm run test:do
 
 ## Security and privacy
 
-| Capability                                                                              | Status        | Evidence                                                                 |
-| --------------------------------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------ |
-| Passwords encrypted at rest (OS protection)                                             | ✅ 2026-09-18 | hand-tests 16–19; `test/secretsCodec.test.ts`                            |
-| No readable password in tests, history, data tables, drafts, backups, traces, baselines | ✅ 2026-09-18 | hand-tests A1–A5 + a sweep of a real library; `test/secretCells.test.ts` |
-| Passwords deleted when nothing refers to them                                           | ✅ 2026-09-18 | hand-test 19                                                             |
-| Dependency audit gate (high and above blocks CI)                                        | 🧪            | `.github/workflows/ci.yml`                                               |
-| Signed installer                                                                        | ❌            | unsigned; ready to sign — see RELEASING.md                               |
+| Capability                                                                              | Status        | Evidence                                                                                        |
+| --------------------------------------------------------------------------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
+| Passwords encrypted at rest (OS protection)                                             | ✅ 2026-09-18 | hand-tests 16–19; `test/secretsCodec.test.ts`                                                   |
+| No readable password in tests, history, data tables, drafts, backups, traces, baselines | ✅ 2026-09-18 | hand-tests A1–A5 + a sweep of a real library; `test/secretCells.test.ts`                        |
+| Passwords deleted when nothing refers to them                                           | ✅ 2026-09-18 | hand-test 19                                                                                    |
+| Dependency audit gate (high and above blocks CI)                                        | 🧪            | `.github/workflows/ci.yml`                                                                      |
+| Signed installer                                                                        | 📋            | unsigned today. The build signs automatically once a certificate is supplied — see RELEASING.md |
 
 ## The app's own accessibility
 

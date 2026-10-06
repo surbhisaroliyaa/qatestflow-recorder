@@ -1,4 +1,5 @@
 import React from 'react'
+import { plural } from '../../../shared/plural'
 import { a11yImpactRank } from '../uiFormat'
 
 // =====================================================================
@@ -77,7 +78,7 @@ export function A11yPanel({
                 {a11yScan.title || a11yScan.url || 'this page'}
               </span>
               <span className="a11y-summary-stats">
-                {a11yScan.passCount} checks passed
+                {plural(a11yScan.passCount, 'check')} passed
                 {a11yScan.incompleteCount > 0 && ` · ${a11yScan.incompleteCount} need review`}
               </span>
             </div>

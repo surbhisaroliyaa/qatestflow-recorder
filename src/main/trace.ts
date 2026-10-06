@@ -13,6 +13,7 @@ import { join } from 'path'
 import { mkdir, writeFile, readFile, rm, readdir } from 'fs/promises'
 import { libraryDir } from './library'
 import type { ApiEvidence } from './apiStep'
+import { tracesBeyondKeep } from '../shared/evidenceStorage'
 
 // One recorded step in a trace. `text` is the human sentence (computed by
 // the renderer and handed in, so the trace is self-contained). Asset file
@@ -561,10 +562,9 @@ export function generateReportHtml(
 // run traces.
 export async function pruneTraces(keep = 40, protectedIds?: Set<string>): Promise<void> {
   try {
-    const entries = (await readdir(tracesDir())).filter(isSafeTraceId).sort()
-    const prunable = protectedIds ? entries.filter((id) => !protectedIds.has(id)) : entries
-    const excess = prunable.slice(0, Math.max(0, prunable.length - keep))
-    for (const id of excess) {
+    const entries = (await readdir(tracesDir())).filter(isSafeTraceId)
+    // The selection itself is pure and tested (src/shared/evidenceStorage.ts).
+    for (const id of tracesBeyondKeep(entries, keep, protectedIds)) {
       await rm(traceDir(id), { recursive: true, force: true })
     }
   } catch {

@@ -9,6 +9,22 @@ interface PrivacyShape {
   patterns: string
   maskSelectors: string
   captureDom: boolean
+  keepTraces: number
+  maxAgeDays: number
+}
+
+// Evidence storage — per-folder usage, and the outcome of a delete.
+interface EvidenceUsageShape {
+  id: string
+  count: number
+  bytes: number
+  inUse: number
+}
+interface EvidenceDeleteShape {
+  deleted: number
+  freedBytes: number
+  keptInUse: number
+  failed: number
 }
 
 // Custom APIs exposed to the React renderer as window.api
@@ -118,7 +134,9 @@ const api = {
       pageFiles?: { fileName: string; source: string }[],
       harFile?: string,
       ciWorkflow?: string,
-      configFile?: string
+      configFile?: string,
+      ciKind?: 'github' | 'gitlab',
+      secrets?: { refs: string[]; values: string[] }
     ): Promise<{ path: string; alsoWrote: string[]; pageOverwritten: boolean } | null> =>
       ipcRenderer.invoke(
         'recorder:export',
@@ -128,7 +146,9 @@ const api = {
         pageFiles,
         harFile,
         ciWorkflow,
-        configFile
+        configFile,
+        ciKind,
+        secrets
       ),
 
     // Phase 4: the portable YAML/JSON form of a test. Export writes a file the
@@ -143,6 +163,8 @@ const api = {
       name: string
       baseURL?: string
       tags?: string[]
+      viewport?: { width: number; height: number }
+      deviceId?: string
       dataRows?: Record<string, string>[]
       // `unknown[]` here, like every other step-carrying call in this file —
       // the preload is deliberately ignorant of the RecorderStep type, which
@@ -208,7 +230,9 @@ const api = {
       traceOpts?: unknown,
       harFile?: string,
       chaos?: { slowNetwork?: boolean; locale?: string },
-      authorChecks?: boolean // F21b: pause per page to add checks along the ride
+      authorChecks?: boolean, // F21b: pause per page to add checks along the ride
+      // FR-15: run on the page already open (no clean-slate wipe) — step runs.
+      runOpts?: { fromCurrentPage?: boolean }
     ): Promise<{ ok: boolean; failedAt?: number; error?: string }> =>
       ipcRenderer.invoke(
         'recorder:replay',
@@ -218,7 +242,8 @@ const api = {
         traceOpts,
         harFile,
         chaos,
-        authorChecks
+        authorChecks,
+        runOpts
       ),
 
     // === Recovery (Day 12) ===
@@ -676,6 +701,20 @@ const api = {
     get: (): Promise<PrivacyShape> => ipcRenderer.invoke('privacy:get'),
     save: (settings: PrivacyShape): Promise<PrivacyShape> =>
       ipcRenderer.invoke('privacy:save', settings)
+  },
+
+  // Evidence storage: sizes per evidence folder, and deleting by category (or
+  // 'all') — optionally only what's older than N days. Never takes a path.
+  evidence: {
+    scan: (): Promise<EvidenceUsageShape[]> => ipcRenderer.invoke('evidence:scan'),
+    delete: (which: string, olderThanDays?: number): Promise<EvidenceDeleteShape> =>
+      ipcRenderer.invoke('evidence:delete', which, olderThanDays),
+    setOpen: (openTest: {
+      storageState?: string
+      har?: string
+      steps: unknown[]
+      dataRows?: Record<string, string>[]
+    }): void => ipcRenderer.send('evidence:setOpen', openTest)
   },
 
   // Phase 4: keep a monitor running with the app CLOSED, via the OS scheduler.

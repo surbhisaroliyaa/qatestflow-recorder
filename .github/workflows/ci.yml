@@ -85,6 +85,9 @@ jobs:
       # The app-shell accessibility scan (QF-004) loads the BUILT renderer.
       - run: npm run build
       - run: npm run test:dom
+      # The 100+ test RUN proof: 120 generated tests (+1 canary that must fail)
+      # through the real headless runner — ~22 s with 4 workers locally.
+      - run: npm run test:scale
 
   # ── Dependency audit — BLOCKING (QF-006 closed 2026-09-18) ─────────
   # ALL dependencies, not `--omit=dev`. In an Electron app, `electron` is a

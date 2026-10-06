@@ -16,10 +16,18 @@ import { mkdir, readdir, readFile, writeFile, unlink } from 'fs/promises'
 import type { Dirent } from 'fs'
 import { join } from 'path'
 // F40: keeps plaintext passwords out of the shared/committed test files.
-import { stripSecrets, stripDataRows, refsByStepId, SECRETS_FILE_VERSION } from './secrets'
-import { secretCellRef } from '../shared/secretCells'
+import {
+  stripSecrets,
+  stripDataRows,
+  refsByStepId,
+  getSecrets,
+  SECRETS_FILE_VERSION
+} from './secrets'
+import { scrubSecretValues, type HarLog } from './har'
+import { secretCellRef, secretSources } from '../shared/secretCells'
 // QF-001: repair checkbox steps recorded before the canonical `check` step.
 import { migrateLegacyCheckSteps, type LegacyStep } from '../shared/legacyCheckSteps'
+import { collectTestRefs, emptyRefs, type EvidenceRefs } from '../shared/evidenceStorage'
 
 // Outcome of one replay — gives the library list its green/red
 // "mini CI dashboard" dots.
@@ -88,6 +96,34 @@ export interface SavedTestFile {
   secretsVersion?: number
   steps: unknown[]
 }
+
+// What the portable YAML/JSON form (shared/testFormat.ts) does with each field
+// of the saved file. Keyed by the TYPE, so a new test-level setting cannot be
+// added here without someone deciding whether it travels — the lossless audit
+// found `viewport` and `deviceId` exported and then ignored on import, which is
+// exactly the kind of gap nobody sees until an iPhone test replays as desktop.
+//   portable — written by testToPortable, read by parsePortableTest, applied on import
+//   machine  — this machine's history of the test, not the test (same list the
+//              bundle leaves behind)
+//   format   — the file format's own version, carried separately
+export const SAVED_FIELD_FATE = {
+  version: 'format',
+  name: 'portable',
+  baseURL: 'portable',
+  createdAt: 'machine',
+  updatedAt: 'machine',
+  lastRun: 'machine',
+  runs: 'machine',
+  storageState: 'portable',
+  viewport: 'portable',
+  deviceId: 'portable',
+  tags: 'portable',
+  dataRows: 'portable',
+  har: 'portable',
+  versions: 'machine',
+  secretsVersion: 'machine',
+  steps: 'portable'
+} as const satisfies Record<keyof SavedTestFile, 'portable' | 'machine' | 'format'>
 
 // What the library LIST shows — everything except the steps themselves,
 // so listing 50 tests doesn't read 50 full step arrays into the UI.
@@ -306,14 +342,6 @@ export async function saveTest(input: {
   if (folder) await mkdir(join(libraryDir(), folder), { recursive: true })
   const now = new Date().toISOString()
   const previous = await readTestFile(fileName)
-  // F1: write the new HAR (if capturing) and point the test at it; otherwise
-  // keep whatever HAR the test already had.
-  let har = previous?.har
-  if (input.harLog) {
-    har = harNameForFile(fileName)
-    await mkdir(harsDir(), { recursive: true })
-    await writeFile(join(harsDir(), har), JSON.stringify(input.harLog), 'utf-8')
-  }
   // F40: the choke point. Every save comes through here, so this is the one
   // place that can guarantee no password is ever written into a test file. The
   // value moves to the userData secret store and the step keeps only a ref.
@@ -321,6 +349,20 @@ export async function saveTest(input: {
   const safeSteps = await stripSecrets(input.steps)
   // …and the data table's sensitive cells, the same way (Option A, 2026-09-18).
   const safeRows = await stripDataRows(input.dataRows)
+
+  // F1: write the new HAR (if capturing) and point the test at it; otherwise
+  // keep whatever HAR the test already had. Written AFTER the strip above: by
+  // now every secret this test holds is a ref, and resolving those refs gives
+  // the exact values to blank out of the capture — a login post carries the
+  // password, and no privacy pattern can recognise one by its shape.
+  let har = previous?.har
+  if (input.harLog) {
+    har = harNameForFile(fileName)
+    const { refs } = secretSources(safeSteps, safeRows)
+    const safeHar = scrubSecretValues(input.harLog as HarLog, Object.values(await getSecrets(refs)))
+    await mkdir(harsDir(), { recursive: true })
+    await writeFile(join(harsDir(), har), JSON.stringify(safeHar), 'utf-8')
+  }
 
   // F12: if the STEPS actually changed vs the last save, snapshot the previous
   // steps as a version (so you can see what changed and roll back). Re-saving
@@ -501,17 +543,33 @@ export async function allSecretRefs(): Promise<string[]> {
     }
   }
 
+  await forEachStepHolder(collectFile)
+  return [...refs]
+}
+
+/**
+ * Walk everything on disk that can hold steps — the "live set" walk that
+ * allSecretRefs needs, shared so the evidence cleanup (evidenceRefs) protects
+ * exactly the same universe. Two walks that drift apart would mean a file the
+ * secret sweep thinks is live being deleted by the evidence sweep.
+ *
+ * `visit` gets a TEST-SHAPED record: a test file, a draft or a backup as-is;
+ * a block or an edge-run variant wrapped as `{ steps }`.
+ */
+async function forEachStepHolder(
+  visit: (data: Record<string, unknown> | null | undefined) => void
+): Promise<void> {
   for (const file of await listTestPaths()) {
-    collectFile((await readTestFile(file)) as unknown as Record<string, unknown> | null)
+    visit((await readTestFile(file)) as unknown as Record<string, unknown> | null)
   }
 
   for (const block of await listBlocks()) {
     const b = await readBlockFile(block.fileName)
-    if (b) collect(b.steps)
+    if (b) visit({ steps: b.steps })
   }
 
   for (const draft of await listDrafts()) {
-    collectFile((await loadDraft(draft.id)) as unknown as Record<string, unknown> | null)
+    visit((await loadDraft(draft.id)) as unknown as Record<string, unknown> | null)
   }
 
   // BACKUPS. Their passwords were moved into the store under refs the backup
@@ -519,7 +577,7 @@ export async function allSecretRefs(): Promise<string[]> {
   // those refs are live for as long as the backup exists.
   for (const file of await backupJsonFiles()) {
     try {
-      collectFile(JSON.parse(await readFile(file, 'utf-8')))
+      visit(JSON.parse(await readFile(file, 'utf-8')))
     } catch {
       // not JSON — carries no refs
     }
@@ -531,13 +589,23 @@ export async function allSecretRefs(): Promise<string[]> {
   for (const file of await backupJsonFiles(join(libraryDir(), '_edgeRuns'))) {
     try {
       const rec = JSON.parse(await readFile(file, 'utf-8')) as { results?: { steps?: unknown }[] }
-      for (const r of rec.results ?? []) collect(r?.steps)
+      for (const r of rec.results ?? []) visit({ steps: r?.steps })
     } catch {
       // not JSON — carries no refs
     }
   }
+}
 
-  return [...refs]
+/**
+ * Evidence files something on disk still NEEDS — an upload step's fixture, a
+ * test's HAR — so the evidence cleanup can never delete them. Same walk as the
+ * secret sweep (see forEachStepHolder), same reasoning: missing a reference
+ * breaks a test, including a spare one merely keeps a file.
+ */
+export async function evidenceRefs(): Promise<Required<EvidenceRefs>> {
+  const refs = emptyRefs()
+  await forEachStepHolder((data) => collectTestRefs(data, refs))
+  return refs
 }
 
 async function backupJsonFiles(dir = join(libraryDir(), '_backups')): Promise<string[]> {

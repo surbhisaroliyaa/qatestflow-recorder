@@ -385,6 +385,55 @@ export interface ParallelTestResult {
   id: string
   ok: boolean
   error?: string
+  /**
+   * How long this test took, summed over every result Playwright reported for
+   * its file (each data row, each retry). Playwright measures it per result, so
+   * this is its number, not ours — the CLI used to report 0 for every test,
+   * which a CI dashboard charts as "instant" rather than "unknown".
+   */
+  durationMs?: number
+  /** How many test() blocks the file ran and how many failed — for a
+   *  data-driven test these are its rows. */
+  cases?: { total: number; failed: number }
+  /**
+   * The line in the generated spec that `error` was raised on, when Playwright
+   * reported one in this test's own file. The command line turns it back into
+   * a step number through the spec's `// qtf:step` markers; nothing else reads
+   * it, which is why it is a line and not a guess at a step.
+   */
+  failedLine?: number
+}
+
+/** One Playwright error, as much of it as locating the failure needs. */
+interface ReportError {
+  message?: string
+  stack?: string
+  location?: { file?: string; line?: number }
+}
+
+/**
+ * Which line of THIS spec file a failure came from.
+ *
+ * `location` is Playwright's own answer and is preferred — but only when it is
+ * in the spec itself: an error raised inside Playwright or a helper module
+ * points elsewhere, and a line number from another file would land on an
+ * unrelated step. The stack is the fallback, read for the first frame in the
+ * spec (a timeout error can carry a stack but no location).
+ */
+export function failureLine(errors: ReportError[], specFile: string): number | undefined {
+  const base = specFile.toLowerCase()
+  const inSpec = (file: string | undefined): boolean =>
+    !!file && (file.split(/[\\/]/).pop() ?? '').toLowerCase() === base
+  for (const e of errors) {
+    if (inSpec(e.location?.file) && typeof e.location?.line === 'number') return e.location.line
+  }
+  const esc = specFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const frame = new RegExp(`${esc}:(\\d+):\\d+`, 'i')
+  for (const e of errors) {
+    const m = frame.exec(stripAnsi(e.stack ?? ''))
+    if (m) return Number(m[1])
+  }
+  return undefined
 }
 
 export interface ParallelRunResult {
@@ -451,10 +500,27 @@ export function resultsFromReport(
       const id = idBySlug.get(slug)
       if (!id) continue
       for (const testRaw of s.tests ?? []) {
-        const t = testRaw as { results?: { status?: string; error?: { message?: string } }[] }
+        const t = testRaw as {
+          results?: {
+            status?: string
+            duration?: number
+            error?: ReportError
+            errors?: ReportError[]
+          }[]
+        }
         const results = t.results ?? []
         const ok = results.length > 0 && results.every((r) => r.status === 'passed')
-        const firstErr = results.find((r) => r.error?.message)?.error?.message
+        const firstFailed = results.find((r) => r.error?.message)
+        const firstErr = firstFailed?.error?.message
+        // Located from the SAME result the message came from, so the step and
+        // the message a receiver is given always describe one failure.
+        const line = firstFailed
+          ? failureLine([firstFailed.error!, ...(firstFailed.errors ?? [])], `${slug}.spec.ts`)
+          : undefined
+        const took = results.reduce(
+          (sum, r) => sum + (typeof r.duration === 'number' && r.duration > 0 ? r.duration : 0),
+          0
+        )
         const prev = byId.get(id)
         // A data-driven test is several `test()` blocks in one file — the file
         // is green only if every one of them passed.
@@ -462,7 +528,13 @@ export function resultsFromReport(
           id,
           ok: (prev?.ok ?? true) && ok,
           error:
-            prev?.error ?? (firstErr ? clip(stripAnsi(firstErr).replace(/\s+/g, ' ')) : undefined)
+            prev?.error ?? (firstErr ? clip(stripAnsi(firstErr).replace(/\s+/g, ' ')) : undefined),
+          failedLine: prev?.error ? prev.failedLine : firstErr ? line : undefined,
+          durationMs: (prev?.durationMs ?? 0) + took,
+          cases: {
+            total: (prev?.cases?.total ?? 0) + 1,
+            failed: (prev?.cases?.failed ?? 0) + (ok ? 0 : 1)
+          }
         })
       }
     }

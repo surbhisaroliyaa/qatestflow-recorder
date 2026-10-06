@@ -11,7 +11,7 @@ vi.mock('electron', () => ({
   }
 }))
 
-const { pointAtAbsolute, resultsFromReport, runConfig, specSlug } =
+const { failureLine, pointAtAbsolute, resultsFromReport, runConfig, specSlug } =
   await import('../src/main/xbrowser')
 
 // =====================================================================
@@ -223,6 +223,47 @@ describe('mapping Playwright’s report back onto our tests', () => {
     expect(out.results[0].ok).toBe(false)
   })
 
+  it('carries Playwright’s own durations and the per-row counts', () => {
+    // The CLI's JUnit file said time="0.000" for every test, because this
+    // mapping dropped `duration`. Summed over the file: every row, every retry.
+    const out = resultsFromReport(
+      report({
+        suites: [
+          {
+            file: '0-login.spec.ts',
+            specs: [
+              { title: 'row 1', tests: [{ results: [{ status: 'passed', duration: 1200 }] }] },
+              {
+                title: 'row 2',
+                tests: [
+                  {
+                    results: [
+                      { status: 'failed', duration: 800, error: { message: 'x' } },
+                      { status: 'failed', duration: 700, error: { message: 'x' } }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }),
+      slugs,
+      ['login.json']
+    )
+    expect(out.results[0].durationMs).toBe(2700)
+    expect(out.results[0].cases).toEqual({ total: 2, failed: 1 })
+  })
+
+  it('a report without durations gives 0, not NaN', () => {
+    const out = resultsFromReport(
+      report({ suites: [suite('0-login.spec.ts', [{ status: 'passed' }])] }),
+      slugs,
+      ['login.json']
+    )
+    expect(out.results[0].durationMs).toBe(0)
+  })
+
   it('marks a spec that produced no result, while others did, as a per-test problem', () => {
     const out = resultsFromReport(
       report({ suites: [suite('0-login.spec.ts', [{ status: 'passed' }])] }),
@@ -289,5 +330,74 @@ describe('mapping Playwright’s report back onto our tests', () => {
       ['login.json']
     )
     expect(out.results[0].ok).toBe(true)
+  })
+})
+
+// =====================================================================
+// Where a failure happened. The command line turns this line back into a step
+// number, and a postback sends that number to somebody else's dashboard — so a
+// line from the WRONG file must never be reported as if it were the spec's.
+// =====================================================================
+describe('the line a failure happened on', () => {
+  it('takes Playwright’s location when it is in the spec itself', () => {
+    expect(
+      failureLine(
+        [{ location: { file: 'C:\\run\\specs\\0-login.spec.ts', line: 14 } }],
+        '0-login.spec.ts'
+      )
+    ).toBe(14)
+  })
+
+  it('ignores a location in another file, and falls back to the stack', () => {
+    const line = failureLine(
+      [
+        {
+          location: { file: '/node_modules/playwright/lib/x.js', line: 900 },
+          stack:
+            'Error: boom\n    at helper (/run/x.js:3:1)\n    at /run/specs/0-login.spec.ts:22:7'
+        }
+      ],
+      '0-login.spec.ts'
+    )
+    expect(line).toBe(22)
+  })
+
+  it('says nothing rather than guess when neither points at the spec', () => {
+    expect(
+      failureLine([{ message: 'Test timeout of 30000ms exceeded.' }], '0-login.spec.ts')
+    ).toBeUndefined()
+  })
+
+  it('reaches the result, from the same failure the message came from', () => {
+    const out = resultsFromReport(
+      JSON.stringify({
+        suites: [
+          {
+            file: '0-login.spec.ts',
+            specs: [
+              {
+                tests: [
+                  {
+                    results: [
+                      {
+                        status: 'failed',
+                        error: {
+                          message: 'locator.click: Timeout',
+                          location: { file: '/w/specs/0-login.spec.ts', line: 9 }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }),
+      new Map([['0-login', 'login.json']]),
+      ['login.json']
+    )
+    expect(out.results[0].failedLine).toBe(9)
+    expect(out.results[0].error).toContain('locator.click')
   })
 })

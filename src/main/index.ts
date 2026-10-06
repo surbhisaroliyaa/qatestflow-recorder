@@ -47,13 +47,19 @@ import { portableBasename } from '../shared/portablePath'
 // Phase 4: the command line — argument parsing, selection and reporters all
 // live in cli.ts so they are unit-testable without launching anything.
 import {
+  cliRunSummary,
   describeMissingEnv,
+  envBatches,
   exitCodeFor,
+  formatRefusal,
   formatReport,
   HELP_TEXT,
   missingEnvRefs,
+  monitorSelection,
   parseArgs,
+  postbackProblem,
   selectTests,
+  stepAtLine,
   summarize,
   type CliOptions,
   type CliTestResult
@@ -86,20 +92,19 @@ import { generatePlaywrightTest } from '../renderer/src/playwrightExport'
 // same way the renderer does. Importing the renderer's own function rather than
 // re-deriving them here is deliberate: two derivations would drift, and this
 // bug WAS that drift — the CLI passed an empty column list.
-import { dataColumns } from '../renderer/src/dataDriven'
+import { dataColumns, envVarNames } from '../renderer/src/dataDriven'
+// The run-input rules the app uses — block expansion and the headless
+// environment — so a command-line run is assembled the way an in-app one is.
+import { headlessRunEnv, planRun } from '../shared/runInputs'
 import { deviceById } from '../renderer/src/devices'
 import { loadIntegrations, saveIntegrations, type IntegrationSettings } from './integrations'
 // Phase 4: the machine-readable "a run finished" notification, and GitLab.
 import {
-  buildRunPayload,
-  redactRunSummary,
+  deliverPostback,
   gitlabConfigError,
   gitlabIssuesUrl,
-  isRetryable,
-  parseHeaders,
-  postbackUrlError,
-  shouldPost,
   type GitLabConfig,
+  type PostbackOutcome,
   type PostbackSettings,
   type RunSummary
 } from '../shared/postback'
@@ -108,7 +113,7 @@ import { parsePortableTest, testToPortable, toPortableJson, toYaml } from '../sh
 // QF-002: the page → Electron trust boundary. Main re-validates rather than
 // trusting the relay preload to have done it.
 import { validateElementFacts, validatePageMessage } from '../shared/recorderMessages'
-import { maskPasswordInputs, secretCellRef } from '../shared/secretCells'
+import { maskPasswordInputs, secretCellRef, secretSources } from '../shared/secretCells'
 // QF-006: Electron 43+ opens a dialog with no defaultPath in Downloads.
 import { lastFolder, rememberFolder } from './lastFolders'
 // F40: passwords live in userData, not in the shared test files.
@@ -126,7 +131,14 @@ import {
   secretStoreStatus
 } from './secrets'
 // F40: export/import the library as a portable, git-committable bundle.
-import { exportBundle, inspectBundle, importBundle, type ImportPlanEntry } from './bundle'
+import {
+  exportBundle,
+  inspectBundle,
+  importBundle,
+  localUploadPath,
+  uploadPathsOf,
+  type ImportPlanEntry
+} from './bundle'
 import {
   saveTest,
   listTests,
@@ -189,7 +201,14 @@ import {
   perfBudgetLabel,
   type PerfResult
 } from './perf'
-import { matchEntry, serveHeaders, entryBodyBase64, type HarLog } from './har'
+import {
+  matchEntry,
+  serveHeaders,
+  entryBodyBase64,
+  redactHar,
+  scrubSecretValues,
+  type HarLog
+} from './har'
 // F1: how long a HAR-intercepted request may stay paused before we give up and
 // let it hit the live network. Deciding what to serve is pure in-memory work
 // (match + base64), so anything still outstanding after this went wrong — and a
@@ -204,7 +223,6 @@ import {
   generateTraceHtml,
   generateReportHtml,
   traceDir,
-  pruneTraces,
   type TraceManifest,
   type TraceStepRecord
 } from './trace'
@@ -226,7 +244,8 @@ import {
   runCrossBrowser,
   runSuiteParallel,
   type BrowserName,
-  type ParallelSpec
+  type ParallelSpec,
+  type ParallelTestResult
 } from './xbrowser'
 import { runApiStep, type ApiEvidence } from './apiStep'
 import {
@@ -242,14 +261,24 @@ import {
   listEdgeRuns,
   loadEdgeRun,
   deleteEdgeRun,
-  protectedEdgeTraceIds,
   type EdgeRunRecord
 } from './edgeRuns'
+import { applyRetention, deleteEvidence, scanEvidence, setOpenWorkspace } from './evidenceStorage'
+import { isEvidenceCategory } from '../shared/evidenceStorage'
 import { capturePageWithin, settleWithin } from './captureGuard'
 import { downloadNameMatches, describeDownloadExpectation } from '../shared/downloadName'
 
 // Small pause so a human can watch each replayed step happen.
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+// Upload paths are absolute and only true on the machine that recorded them.
+// In-app replay already falls back to this library's _uploads copy; the
+// headless, cross-browser and export copies go through the same rule, or a
+// test imported from another machine passes in the app and fails everywhere else.
+function localFixtures(paths: string[]): string[] {
+  const uploadsDir = join(libraryDir(), '_uploads')
+  return paths.map((p) => localUploadPath(p, uploadsDir))
+}
 
 /**
  * Turn a thrown fetch error into something a user can act on.
@@ -2256,7 +2285,14 @@ function createWindow(): void {
       // PAUSES after each page it lands on and offers to add a grounded check for
       // THAT page — so a multi-page test gets a check per page in ONE ride, no
       // re-typing the flow. Off by default → normal replay is byte-for-byte unchanged.
-      authorChecks?: boolean
+      authorChecks?: boolean,
+      // FR-15 (▶ Run this step / ▶ Run from here): run a SLICE of the test on
+      // the page that is ALREADY open. Everything below is the same engine as a
+      // full run; this only skips the clean-slate start (close popups, wipe
+      // cookies) — wiping the session would log the user out of the very page
+      // the step is meant to act on, and step 12 of a flow needs steps 1–11's
+      // state to exist.
+      runOpts?: { fromCurrentPage?: boolean }
     ): Promise<{
       ok: boolean
       failedAt?: number
@@ -2291,10 +2327,21 @@ function createWindow(): void {
       // leftover popup tabs, keep one as the recording-local windowId 0. Popups
       // opened during the run bind their ordinal as they appear.
       const baseTab = activeTab()
-      for (const t of tabs.filter((t) => t.id !== baseTab.id)) closeTab(t)
+      const fromCurrentPage = runOpts?.fromCurrentPage === true
+      if (!fromCurrentPage) {
+        for (const t of tabs.filter((t) => t.id !== baseTab.id)) closeTab(t)
+      }
       activeTabId = baseTab.id
       resizeEmbedded()
       const ordinalToTab = new Map<number, Tab>([[0, baseTab]])
+      if (fromCurrentPage) {
+        // FR-15: the open tabs keep their recording ordinals, so a step tagged
+        // "tab 2" finds tab 2. The slice's FIRST step runs in the tab on
+        // screen — that is the page the user pressed ▶ against.
+        for (const t of tabs) if (!ordinalToTab.has(t.ordinal)) ordinalToTab.set(t.ordinal, t)
+        const firstWindow = steps.find((s) => !s.disabled)?.windowId ?? 0
+        ordinalToTab.set(firstWindow, baseTab)
+      }
       // The tab the CURRENT step runs in — repointed per step by switchTo().
       let currentWC = baseTab.view.webContents
 
@@ -2302,12 +2349,15 @@ function createWindow(): void {
       // localStorage), exactly like a real Playwright test gets a fresh browser
       // context. Without this, leftover state — e.g. an item already in the cart
       // from the recording session — breaks the replay ("Add to cart" is gone).
-      try {
-        await currentWC.session.clearStorageData({
-          storages: ['cookies', 'localstorage']
-        })
-      } catch {
-        // best-effort; continue even if clearing isn't supported
+      // FR-15: a step run is the opposite case — it WANTS that state (see runOpts).
+      if (!fromCurrentPage) {
+        try {
+          await currentWC.session.clearStorageData({
+            storages: ['cookies', 'localstorage']
+          })
+        } catch {
+          // best-effort; continue even if clearing isn't supported
+        }
       }
       // Electron resolves clearStorageData's promise BEFORE the async wipe
       // actually finishes — so a cookie set right after gets erased by the
@@ -3216,8 +3266,6 @@ function createWindow(): void {
                 const file = await saveVideo(traceDir(traceRunId), videoBytes)
                 if (file) outcome.videoFile = file
               }
-              // F20 (Option 2): never prune a recording a saved edge run owns.
-              await pruneTraces(40, await protectedEdgeTraceIds())
             }
           } else if (tracePersisted) {
             // Policy is on-failure but the run RECOVERED to a pass (retry/skip) —
@@ -3225,6 +3273,14 @@ function createWindow(): void {
             await deleteTrace(traceRunId)
           }
         }
+        // Evidence retention (privacy settings): keep the last N traces — the
+        // old hardcoded 40 is now the default — and, if set, age out old
+        // evidence. After EVERY run rather than only a traced one: failure
+        // images and downloads pile up whether tracing is on or not. Edge-run
+        // traces and anything a saved test uses are protected inside.
+        await applyRetention(privacy).catch(() => {
+          // a failed sweep never fails the run; the next run sweeps again
+        })
         // F1: report HAR usage when a HAR was in play (drives the run readout).
         if (replayHar) {
           outcome.harServed = harServed
@@ -4346,7 +4402,13 @@ function createWindow(): void {
             const cssList = (step.candidates ?? [])
               .map((c) => c.css)
               .filter((c): c is string => !!c)
-            const paths = (step.value ?? '').split('\n').filter(Boolean)
+            // The recorded paths are absolute and only true on the machine that
+            // recorded them; a test that arrived by YAML import (or a bundle
+            // made before bundle import relinked uploads) still names the
+            // author's `C:\Users\…`. Fall back to this library's _uploads copy.
+            const paths = uploadPathsOf(step.value).map((p) =>
+              localUploadPath(p, join(libraryDir(), '_uploads'))
+            )
             if (!cssList.length)
               throw new Error('Upload step has no CSS selector for the file input')
             if (!paths.length) throw new Error('Upload step has no file to set')
@@ -5198,9 +5260,12 @@ function createWindow(): void {
         captureHar?: boolean
       }
     ) => {
+      // Evidence privacy: the archive is redacted on its way to disk (see
+      // redactHar in har.ts); the in-memory capture stays whole for replay.
+      const captured = input.captureHar ? har.captured() : null
       const saved = await saveTest({
         ...input,
-        harLog: input.captureHar ? har.captured() : undefined
+        harLog: captured ? redactHar(captured, await loadPrivacy()) : undefined
       })
       // QF-003: the audit asked for secrets to be collected when tests AND
       // STEPS are deleted. Deleting a step and saving can orphan a password —
@@ -5238,37 +5303,9 @@ function createWindow(): void {
   // For a colliding name the OS value is refused: an empty result is honest, and
   // `unresolved` tells the caller which names have no value so the run can say so
   // instead of typing nothing and failing somewhere else.
-  ipcMain.handle(
-    'env:get',
-    async (
-      _event,
-      names: string[]
-    ): Promise<{ values: Record<string, string>; unresolved: string[] }> => {
-      const envVars = await activeEnvVars()
-      const values: Record<string, string> = {}
-      const unresolved: string[] = []
-      for (const name of Array.isArray(names) ? names : []) {
-        // A sensitive data cell (`{{secret:ref}}`) travels down this same road,
-        // named `secret:<ref>`: resolved from the encrypted store, never from an
-        // environment. The value exists in memory for the run, like any env value.
-        const ref = secretCellRef(`{{${name}}}`)
-        if (ref) {
-          const value = (await getSecret(ref)) ?? ''
-          values[name] = value
-          if (!value) unresolved.push(name)
-          continue
-        }
-        // An environment the user configured always wins, collision or not —
-        // they named it deliberately.
-        const fromEnv = envVars[name]
-        const fromProcess = collidesWithOsEnv(name) ? undefined : process.env[name]
-        const value = fromEnv ?? fromProcess ?? ''
-        values[name] = value
-        if (!value) unresolved.push(name)
-      }
-      return { values, unresolved }
-    }
-  )
+  //
+  // The body is resolveEnvNames (below), which the command line calls directly.
+  ipcMain.handle('env:get', (_event, names: string[]) => resolveEnvNames(names))
 
   // === Environment / config manager (F25) ============================
   // CRUD + active selection for named { baseURL + credentials } environments,
@@ -5525,7 +5562,7 @@ function createWindow(): void {
         browsers,
         envVars,
         session,
-        fixturePaths?.length ? fixturePaths : undefined,
+        fixturePaths?.length ? localFixtures(fixturePaths) : undefined,
         // A HAR is stored by bare filename in the library's _hars/, like a
         // session — resolved here, not in the renderer, for the same reason.
         harFile ? join(libraryDir(), '_hars', harFile) : undefined
@@ -5568,7 +5605,7 @@ function createWindow(): void {
         name: s.name,
         code: s.code,
         sessionPath: s.sessionFile ? join(libraryDir(), '_sessions', s.sessionFile) : undefined,
-        fixturePaths: s.fixturePaths?.length ? s.fixturePaths : undefined,
+        fixturePaths: s.fixturePaths?.length ? localFixtures(s.fixturePaths) : undefined,
         // A HAR is stored by bare filename in the library's _hars/, like a session.
         harPath: s.harFile ? join(libraryDir(), '_hars', s.harFile) : undefined
       }))
@@ -5612,6 +5649,13 @@ function createWindow(): void {
     }
     try {
       other += await scrubBaselines(join(libraryDir(), '_baselines'))
+    } catch {
+      // retried on the next launch
+    }
+    try {
+      // Network captures saved before the save path blanked the test's own
+      // password out of them (see scrubSecretValues): the login post held it.
+      other += await scrubSavedHars()
     } catch {
       // retried on the next launch
     }
@@ -5717,63 +5761,8 @@ function createWindow(): void {
   // point is that something is waiting for it. See src/shared/postback.ts.
   ipcMain.handle(
     'postback:send',
-    async (
-      _event,
-      settings: PostbackSettings,
-      run: RunSummary
-    ): Promise<{
-      ok: boolean
-      skipped?: boolean
-      /** Armed, but not set up yet — nothing was attempted. */
-      unconfigured?: boolean
-      status?: number
-      error?: string
-    }> => {
-      if (!shouldPost(settings?.when ?? 'off', run.ok)) return { ok: true, skipped: true }
-      const urlError = postbackUrlError(settings.url)
-      // Flagged as UNCONFIGURED, not as a failed delivery. Nothing was sent, so
-      // "didn't arrive" would be false — and with the postback armed but no URL
-      // typed, every single run would say it. The Integrations panel already
-      // shows this error beside the URL box, which is where it gets fixed; a
-      // toast on every run would be noise in front of the one notice that has
-      // to be believed, a receiver that really did not answer.
-      if (urlError) return { ok: false, unconfigured: true, error: urlError }
-
-      // The failure message quotes the page, so the evidence-privacy policy has
-      // to reach it too — this payload LEAVES the machine, which the page HTML
-      // and console it already scrubs never do.
-      let privacy: PrivacySettings = { ...DEFAULT_PRIVACY }
-      try {
-        privacy = await loadPrivacy()
-      } catch {
-        // Failing OPEN, as loadPrivacy does elsewhere.
-      }
-      const body = JSON.stringify(
-        buildRunPayload(redactRunSummary(run, (text) => redact(text, privacy)))
-      )
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...parseHeaders(settings.headers ?? '')
-      }
-      // Three attempts with a widening gap. Enough to ride out a restart or a
-      // rate limit; short enough that a finished run isn't held open for long.
-      let lastError = ''
-      let lastStatus: number | null = null
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (attempt) await wait(attempt * 1000)
-        try {
-          const res = await fetch(settings.url.trim(), { method: 'POST', headers, body })
-          lastStatus = res.status
-          if (res.ok) return { ok: true, status: res.status }
-          lastError = `The receiver returned ${res.status} ${res.statusText}`.trim()
-          if (!isRetryable(res.status)) break
-        } catch (e) {
-          lastStatus = null
-          lastError = reachError(e, settings.url)
-        }
-      }
-      return { ok: false, status: lastStatus ?? undefined, error: lastError }
-    }
+    (_event, settings: PostbackSettings, run: RunSummary): Promise<PostbackOutcome> =>
+      sendRunPostback(settings, run)
   )
 
   // File a failure as a GitLab issue — the mirror of jira:createIssue above.
@@ -5930,6 +5919,19 @@ function createWindow(): void {
 
   ipcMain.handle('privacy:get', () => loadPrivacy())
   ipcMain.handle('privacy:save', (_e, settings: PrivacySettings) => savePrivacy(settings))
+  // Evidence storage: what the run evidence costs on disk, and deleting it.
+  // The renderer names a CATEGORY, never a path — see src/main/evidenceStorage.ts.
+  ipcMain.handle('evidence:scan', () => scanEvidence())
+  ipcMain.handle('evidence:delete', (_e, which: unknown, olderThanDays?: unknown) => {
+    if (which !== 'all' && !isEvidenceCategory(which)) {
+      return { deleted: 0, freedBytes: 0, keptInUse: 0, failed: 0 }
+    }
+    const days = typeof olderThanDays === 'number' ? olderThanDays : undefined
+    return deleteEvidence(which, days)
+  })
+  // The open workspace's own files (login, uploads, HAR) count as in use even
+  // before the test is saved. Names only, and only used to KEEP files.
+  ipcMain.on('evidence:setOpen', (_e, openTest: unknown) => setOpenWorkspace(openTest))
   ipcMain.handle('library:load', (_event, fileName: string) => loadTest(fileName))
   // QF-003: deleting a test must also delete its stored password. Without this,
   // "I deleted that test" was untrue of the part that mattered most — the
@@ -6650,6 +6652,8 @@ function createWindow(): void {
       name: string
       baseURL?: string
       tags?: string[]
+      viewport?: { width: number; height: number }
+      deviceId?: string
       dataRows?: Record<string, string>[]
       steps: Record<string, unknown>[]
       warnings: string[]
@@ -6670,10 +6674,17 @@ function createWindow(): void {
       // renderer as the message, because "something went wrong" is not a
       // usable answer about a four-hundred-line file the user hand-edited.
       const { test, steps, warnings } = parsePortableTest(source, path)
+      // Every test-level field export writes comes back — the device too. It
+      // used to stop at tags, so an iPhone 13 test imported as a desktop one
+      // and replayed against a layout it was never recorded on. storageState
+      // and har are the deliberate exceptions: they name files in THIS
+      // machine's _sessions/_hars, and the renderer clears them on import.
       return {
         name: test.name,
         baseURL: test.baseURL,
         tags: test.tags,
+        viewport: test.viewport,
+        deviceId: test.deviceId,
         dataRows: test.dataRows,
         steps,
         warnings,
@@ -6801,7 +6812,11 @@ function createWindow(): void {
       pageFiles?: { fileName: string; source: string }[],
       harFile?: string,
       ciWorkflow?: string,
-      configFile?: string
+      configFile?: string,
+      ciKind?: 'github' | 'gitlab',
+      // The open test's secrets (refs into the store, plus any password not yet
+      // saved), so an exported network capture can be scrubbed of them.
+      secrets?: { refs: string[]; values: string[] }
     ): Promise<{ path: string; alsoWrote: string[]; pageOverwritten: boolean } | null> => {
       const result = await dialog.showSaveDialog(mainWindow, {
         title: 'Save Playwright test',
@@ -6822,7 +6837,7 @@ function createWindow(): void {
       if (fixturePaths && fixturePaths.length) {
         const fixturesDir = join(dirname(result.filePath), 'fixtures')
         await mkdir(fixturesDir, { recursive: true }).catch(() => {})
-        for (const src of fixturePaths) {
+        for (const src of localFixtures(fixturePaths)) {
           // QF-005: portableBasename, not basename — the exporter names this
           // file with the same cross-platform rule, and if the two disagree the
           // spec references a fixture that isn't there under that name.
@@ -6844,11 +6859,32 @@ function createWindow(): void {
         const harDir = join(dirname(result.filePath), 'hars')
         await mkdir(harDir, { recursive: true }).catch(() => {})
         const dest = join(harDir, harFile)
+        // The test's own secrets, blanked by value in whichever archive goes
+        // out (see scrubSecretValues). A saved .har from before that existed
+        // can still hold the password, so even a "copy" is read and scrubbed.
+        const secretValues = [
+          ...(secrets?.values ?? []),
+          ...Object.values(await getSecrets(secrets?.refs ?? []))
+        ]
+        let saved: HarLog | null = null
         try {
-          await copyFile(join(libraryDir(), '_hars', harFile), dest)
+          saved = JSON.parse(await readFile(join(libraryDir(), '_hars', harFile), 'utf-8'))
         } catch {
-          if (har.captured()) {
-            await writeFile(dest, JSON.stringify(har.captured())).catch(() => {})
+          saved = null
+        }
+        if (saved) {
+          const safe = scrubSecretValues(saved, secretValues)
+          if (safe === saved) {
+            await copyFile(join(libraryDir(), '_hars', harFile), dest).catch(() => {})
+          } else {
+            await writeFile(dest, JSON.stringify(safe)).catch(() => {})
+          }
+        } else {
+          const captured = har.captured()
+          if (captured) {
+            // Written to disk, so under the same privacy policy as a saved one.
+            const safe = scrubSecretValues(redactHar(captured, await loadPrivacy()), secretValues)
+            await writeFile(dest, JSON.stringify(safe)).catch(() => {})
           }
         }
       }
@@ -6882,7 +6918,13 @@ function createWindow(): void {
       // F33: a GitHub Actions workflow that runs the tests on every PR. Written to
       // .github/workflows/ RELATIVE TO THE SPEC — the file's header tells the user
       // to move it to the repo root if the spec lives in a subfolder.
-      if (ciWorkflow) {
+      // GitLab reads a single .gitlab-ci.yml, so that one goes straight beside
+      // the spec under its own name — same "move it to the repo root" rule.
+      if (ciWorkflow && ciKind === 'gitlab') {
+        const glPath = join(dirname(result.filePath), '.gitlab-ci.yml')
+        await writeFile(glPath, ciWorkflow, 'utf-8').catch(() => {})
+        alsoWrote.push(glPath)
+      } else if (ciWorkflow) {
         const wfDir = join(dirname(result.filePath), '.github', 'workflows')
         const wfPath = join(wfDir, 'playwright.yml')
         await mkdir(wfDir, { recursive: true }).catch(() => {})
@@ -6915,6 +6957,105 @@ function createWindow(): void {
 // the first time it drifted, "it passes locally but fails in CI" would be the
 // tool's fault rather than the app's.
 // =====================================================================
+
+/**
+ * Deliver one run's postback — THE one sender, used by the in-app run (via the
+ * `postback:send` IPC) and by the command line alike. The rules (policy, URL
+ * check, redaction, retries) are deliverPostback in src/shared/postback.ts;
+ * this only supplies what main owns: the privacy policy on disk, the network
+ * and the clock.
+ */
+async function sendRunPostback(
+  settings: PostbackSettings,
+  run: RunSummary
+): Promise<PostbackOutcome> {
+  let privacy: PrivacySettings = { ...DEFAULT_PRIVACY }
+  try {
+    privacy = await loadPrivacy()
+  } catch {
+    // Failing OPEN, as loadPrivacy does elsewhere.
+  }
+  return deliverPostback(settings, run, {
+    fetch: (url, init) => fetch(url, init),
+    wait,
+    redact: (text) => redact(text, privacy),
+    reachError
+  })
+}
+
+/**
+ * Blank each saved test's own secrets out of its saved network capture — the
+ * one-time repair for archives written before the save path did it (see
+ * scrubSecretValues in har.ts). Idempotent: an already-clean archive is left
+ * byte-identical and not rewritten. Returns how many archives changed.
+ *
+ * Version history counts: an older recording of the login may have typed a
+ * password the current steps no longer hold.
+ */
+async function scrubSavedHars(): Promise<number> {
+  let changed = 0
+  for (const summary of await listTests()) {
+    const t = (await loadTest(summary.fileName)) as
+      | (Record<string, unknown> & { har?: string; versions?: { steps?: unknown }[] })
+      | null
+    if (!t?.har || !/^[a-zA-Z0-9_-]+\.har$/.test(t.har)) continue
+    const steps = [
+      ...(Array.isArray(t.steps) ? t.steps : []),
+      ...(t.versions ?? []).flatMap((v) => (Array.isArray(v?.steps) ? v.steps : []))
+    ]
+    const { refs, values } = secretSources(steps, t.dataRows as Record<string, string>[])
+    const all = [...values, ...Object.values(await getSecrets(refs))]
+    if (!all.length) continue
+    const file = join(libraryDir(), '_hars', t.har)
+    let log: HarLog
+    try {
+      log = JSON.parse(await readFile(file, 'utf-8'))
+    } catch {
+      continue // no archive on disk (or unreadable) — nothing to repair
+    }
+    const safe = scrubSecretValues(log, all)
+    if (safe !== log) {
+      await writeFile(file, JSON.stringify(safe), 'utf-8')
+      changed++
+    }
+  }
+  return changed
+}
+
+/**
+ * Resolve `{{env:NAME}}` and `secret:<ref>` names for a run — the env:get IPC,
+ * and the command line's `sources.resolveNames`, so the two cannot drift. The
+ * rules are the ones documented on the env:get handler: the active
+ * environment first, then the process (never for a name the OS itself sets),
+ * and a protected data cell only ever from the encrypted store.
+ */
+async function resolveEnvNames(
+  names: string[]
+): Promise<{ values: Record<string, string>; unresolved: string[] }> {
+  const envVars = await activeEnvVars()
+  const values: Record<string, string> = {}
+  const unresolved: string[] = []
+  for (const name of Array.isArray(names) ? names : []) {
+    // A sensitive data cell (`{{secret:ref}}`) travels down this same road,
+    // named `secret:<ref>`: resolved from the encrypted store, never from an
+    // environment. The value exists in memory for the run, like any env value.
+    const ref = secretCellRef(`{{${name}}}`)
+    if (ref) {
+      const value = (await getSecret(ref)) ?? ''
+      values[name] = value
+      if (!value) unresolved.push(name)
+      continue
+    }
+    // An environment the user configured always wins, collision or not —
+    // they named it deliberately.
+    const fromEnv = envVars[name]
+    const fromProcess = collidesWithOsEnv(name) ? undefined : process.env[name]
+    const value = fromEnv ?? fromProcess ?? ''
+    values[name] = value
+    if (!value) unresolved.push(name)
+  }
+  return { values, unresolved }
+}
 
 /** Arguments belonging to US, with the executable (and, in dev, the script
  *  path) stripped. Kept out of cli.ts so that module stays pure and testable. */
@@ -6962,10 +7103,61 @@ function cliOut(text: string): void {
   }
 }
 
-async function runCli(opts: CliOptions): Promise<number> {
-  if (opts.command === 'help') {
+/**
+ * Exit 2 — the run could not happen — with the reason in BOTH places: stdout
+ * for a person, and the --out file for a pipeline. On Windows a packaged app's
+ * stdout may never reach the terminal, so the file is the only place the reason
+ * is guaranteed to land. See formatRefusal.
+ */
+async function refuseRun(message: string, opts: CliOptions): Promise<number> {
+  cliOut(message.endsWith('\n') ? message : `${message}\n`)
+  if (opts.out) {
+    try {
+      await writeFile(opts.out, formatRefusal(message, opts.reporter), 'utf-8')
+      cliOut(`Reason written to ${opts.out}\n`)
+    } catch (e) {
+      cliOut(`Could not write ${opts.out}: ${(e as Error).message}\n`)
+    }
+  }
+  return 2
+}
+
+async function runCli(requested: CliOptions): Promise<number> {
+  if (requested.command === 'help') {
     cliOut(HELP_TEXT)
     return 0
+  }
+
+  // A run for a monitor — the 🌙 scheduled task — runs EXACTLY the monitor's own
+  // test, resolved here from its id, and nothing a filter happens to match. See
+  // monitorSelection for why an old task's --grep is ignored rather than obeyed.
+  let monitor: Monitor | undefined
+  let opts = requested
+  if (requested.monitorId) {
+    monitor = (await listMonitors()).find((m) => m.id === requested.monitorId)
+    if (!monitor) {
+      // Nothing to record against either — the history went with the monitor.
+      // Exit 2: running some other test in its place would be a result for
+      // the wrong thing, and a pass here would be green for nothing.
+      return refuseRun(
+        `Monitor "${requested.monitorId}" no longer exists, so there is nothing to run. ` +
+          `Delete the ${taskName(requested.monitorId)} task in Windows Task Scheduler.\n`,
+        requested
+      )
+    }
+    opts = monitorSelection(requested, monitor.fileName)
+  }
+  // A monitor run that cannot happen still has to show up in the monitor's
+  // history — as 'error', the "setup is broken" status, not 'failed'. Otherwise
+  // a night of runs refused for a missing password looks like a night nothing
+  // was scheduled.
+  const recordMonitorError = async (detail: string): Promise<void> => {
+    if (!monitor) return
+    try {
+      await recordMonitorRun(monitor.id, { at: new Date().toISOString(), status: 'error', detail })
+    } catch {
+      // history is a nicety; the exit code carries the result
+    }
   }
 
   const summaries = await listTests()
@@ -6989,24 +7181,80 @@ async function runCli(opts: CliOptions): Promise<number> {
   }
 
   if (!selected.length) {
-    cliOut('No tests matched. Nothing was run.\n')
+    await recordMonitorError(
+      `The watched test "${monitor?.fileName ?? ''}" is no longer in the library — nothing was run.`
+    )
     // Exit 2, never 0: a green pipeline that ran no tests is worse than a red
     // one, because nobody looks at it again.
-    return 2
+    return refuseRun('No tests matched. Nothing was run.\n', opts)
+  }
+
+  // Which environment the run targets.
+  //
+  // A MONITOR runs against the environment PINNED to it, exactly as it does in
+  // the app. This used to read the global "Run against" selection for every CLI
+  // run, so a monitor pinned to Staging tested whatever happened to be selected
+  // when the app was last closed — its result meant something different at
+  // night than in the day, which is the "passes in the app, fails at night"
+  // drift the one-runner design exists to prevent. The same rule as the in-app
+  // monitor (App.tsx, doMonitorRun): the pin's vars and base URL always win; the
+  // active environment's VARS may fill a `{{env:…}}` name the pin lacks — they
+  // arrive through resolveEnvNames below, the same road env:get gives the app —
+  // and the active environment's base URL never retargets a monitor, pinned or
+  // not. The active vars are NOT copied in wholesale any more: that made an
+  // active environment's PASSWORD beat the monitor's saved one, which the app
+  // never did.
+  const envVars: Record<string, string> = {}
+  let envNote: string | undefined
+  if (monitor) {
+    const pinned = monitor.envId
+      ? (await getEnvState()).environments.find((e) => e.id === monitor.envId)
+      : undefined
+    if (pinned) {
+      for (const v of pinned.vars) if (v.name) envVars[v.name] = v.value
+      if (pinned.baseURL) envVars.BASE_URL = pinned.baseURL
+    } else if (monitor.envId) {
+      // The app does the same (runs on the recorded URLs) — but says so, and so
+      // does this: otherwise a pass here reads as "Staging is fine".
+      envNote =
+        'The environment pinned to this monitor was deleted — it ran against the recorded URLs.'
+      cliOut(`${envNote}\n`)
+    }
+  } else {
+    const env = await activeEnvironment()
+    for (const v of env?.vars ?? []) if (v.name) envVars[v.name] = v.value
+    if (env?.baseURL) envVars.BASE_URL = env.baseURL
   }
 
   // Build a spec per test with the real exporter, exactly as the Export button
   // would. A test the exporter can't render (a multi-tab or dialog flow, which
   // the page-object path refuses) still exports inline, so nothing is silently
   // dropped here.
-  const env = await activeEnvironment()
-  const envVars: Record<string, string> = {}
-  for (const v of env?.vars ?? []) if (v.name) envVars[v.name] = v.value
-  if (env?.baseURL) envVars.BASE_URL = env.baseURL
-
   const specs: ParallelSpec[] = []
   const unrunnable: CliTestResult[] = []
+  // What the postback needs about each test that the run result does not carry.
+  // `planMap` turns a failing step in the expanded list back into the row the
+  // editor shows; `env` is this test's own environment (see envBatches).
+  const meta = new Map<
+    string,
+    {
+      suite: string
+      project: string
+      tags?: string[]
+      stepCount: number
+      dataDriven: boolean
+      planMap?: number[]
+      env?: Record<string, string>
+    }
+  >()
   for (const t of selected) {
+    meta.set(t.fileName, {
+      suite: t.suite,
+      project: t.project,
+      tags: t.tags,
+      stepCount: 0,
+      dataDriven: false
+    })
     const test = await loadTest(t.fileName)
     if (!test) {
       unrunnable.push({
@@ -7018,13 +7266,49 @@ async function runCli(opts: CliOptions): Promise<number> {
       })
       continue
     }
+    type Steps = Parameters<typeof generatePlaywrightTest>[0]
+    const display = (test.steps ?? []) as Steps
+    // Linked blocks expanded exactly as the app expands them before a run. The
+    // exporter has no code for a `block` step, so without this a test built on
+    // a "Login" block ran from here with the login silently missing.
+    const plan = await planRun(
+      display,
+      async (ref) => ((await loadBlock(ref))?.steps as Steps | undefined) ?? null
+    )
+    const steps = plan.flat
+    const rows = test.dataRows ?? []
     // NOT resolveSecrets()ed, deliberately. Putting the real password back on
     // the step would achieve nothing: the exporter replaces any secret step with
     // `process.env.PASSWORD` one line later, precisely so a generated spec is
-    // safe to commit. The password reaches the run through the ENVIRONMENT
-    // instead — and the missingEnvRefs check below refuses the run when it is
-    // not there, rather than typing '' and blaming a later step.
-    const steps = (test.steps ?? []) as Parameters<typeof generatePlaywrightTest>[0]
+    // safe to commit. The password reaches the run through the ENVIRONMENT —
+    // filled from the secret store by the same rule the in-app monitor uses,
+    // and the missingEnvRefs check below still refuses the run when it cannot
+    // be, rather than typing '' and blaming a later step.
+    //
+    // Runs inside app.whenReady (see the bottom of this file), which is what
+    // safeStorage needs to decrypt on Windows — and this is the same exe, run
+    // as the same Windows user, so the same store opens.
+    const resolved = await headlessRunEnv(
+      steps,
+      rows,
+      envVarNames(steps, rows),
+      envVars,
+      { resolveNames: resolveEnvNames, getSecrets },
+      // An OS variable set for this run beats the stored secret — how a
+      // pipeline overrides a saved password without editing the test.
+      process.env
+    )
+    // Counted the way the in-app postback counts them (enabled steps as the
+    // editor shows them), so one test reports one step total on either path.
+    meta.set(t.fileName, {
+      suite: t.suite,
+      project: t.project,
+      tags: t.tags,
+      stepCount: display.filter((s) => !s.disabled).length,
+      dataDriven: !!rows.length,
+      planMap: plan.map,
+      env: resolved.env
+    })
     const code = generatePlaywrightTest(steps, {
       name: test.name,
       baseURL: test.baseURL,
@@ -7041,7 +7325,10 @@ async function runCli(opts: CliOptions): Promise<number> {
       // so every token fell through to a literal and the CLI typed the eleven
       // characters "{{username}}" into the field. The run then failed on the
       // assertion AFTER the login, which is a long way from the real cause.
-      data: test.dataRows?.length ? { columns: dataColumns(steps), rows: test.dataRows } : undefined
+      data: rows.length ? { columns: dataColumns(steps), rows } : undefined,
+      // `// qtf:step` markers, so a failure's line in Playwright's report can be
+      // turned back into a step number (stepAtLine). This spec is never shown.
+      stepMarkers: true
     })
     specs.push({
       id: t.fileName,
@@ -7059,39 +7346,114 @@ async function runCli(opts: CliOptions): Promise<number> {
   // something unrelated. Same principle as exit 2 for "no tests matched": the
   // tool knows it cannot do the job, so it says so instead of producing a
   // result that looks like an answer.
+  //
+  // Each spec is checked against ITS OWN environment — the one it will be run
+  // with — so a password one test's secret filled cannot mask another test
+  // that has none.
   const missing = missingEnvRefs(
     specs.map((sp) => ({ name: sp.name, code: sp.code })),
-    { ...process.env, ...envVars }
+    process.env,
+    specs.map((sp) => meta.get(sp.id)?.env ?? envVars)
   )
   if (missing.length) {
-    cliOut(describeMissingEnv(missing))
-    return 2
+    const reason = describeMissingEnv(missing)
+    await recordMonitorError(
+      `Not run: ${missing.map((m) => m.name).join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set. ` +
+        'Pick an environment on the monitor’s card, or add the value to it.'
+    )
+    return refuseRun(reason, opts)
   }
 
   const startedAt = Date.now()
-  const run = await runSuiteParallel(specs, opts.workers, envVars)
-  if (!run.installed || !run.ran) {
-    // Playwright itself is missing or could not start. That is not a test
-    // failure — reporting it as one would have someone hunting a bug in their
-    // app — so it exits 2, the "could not run" code.
-    cliOut(`${run.message ?? 'The test runner could not start.'}\n`)
-    return 2
+  // One Playwright run per group of tests whose environments agree — nearly
+  // always a single group. A batch shares one environment, so two tests whose
+  // PASSWORD is a different stored secret cannot both be right in it; putting
+  // them in separate runs is what keeps the second from typing the first's.
+  const ranResults: ParallelTestResult[] = []
+  for (const batch of envBatches(
+    specs.map((s) => ({ id: s.id, env: meta.get(s.id)?.env ?? {} }))
+  )) {
+    const run = await runSuiteParallel(
+      specs.filter((s) => batch.ids.includes(s.id)),
+      opts.workers,
+      batch.env
+    )
+    if (!run.installed || !run.ran) {
+      // Playwright itself is missing or could not start. That is not a test
+      // failure — reporting it as one would have someone hunting a bug in their
+      // app — so it exits 2, the "could not run" code.
+      await recordMonitorError(run.message ?? 'The test runner could not start.')
+      return refuseRun(run.message ?? 'The test runner could not start.', opts)
+    }
+    ranResults.push(...run.results)
   }
+  // Back in selection order, so the report reads the same however many
+  // batches it took.
+  const order = new Map(specs.map((s, n) => [s.id, n]))
+  ranResults.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
 
   const results: CliTestResult[] = [
     ...unrunnable,
-    ...run.results.map((r) => ({
-      name: specs.find((s) => s.id === r.id)?.name ?? r.id,
-      fileName: r.id,
-      ok: r.ok,
-      // The parallel runner reports pass/fail per test, not per-test timing.
-      // Reporting 0 here rather than inventing a number: a JUnit file with
-      // made-up durations is worse than one with honest zeros, because a CI
-      // dashboard will happily chart the fiction.
-      durationMs: 0,
-      error: r.error
-    }))
+    ...ranResults.map((r) => {
+      const spec = specs.find((s) => s.id === r.id)
+      const m = meta.get(r.id)
+      return {
+        name: spec?.name ?? r.id,
+        fileName: r.id,
+        ok: r.ok,
+        // Playwright's own measurement, summed over the file's rows and retries.
+        // This was a hard 0 because the mapping dropped it — so every JUnit file
+        // said every test took no time at all.
+        durationMs: r.durationMs ?? 0,
+        error: r.error,
+        // The failing line, traced through the spec's step markers and the
+        // block plan to the row the editor shows. Unset when it cannot be.
+        failedAtStep: r.ok ? undefined : stepAtLine(spec?.code ?? '', r.failedLine, m?.planMap),
+        rows: m?.dataDriven ? r.cases : undefined
+      }
+    })
   ]
+
+  // Postbacks: ONE per test, a data-driven test's rows folded into it — the
+  // same model as the in-app run, through the same sender. Sent before the
+  // report is written so the report can say which ones did not arrive.
+  //
+  // A failed delivery never changes the exit code: the tests' outcome is the
+  // truth, and a receiver being down is not a regression in the app under
+  // test. It is reported in the output and in the monitor's history instead.
+  let postback: PostbackSettings | undefined
+  try {
+    postback = (await loadIntegrations()).postback
+  } catch {
+    // Unreadable settings = nothing configured to send to.
+  }
+  if (postback && postback.when !== 'off') {
+    const settings = postback
+    // A few at a time: a thousand-test suite must not open a thousand
+    // connections to somebody's webhook at once, nor wait on them one by one.
+    let next = 0
+    const worker = async (): Promise<void> => {
+      while (next < results.length) {
+        const r = results[next++]
+        const m = meta.get(r.fileName)
+        const out = await sendRunPostback(
+          settings,
+          cliRunSummary(r, {
+            suite: m?.suite,
+            project: m?.project,
+            tags: m?.tags,
+            stepCount: m?.stepCount ?? 0
+          })
+        )
+        // Skipped (policy) and unconfigured (armed, no URL) attempted nothing,
+        // so there is no delivery to report — the same rule the app follows.
+        if (out.skipped || out.unconfigured) continue
+        r.postback = out.ok ? { ok: true } : { ok: false, error: out.error }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(4, results.length) }, worker))
+  }
+
   const report = summarize(results, Date.now() - startedAt)
   const text = formatReport(report, opts.reporter)
   if (opts.out) {
@@ -7107,6 +7469,10 @@ async function runCli(opts: CliOptions): Promise<number> {
   } else {
     cliOut(text)
   }
+  // The text reporter already carries this line; JSON carries it per result.
+  // JUnit has no place for it, so it is said on the console as well.
+  const pbProblem = postbackProblem(report)
+  if (pbProblem && opts.reporter === 'junit') cliOut(`${pbProblem}\n`)
   // A scheduled "🌙 runs when closed" run writes itself into the monitor's
   // history, so the app can show what happened while it was shut. Before this,
   // the only trace was ONE report file that every run overwrote, and the panel
@@ -7116,15 +7482,24 @@ async function runCli(opts: CliOptions): Promise<number> {
   // Best-effort on purpose: the tests really did run and their exit code is the
   // truth. Failing the run because a history file could not be updated would
   // turn a bookkeeping problem into a red build.
-  if (opts.monitorId) {
+  if (monitor) {
     try {
       const failed = report.results.filter((r) => !r.ok)
-      await recordMonitorRun(opts.monitorId, {
+      // The postback and environment notes ride along in the detail: the
+      // history is the only place a closed-app run can say anything at all.
+      const detail = [
+        failed.length
+          ? `${failed.length} of ${report.total} failed — e.g. ${failed[0].name}${failed[0].failedAtStep !== undefined ? ` (step ${failed[0].failedAtStep})` : ''}: ${failed[0].error ?? 'no message'}`
+          : undefined,
+        envNote,
+        pbProblem ?? undefined
+      ]
+        .filter(Boolean)
+        .join(' · ')
+      await recordMonitorRun(monitor.id, {
         at: new Date().toISOString(),
         status: failed.length ? 'failed' : 'passed',
-        detail: failed.length
-          ? `${failed.length} of ${report.total} failed — e.g. ${failed[0].name}: ${failed[0].error ?? 'no message'}`
-          : undefined
+        detail: detail || undefined
       })
     } catch {
       // history is a nicety; the run's own result is not affected

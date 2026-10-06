@@ -1,4 +1,5 @@
 import React from 'react'
+import { plural } from '../../../shared/plural'
 
 // =====================================================================
 // CoverageModal — lifted out of App.tsx verbatim.
@@ -99,7 +100,7 @@ export function CoverageModal({
                     show as a gap, which is a nudge to add an explicit check there.
                   </p>
                   <div className="ac-summary">
-                    {coveredCount} of {pages.length} pages covered ({pct}%)
+                    {coveredCount} of {plural(pages.length, 'page')} covered ({pct}%)
                     {gaps ? ` · ${gaps} gap${gaps === 1 ? '' : 's'} ⚠` : ' · full coverage ✓'}
                   </div>
                   <ul className="ac-list">

@@ -69,6 +69,83 @@ jobs:
 `
 }
 
+/** Which CI template the export writes beside the spec, if any. */
+export type CiTarget = 'none' | 'github' | 'gitlab'
+
+/**
+ * The Playwright version the GitLab image is pinned to — the one this app
+ * ships and generates specs against. GitLab runs jobs in a container, and the
+ * official image carries the browsers for exactly ONE Playwright version, so
+ * the tag has to be pinned; `:latest` would drift away from a project's
+ * package.json the day a new release came out.
+ */
+export const PLAYWRIGHT_IMAGE_VERSION = '1.56.0'
+
+// PRD "CI integration (GitHub Actions / GitLab CI)": the GitLab counterpart of
+// generateCiWorkflow above. Same job — install, run, keep the report — in the
+// shape GitLab wants, plus a JUnit file wired to `reports: junit`, which is what
+// makes GitLab show pass/fail per test on the merge request itself rather than
+// only a red or green pipeline.
+//
+// Secrets differ from GitHub on purpose: GitLab hands every CI/CD variable to
+// the job as an environment variable already, so there is no env: mapping to
+// write — only the list of names the user has to create.
+export function generateGitlabCi(
+  secretNames: string[] = [],
+  playwrightVersion: string = PLAYWRIGHT_IMAGE_VERSION
+): string {
+  const needed = secretNames.length
+    ? `# This test reads: ${secretNames.join(', ')}. Add each one under
+# Settings → CI/CD → Variables (tick "Mask variable" for passwords) — GitLab
+# passes them to the job as environment variables, which is where the spec
+# reads them from.
+`
+    : ''
+  return `# GitLab CI — run the exported Playwright tests on every push / merge request.
+# Place this file at your repo root as .gitlab-ci.yml (GitLab only reads it
+# from the repo root). Assumes a Playwright project (package.json +
+# package-lock.json + a playwright config).
+#
+# The image tag MUST match the @playwright/test version in your package.json
+# (check with: npm ls @playwright/test). The image carries the browsers for
+# exactly that version; a mismatch fails every test at launch with
+# "Executable doesn't exist".
+${needed}# To run against a specific environment, set a BASE_URL variable — the
+# exported spec reads process.env.BASE_URL and otherwise falls back to the
+# recorded URL.
+stages:
+  - test
+
+playwright:
+  stage: test
+  image: mcr.microsoft.com/playwright:v${playwrightVersion}-noble
+  timeout: 1h
+  variables:
+    # Where the JUnit reporter writes; "reports: junit" below reads the same file.
+    PLAYWRIGHT_JUNIT_OUTPUT_NAME: junit.xml
+    # Never try to open the HTML report in a browser on the runner.
+    PLAYWRIGHT_HTML_OPEN: never
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm/
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npx playwright test --reporter=line,junit,html
+  artifacts:
+    # "always": a failed run is the one whose report you most need.
+    when: always
+    expire_in: 30 days
+    paths:
+      - playwright-report/
+      - junit.xml
+    reports:
+      junit: junit.xml
+`
+}
+
 // F17 (cross-browser): a playwright.config.ts with one project per engine, so
 // `npx playwright test` runs the exported spec on Chromium + Firefox + WebKit.
 // Emitted beside the spec when the export's "cross-browser config" is ticked —
@@ -474,9 +551,10 @@ function __why(body: unknown, headers: Record<string, string>, path: string, op:
       const n = value.length
       const target = Number(expected)
       if (!Number.isFinite(target)) return \`"\${expected}" is not a number\`
-      if (op === 'count-eq') return n === target ? null : \`"\${path}" has \${n} items, expected \${target}\`
-      if (op === 'count-gt') return n > target ? null : \`"\${path}" has \${n} items, expected more than \${target}\`
-      return n < target ? null : \`"\${path}" has \${n} items, expected fewer than \${target}\`
+      const items = \`\${n} item\${n === 1 ? '' : 's'}\`
+      if (op === 'count-eq') return n === target ? null : \`"\${path}" has \${items}, expected \${target}\`
+      if (op === 'count-gt') return n > target ? null : \`"\${path}" has \${items}, expected more than \${target}\`
+      return n < target ? null : \`"\${path}" has \${items}, expected fewer than \${target}\`
     }
     case 'is-number':
     case 'is-string':
@@ -1780,12 +1858,22 @@ export function generatePlaywrightTest(
     // network responses from it via Playwright's routeFromHAR (deterministic
     // replay), falling back to the live network for anything not in the HAR.
     har?: string
+    // Put a `// qtf:step <n>` marker line above each step's code, <n> being the
+    // step's index in `steps` as passed in. For the command line ONLY, which
+    // never shows this file to anyone: Playwright's report names the LINE a
+    // failure happened on, and these markers are how that line is turned back
+    // into "step 4". Off by default, so an exported spec is unchanged.
+    stepMarkers?: boolean
   }
 ): string {
   const baseURL = options?.baseURL?.replace(/\/+$/, '') || undefined
   // Quote any bare getBy…() argument before anything reads a selector — an
   // unquoted one compiles to a reference to a variable that doesn't exist.
-  const enabled = repairSteps(steps).filter((step) => !step.disabled)
+  const repaired = repairSteps(steps)
+  const enabled = repaired.filter((step) => !step.disabled)
+  // enabled index → index in `steps`, for the step markers. Disabled steps are
+  // dropped from `enabled` but still count in the caller's numbering.
+  const inputIndex = repaired.flatMap((s, n) => (s.disabled ? [] : [n]))
   // Day 20: data mode is on only when there are both columns and rows.
   const dataMode = !!(options?.data && options.data.rows.length && options.data.columns.length)
   const columns = dataMode ? options!.data!.columns : []
@@ -1815,9 +1903,18 @@ export function generatePlaywrightTest(
   }
   // A unique loop variable per nesting level, so nested loops don't collide.
   const loopVar = (level: number): string => `i${level}`
+  // Which step emitted each `lines` entry — filled the same lazy way as
+  // lineDepth, so every early `continue` below is covered without touching it.
+  const lineStep: number[] = []
+  let owner = 0
+  const syncStep = (): void => {
+    while (lineStep.length < lines.length) lineStep.push(owner)
+  }
 
   for (let i = 0; i < enabled.length; i++) {
     syncDepth()
+    syncStep()
+    owner = inputIndex[i]
     const step = enabled[i]
     const pageVar = pv(step.windowId)
 
@@ -1975,6 +2072,18 @@ export function generatePlaywrightTest(
         .split('\n')
         .map((l) => (l.trim() ? pad + l : l))
         .join('\n')
+    }
+  }
+  syncStep()
+  // The CLI's step markers. Prepended to the entry itself rather than pushed as
+  // entries of their own, so the teardown split below still moves a step's
+  // marker together with its code. A dialog handler is emitted inside the step
+  // that TRIGGERS the dialog, so it carries that step's marker — which is the
+  // step a failure there is really about.
+  if (options?.stepMarkers) {
+    for (let n = 0; n < lines.length; n++) {
+      const pad = '  '.repeat((lineDepth[n] ?? 0) + 1)
+      lines[n] = `${pad}// qtf:step ${lineStep[n] ?? owner}\n${lines[n]}`
     }
   }
 

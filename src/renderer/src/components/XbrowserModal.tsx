@@ -47,7 +47,7 @@ export function XbrowserModal({
   if (!xbOpen) return null
   return (
     <div className="modal-backdrop" onClick={() => !xbRunning && setXbOpen(false)}>
-      <div className="env-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="env-modal" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">🧭 Cross-browser</span>
           <button

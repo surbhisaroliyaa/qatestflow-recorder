@@ -48,8 +48,9 @@ export const TASK_PREFIX = 'QATestFlow'
 export interface ScheduledRun {
   /** The monitor this task runs — the id is what makes the task name unique. */
   monitorId: string
-  /** For the task's description, so a human reading Task Scheduler can tell
-   *  what it is without decoding the command. */
+  /** The watched test's name, for the caller's messages. NOT used to select
+   *  the test — a name is a substring match waiting to happen; the task selects
+   *  by monitor id, which the CLI resolves to the monitor's own file. */
   testName: string
   /** How often, in minutes. */
   intervalMin: number
@@ -96,11 +97,24 @@ export function buildCreateTask(
   // The whole command must be ONE /TR argument. Windows requires the inner
   // quoting to be escaped, which is why this is built here and tested, rather
   // than assembled at the call site by hand.
+  //
+  // The test is chosen by --monitor ALONE. The CLI looks the monitor up and runs
+  // exactly the file it watches (and against the environment pinned to it).
+  // This used to be `--grep "<test name>"`, a case-insensitive SUBSTRING match —
+  // so a monitor on "Login" also ran "Login negative" and "Login (mobile)", and
+  // their failures were written into Login's history as if they were its own.
+  // Resolving at run time rather than baking a path in also means renaming the
+  // test, or re-pinning the monitor's environment, needs no task re-creation.
+  //
+  // Tasks created before this still carry `--grep "<name>" --monitor <id>`. They
+  // are deliberately NOT migrated: the CLI ignores every other filter when
+  // --monitor is present (see monitorSelection in cli.ts), so the old command
+  // line already runs the exact test. Re-creating them would mean running
+  // schtasks on every app start for no change in behaviour — and a failed
+  // re-create would turn a working task into a missing one.
   const command = [
     `"${exePath}"`,
     'run',
-    '--grep',
-    `"${run.testName.replace(/"/g, '')}"`,
     // So the background run lands in this monitor's history. Without it the
     // feature's whole output was one report file that each run overwrote, and
     // the app showed nothing at all for runs made while it was closed.

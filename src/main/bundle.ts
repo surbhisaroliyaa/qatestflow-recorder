@@ -73,6 +73,17 @@ export function blockRefsIn(steps: unknown[]): string[] {
   return out
 }
 
+/** An upload step's file paths. A multi-file pick is stored one path per line,
+ *  so the value is a LIST — reading it as one path took the basename of the
+ *  whole block, which is the last file's name, and shipped only that file. */
+export function uploadPathsOf(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  return value
+    .split('\n')
+    .map((p) => p.trim())
+    .filter(Boolean)
+}
+
 /** Upload steps' fixture files, so the exported test can actually run. */
 export function uploadFilesIn(steps: unknown[]): string[] {
   const out: string[] = []
@@ -81,11 +92,68 @@ export function uploadFilesIn(steps: unknown[]): string[] {
     // QF-005: the step's path was serialized by whichever OS RECORDED it, which
     // is not necessarily the one reading it now — so the separator rule can't
     // come from this platform's `basename`.
-    if (s?.type === 'upload' && typeof s.value === 'string' && s.value) {
-      out.push(portableBasename(s.value))
+    if (s?.type !== 'upload') continue
+    for (const p of uploadPathsOf(s.value)) {
+      const base = portableBasename(p)
+      if (base) out.push(base)
     }
   }
   return out
+}
+
+/**
+ * Where an upload fixture recorded as `recorded` lives on THIS machine.
+ *
+ * The step stores an ABSOLUTE path — the copy in the recorder's own `_uploads`
+ * folder (see copyIntoUploads in index.ts). That path is only true on the
+ * machine that recorded it: `C:\Users\sam\Documents\…\invoice.pdf` means
+ * nothing on a Mac, or to another Windows user, even when the same file sits in
+ * THEIR `_uploads` because a bundle brought it. So: the recorded path if it
+ * exists here, else the same-named file in this library's `_uploads`, else the
+ * recorded path unchanged — the run then fails naming the file that is really
+ * missing, which is the truth.
+ */
+export function localUploadPath(
+  recorded: string,
+  uploadsDir: string,
+  exists: (p: string) => boolean = existsSync
+): string {
+  if (exists(recorded)) return recorded
+  const base = portableBasename(recorded)
+  const local = base ? join(uploadsDir, base) : ''
+  return local && exists(local) ? local : recorded
+}
+
+/** Point every upload step's path(s) at this machine's copy. `nameFor` maps a
+ *  fixture's basename to the name it was stored under here, when an import had
+ *  to rename it to avoid overwriting a different local file of the same name. */
+export function relinkUploads(
+  steps: unknown[],
+  uploadsDir: string,
+  nameFor: (base: string) => string | undefined = () => undefined,
+  exists: (p: string) => boolean = existsSync
+): unknown[] {
+  return (Array.isArray(steps) ? steps : []).map((raw) => {
+    const s = raw as Record<string, unknown>
+    if (s?.type !== 'upload' || typeof s.value !== 'string') return raw
+    const value = uploadPathsOf(s.value)
+      .map((p) => {
+        const renamed = nameFor(portableBasename(p))
+        return renamed ? join(uploadsDir, renamed) : localUploadPath(p, uploadsDir, exists)
+      })
+      .join('\n')
+    return { ...s, value }
+  })
+}
+
+/** Same bytes? Used to tell "this library already has that fixture" from "a
+ *  DIFFERENT file happens to share its name" — the second must not be reused,
+ *  or the imported test silently uploads the wrong file. */
+async function sameFile(a: string, b: string): Promise<boolean> {
+  const [sa, sb] = await Promise.all([stat(a), stat(b)])
+  if (sa.size !== sb.size) return false
+  const [ba, bb] = await Promise.all([readFile(a), readFile(b)])
+  return ba.equals(bb)
 }
 
 export function hasVisualStep(steps: unknown[]): boolean {
@@ -121,7 +189,8 @@ export async function exportBundle(
       hasAcceptanceCriteria: !!acceptanceCriteria?.trim()
     }
     const wantBlocks = new Set<string>()
-    const wantUploads = new Set<string>()
+    // fixture basename → the path the step recorded (the fallback source).
+    const wantUploads = new Map<string, string>()
 
     for (const rel of tests) {
       const src = join(libraryPath, rel)
@@ -140,7 +209,14 @@ export async function exportBundle(
 
       if (hasVisualStep(steps)) manifest.visualWithoutBaseline.push(rel)
       for (const b of blockRefsIn(steps)) wantBlocks.add(b)
-      for (const u of uploadFilesIn(steps)) wantUploads.add(u)
+      for (const raw of steps) {
+        const st = raw as Record<string, unknown>
+        if (st?.type !== 'upload') continue
+        for (const p of uploadPathsOf(st.value)) {
+          const base = portableBasename(p)
+          if (base && !wantUploads.has(base)) wantUploads.set(base, p)
+        }
+      }
 
       // Strip everything local: run history, versions, trust inputs, the
       // session reference, and the visual baseline ids (their baselines aren't
@@ -179,8 +255,11 @@ export async function exportBundle(
     // Fixture files an upload step needs.
     if (wantUploads.size) {
       await mkdir(join(destDir, 'uploads'), { recursive: true })
-      for (const u of wantUploads) {
-        const src = join(libraryPath, '_uploads', u)
+      for (const [u, recorded] of wantUploads) {
+        // The library's own copy first; failing that, the file the step points
+        // at (recording falls back to the original when its copy fails, and a
+        // hand-edited test can name any file) — else it would silently not ship.
+        const src = localUploadPath(recorded, join(libraryPath, '_uploads'))
         if (!existsSync(src)) continue
         await copyFile(src, join(destDir, 'uploads', u))
         manifest.uploads.push(u)
@@ -362,6 +441,47 @@ export async function importBundle(
     uploads: 0
   }
   try {
+    // Blocks and uploads are shared assets — copy any the bundle brought that
+    // this library doesn't already have. Never overwrite: a local block of the
+    // same name may already feed other tests (F7's blast radius).
+    //
+    // Done BEFORE the tests, because a test's upload paths are rewritten to
+    // where its fixtures landed here — which is not known until they have.
+    const uploadsDir = join(libraryPath, '_uploads')
+    const uploadNames = new Map<string, string>() // bundle name → name in _uploads
+    for (const [dir, store, key] of [
+      ['blocks', '_blocks', 'blocks'],
+      ['uploads', '_uploads', 'uploads']
+    ] as const) {
+      const from = join(bundleDir, dir)
+      if (!existsSync(from)) continue
+      await mkdir(join(libraryPath, store), { recursive: true })
+      for (const f of await readdir(from)) {
+        const s = await stat(join(from, f))
+        if (!s.isFile()) continue
+        let name = f
+        if (existsSync(join(libraryPath, store, f))) {
+          // A block keeps the local one (see above). An upload keeps it only
+          // when it is the SAME file; a different `invoice.pdf` already here is
+          // someone else's fixture, so the bundle's lands beside it under a
+          // free name — the same -imported suffix a kept-both test gets.
+          if (key === 'blocks' || (await sameFile(join(from, f), join(uploadsDir, f)))) {
+            if (key === 'uploads') uploadNames.set(f, f)
+            continue
+          }
+          const dot = f.lastIndexOf('.')
+          const [stem, ext] = dot > 0 ? [f.slice(0, dot), f.slice(dot)] : [f, '']
+          name = `${stem}-imported${ext}`
+          for (let n = 2; existsSync(join(uploadsDir, name)); n++) {
+            name = `${stem}-imported-${n}${ext}`
+          }
+        }
+        await copyFile(join(from, f), join(libraryPath, store, name))
+        if (key === 'uploads') uploadNames.set(f, name)
+        result[key]++
+      }
+    }
+
     for (const entry of plan) {
       if (entry.choice === 'skip') {
         result.skipped++
@@ -391,6 +511,14 @@ export async function importBundle(
         result.overwritten++
       }
       const target = suite ? join(libraryPath, suite, bare) : join(libraryPath, bare)
+      // QF-005 follow-up: an upload step still names the EXPORTER's absolute
+      // path (`C:\Users\sam\…\_uploads\invoice.pdf`). The fixture travelled and
+      // now sits in this library's _uploads, but replay hands step.value
+      // straight to the browser — so every upload failed on any machine but
+      // the one that recorded it. Repoint each path at the copy that is here.
+      if (Array.isArray(data.steps)) {
+        data.steps = relinkUploads(data.steps, uploadsDir, (b) => uploadNames.get(b))
+      }
       // An imported test has NO history on this machine — that's deliberate, and
       // it's why runs/versions/lastRun are absent here rather than zeroed.
       await writeFile(
@@ -399,26 +527,6 @@ export async function importBundle(
         'utf-8'
       )
       result.imported++
-    }
-
-    // Blocks and uploads are shared assets — copy any the bundle brought that
-    // this library doesn't already have. Never overwrite: a local block of the
-    // same name may already feed other tests (F7's blast radius).
-    for (const [dir, store, key] of [
-      ['blocks', '_blocks', 'blocks'],
-      ['uploads', '_uploads', 'uploads']
-    ] as const) {
-      const from = join(bundleDir, dir)
-      if (!existsSync(from)) continue
-      await mkdir(join(libraryPath, store), { recursive: true })
-      for (const f of await readdir(from)) {
-        const dst = join(libraryPath, store, f)
-        if (existsSync(dst)) continue
-        const s = await stat(join(from, f))
-        if (!s.isFile()) continue
-        await copyFile(join(from, f), dst)
-        result[key]++
-      }
     }
     return result
   } catch (e) {

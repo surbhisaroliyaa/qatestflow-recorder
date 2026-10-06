@@ -15,9 +15,16 @@ export const PAGE_MIN = 480
 /** Arrow-key step for the keyboard-resizable divider. */
 export const PANE_KEY_STEP = 24
 
+/** The widest the pane may be in a window this wide. Its own function because
+ *  the divider also reports it (aria-valuemax) — a screen reader announces the
+ *  width as a position within this range. */
+export function paneMaxWidth(windowWidth: number): number {
+  return Math.max(PANE_MIN, windowWidth - PAGE_MIN)
+}
+
 /** A width the pane may actually take in a window this wide. */
 export function clampPaneWidth(width: number, windowWidth: number): number {
-  const max = Math.max(PANE_MIN, windowWidth - PAGE_MIN)
+  const max = paneMaxWidth(windowWidth)
   if (!Number.isFinite(width)) return Math.min(PANE_DEFAULT, max)
   return Math.round(Math.min(max, Math.max(PANE_MIN, width)))
 }

@@ -1,13 +1,20 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   candidateFromLocator,
   parsePortableTest,
   parseYaml,
+  PORTABLE_STEP_KEYS,
+  STEP_FIELD_FATE,
   stepToPortable,
   testToPortable,
   toPortableJson,
   toYaml
 } from '../src/shared/testFormat'
+
+// SAVED_FIELD_FATE lives beside SavedTestFile in library.ts, which asks
+// Electron where Documents is at import time.
+vi.mock('electron', () => ({ app: { getPath: () => '/Users/test/Documents' } }))
+const { SAVED_FIELD_FATE } = await import('../src/main/library')
 
 // =====================================================================
 // The portable test format — YAML / JSON round trip.
@@ -526,5 +533,228 @@ describe('§ a real selector ladder', () => {
     expect(warnings).toEqual([])
     expect(back).toHaveLength(4)
     expect(back[3].candidates).toHaveLength(2)
+  })
+})
+
+// =====================================================================
+// § lossless — EVERY field, not the ones someone remembered
+//
+// The per-field tests above were written one bug at a time, which is how
+// `apiContract` fell through: nobody had written its test, so nothing noticed
+// the YAML form dropping it. This section is driven by the FATE MAPS, which are
+// keyed by the types themselves (a new field on RecorderStep or SavedTestFile
+// is a compile error until it is classified). Classify a field 'portable' and
+// forget to carry it, or forget to give it a sample here, and this fails.
+// =====================================================================
+describe('§ lossless — every field', () => {
+  // One value per step field, each the kind of value a naive emitter changes:
+  // colons, `#`, quotes, Windows paths with `\n` in them, tabs, blank lines
+  // inside a block, a trailing newline, keys that are somebody else's JSON.
+  const SAMPLE: Record<string, unknown> = {
+    type: 'api',
+    label: 'Create order: step #1',
+    blockRef: 'login-block.json',
+    value: 'C:\\Users\\qa\\new\\file.txt\twith a tab',
+    key: 'Enter',
+    waitKind: 'text',
+    dialogKind: 'prompt',
+    assertKind: 'text-equals',
+    attrName: 'data-state',
+    secret: true,
+    secretRef: 'sr_9',
+    disabled: false,
+    optional: true,
+    teardown: true,
+    createsData: 'order',
+    scrollKind: 'element',
+    dragKind: 'mouse',
+    targetSelector: "getByRole('button', { name: 'Drop: here' })",
+    targetCandidates: [
+      {
+        kind: 'role',
+        score: 85,
+        css: null,
+        role: 'button',
+        name: 'Drop: here',
+        locator: "getByRole('button', { name: 'Drop: here' })"
+      }
+    ],
+    targetLabel: 'Drop zone',
+    dragFrom: '0,0.5',
+    repeatKind: 'each',
+    condKind: 'element-visible',
+    url: 'https://api.test/orders?x=1#frag',
+    downloadPath: 'C:\\Users\\qa\\Downloads\\receipt 2024.pdf',
+    downloadExact: true,
+    baselineId: 'bl_42',
+    maskSelectors: '#clock\n\n.ad-slot, [data-test="promo"]\n#banner > span',
+    freezeAnimations: false,
+    maxDiffPixels: 0,
+    selector: 'locator(\'input[name="user-name"]\')',
+    candidates: [
+      {
+        kind: 'testId',
+        score: 95,
+        css: '[data-test="username"]',
+        locator: "getByTestId('username')",
+        testIdAttr: 'data-test',
+        pinned: true
+      },
+      {
+        kind: 'text',
+        score: 60,
+        css: null,
+        text: 'yes',
+        nth: 2,
+        locator: "getByText('yes').nth(2)"
+      }
+    ],
+    frame: [{ url: 'https://pay.test/frame?a=1', name: 'payment' }, { url: 'https://inner.test/' }],
+    windowId: 1,
+    opensWindow: 2,
+    apiMethod: 'POST',
+    apiHeaders: 'Authorization: Bearer abc\nX-Trace: 1',
+    // A blank line inside AND a trailing newline — the block literal can carry
+    // neither exactly, so this is the double-quoted fallback's job.
+    apiBody: '{\n\n  "item": "backpack"\n}\n',
+    apiExpectStatus: '204,404',
+    apiExpectBody: '"status": "ok"',
+    apiSave: 'orderId = id\ntoken = auth.token',
+    apiChecks: 'status equals CONFIRMED\n# not a comment\nitems count-gt 0',
+    apiContract: {
+      id: 'number',
+      'items[].sku': 'string',
+      '[]': 'array',
+      'meta.created: at': 'string',
+      "owner's name, first": 'null',
+      '#hash': 'boolean'
+    },
+    apiMaxMs: 1500,
+    apiTimeoutMs: 30000,
+    apiInjectCookies: true,
+    apiInjectStorage: 'token = abc\nuser = {"id":1}'
+  }
+
+  const fates = STEP_FIELD_FATE as Record<string, string>
+  const portableFields = Object.keys(fates).filter((k) => fates[k] === 'portable')
+  const carried = Object.keys(fates).filter((k) => ['portable', 'do', 'target'].includes(fates[k]))
+
+  it('every portable step field is in the exported key list, and nothing else is', () => {
+    expect(PORTABLE_STEP_KEYS.filter((k) => k !== 'do' && k !== 'target').sort()).toEqual(
+      [...portableFields].sort()
+    )
+  })
+
+  it('has a sample for every field a step carries', () => {
+    // A field in the fate map with no sample here would let the round trip
+    // below pass without ever exercising it.
+    expect(carried.filter((k) => !(k in SAMPLE))).toEqual([])
+  })
+
+  // The full step, plus every field that must NOT travel, so the drops are
+  // exercised as well.
+  const FULL = {
+    ...SAMPLE,
+    id: 7,
+    healedByAi: { at: '2026-09-21', signals: ['role'], score: 80 },
+    revealValue: true,
+    loadedMore: true,
+    scrollDir: 'down'
+  }
+  const NAV = { type: 'navigate', url: 'https://shop.test/' }
+
+  const TEST: Record<string, unknown> = {
+    name: 'Checkout: #1 — "mobile"',
+    baseURL: 'https://shop.test/app',
+    tags: ['@smoke', 'env:staging', 'yes', '#nightly'],
+    viewport: { width: 390, height: 844 },
+    deviceId: 'iPhone 13',
+    storageState: 'session-1.json',
+    har: 'checkout.har',
+    dataRows: [
+      { user: 'standard_user', 'first name, last': 'a: b' },
+      { user: '', 'first name, last': 'null' }
+    ]
+  }
+
+  it('has a sample for every portable test-level field', () => {
+    const fields = Object.entries(SAVED_FIELD_FATE as Record<string, string>)
+      .filter(([k, f]) => f === 'portable' && k !== 'steps')
+      .map(([k]) => k)
+    expect(fields.filter((k) => !(k in TEST))).toEqual([])
+  })
+
+  const check = (back: ReturnType<typeof parsePortableTest>): void => {
+    expect(back.warnings).toEqual([])
+    expect(back.steps).toEqual([SAMPLE, NAV])
+    const testLevel: Record<string, unknown> = { ...back.test }
+    delete testLevel.steps
+    delete testLevel.version
+    expect(testLevel).toEqual(TEST)
+  }
+
+  it('YAML: export → import gives back every field', () => {
+    check(parsePortableTest(toYaml(testToPortable(TEST, [FULL, NAV])), 'x.yaml'))
+  })
+
+  it('JSON: export → import gives back every field', () => {
+    check(parsePortableTest(toPortableJson(testToPortable(TEST, [FULL, NAV])), 'x.json'))
+  })
+
+  it('re-exporting an imported YAML file gives the identical file', () => {
+    const once = toYaml(testToPortable(TEST, [FULL, NAV]))
+    const back = parsePortableTest(once)
+    const again = toYaml(
+      testToPortable(back.test as unknown as Record<string, unknown>, back.steps)
+    )
+    expect(again).toBe(once)
+  })
+
+  it('a hand-written `key:` with nothing under it is null, not a map of its siblings', () => {
+    expect(parseYaml('a:\nb: 1\n')).toEqual({ a: null, b: 1 })
+  })
+})
+
+describe('§ hand-edited types', () => {
+  // The file says "edit freely". A person writes `apiExpectStatus: 200`, and
+  // YAML reads that as a NUMBER; the app then called .trim() on it and the
+  // whole window went blank when the imported test was opened.
+  const exported = toYaml(
+    testToPortable({ name: 'T', baseURL: 'https://x.test', tags: [], dataRows: [] }, [
+      {
+        type: 'api',
+        apiMethod: 'GET',
+        url: 'https://x.test/a',
+        apiExpectStatus: '200',
+        apiMaxMs: 500,
+        optional: true
+      }
+    ])
+  )
+
+  it('an unquoted number in a TEXT field comes back as text', () => {
+    const hand = exported.replace(/apiExpectStatus: .*/, 'apiExpectStatus: 200')
+    const step = parsePortableTest(hand, 'x.yaml').steps[0] as Record<string, unknown>
+    expect(step.apiExpectStatus).toBe('200')
+  })
+
+  it('number and true/false fields keep their type, even when quoted by hand', () => {
+    const hand = exported
+      .replace(/apiMaxMs: .*/, "apiMaxMs: '750'")
+      .replace(/optional: .*/, "optional: 'true'")
+    const step = parsePortableTest(hand, 'x.yaml').steps[0] as Record<string, unknown>
+    expect(step.apiMaxMs).toBe(750)
+    expect(step.optional).toBe(true)
+  })
+
+  it('data-table cells are text', () => {
+    const json = JSON.stringify({
+      format: JSON.parse(toPortableJson(testToPortable({ name: 'T' }, []))).format,
+      name: 'T',
+      steps: [],
+      dataRows: [{ username: 'u', password: 12345, remember: true }]
+    })
+    const { test } = parsePortableTest(json, 'x.json')
+    expect(test.dataRows).toEqual([{ username: 'u', password: '12345', remember: 'true' }])
   })
 })

@@ -1,8 +1,25 @@
-import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent
+} from 'react'
+// QF-007: the tool belt row and its "More ⋯" overflow menu.
+import { ToolsRow } from './components/ToolsRow'
 // QF-004: keyboard focus containment for every modal — see modalA11y.ts.
 import { trapFocus } from './modalA11y'
 // QF-007/008: resizable step pane.
-import { clampPaneWidth, readStoredPaneWidth, PANE_DEFAULT, PANE_KEY_STEP } from './paneLayout'
+import {
+  clampPaneWidth,
+  paneMaxWidth,
+  readStoredPaneWidth,
+  PANE_DEFAULT,
+  PANE_KEY_STEP,
+  PANE_MIN
+} from './paneLayout'
 // QF-012: plain-language page-load errors.
 import { explainLoadError, loadErrorDetails } from '../../shared/loadErrors'
 // QF-011: one place that knows "1 step" vs "2 steps".
@@ -14,6 +31,8 @@ import {
   generatePlaywrightTest,
   generatePageObjectTest,
   generateCiWorkflow,
+  generateGitlabCi,
+  type CiTarget,
   generatePlaywrightConfig,
   generateEdgeSuite,
   stepText,
@@ -57,9 +76,11 @@ import { generateSuiteReport } from './suiteReportText'
 // re-deciding locally — that divergence is what produced the same bug in four
 // different places over two days.
 import {
+  headlessRunEnv,
   mergeEnvValues,
   missingEnvMessage,
   missingEnvNames,
+  planRun,
   runData,
   runFixturePaths,
   runSecretRefs
@@ -70,6 +91,7 @@ import {
   isSensitiveColumn,
   secretCellEnv,
   secretCellRef,
+  secretSources,
   withoutSecretKeys
 } from '../../shared/secretCells'
 import { matchesTags } from './tags'
@@ -94,6 +116,7 @@ import { IntegrationsModal, type IntegrationConfigShape } from './components/Int
 import { cancelRunVideo, startRunVideo, stopRunVideo } from './runVideo'
 // Phase 4: when a run of scrolls is one action and when it is several.
 import { appendRecordedStep } from './stepMerge'
+import { planStepRun, type StepRunMode } from './stepRun'
 import { TraceViewerModal } from './components/TraceViewerModal'
 import { LocaleReportModal } from './components/LocaleReportModal'
 import { LocalePickerModal } from './components/LocalePickerModal'
@@ -197,8 +220,9 @@ function App(): React.JSX.Element {
   const [savedPageOverwritten, setSavedPageOverwritten] = useState(false)
   // Day 17 (page-object export): toggle between inline and full POM output.
   const [poExport, setPoExport] = useState(false)
-  // F33 (CI export): also write a GitHub Actions workflow beside the spec.
-  const [exportCi, setExportCi] = useState(false)
+  // F33 (CI export): also write a CI file beside the spec — a GitHub Actions
+  // workflow or a .gitlab-ci.yml, whichever system the team uses.
+  const [exportCi, setExportCi] = useState<CiTarget>('none')
   // F17 (cross-browser): also write a playwright.config.ts (chromium/firefox/
   // webkit projects) beside the spec.
   const [exportXbrowser, setExportXbrowser] = useState(false)
@@ -761,6 +785,16 @@ function App(): React.JSX.Element {
   // the steps, so they're never stored separately). `dataPanelOpen` toggles the
   // grid; `dataRun` mirrors suiteRun for the per-row run summary.
   const [dataRows, setDataRows] = useState<Record<string, string>[]>([])
+  // Evidence storage only sees SAVED tests, so the login / upload files of a
+  // recording that isn't saved yet looked unused and could be deleted under
+  // it. Tell main what the open workspace uses whenever that changes —
+  // debounced, since steps change on every keystroke while editing.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      window.api.evidence.setOpen({ storageState, har: harField, steps, dataRows })
+    }, 300)
+    return () => window.clearTimeout(t)
+  }, [storageState, harField, steps, dataRows])
   const [dataPanelOpen, setDataPanelOpen] = useState(false)
   interface DataRunEntry {
     label: string
@@ -1743,6 +1777,8 @@ function App(): React.JSX.Element {
   const a11yPanelOpen = a11yScanning || a11yScan !== null
   // F14: same for the performance panel.
   const perfPanelOpen = perfMeasuring || perfResult !== null
+  // QF-007: the toolbar's "More ⋯" overflow menu is open (see ToolsRow).
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
   // QF-004: the same condition that hides the native browser pane also says
   // "a dialog is on screen", so focus containment rides along with it rather
   // than being a second list that can drift out of step with this one.
@@ -1822,7 +1858,9 @@ function App(): React.JSX.Element {
 
   // QF-004: hold focus inside whichever dialog is open, and hand it back when
   // it closes. `anyOverlayOpen` is the only dependency: the effect re-runs on
-  // open and tears down on close, which is exactly the trap's lifetime.
+  // open and tears down on close, which is exactly the trap's lifetime. A
+  // dialog stacked on an open one does not flip this; the trap watches the DOM
+  // for those itself (initial focus in, focus back out on close).
   //
   // A layout effect, not a plain one — it must run after React has committed
   // the dialog to the DOM (so there is something to focus) but before the
@@ -1838,9 +1876,22 @@ function App(): React.JSX.Element {
   // page and the app looked frozen (a recurring bug). It depends on the one
   // value it actually uses now, so the list above is the only list.
   // (react-hooks/exhaustive-deps pointed at it — QF-009.)
+  //
+  // QF-007: the toolbar's "More ⋯" menu drops down over the page area, so the
+  // page hides while it's open too. It is NOT in `anyOverlayOpen`: that value
+  // also switches on the modal focus trap, and a menu is a popover — it
+  // manages its own focus and closes on Tab / Escape / a click outside.
   useEffect(() => {
-    window.api.browser.setOverlay(anyOverlayOpen)
-  }, [anyOverlayOpen])
+    window.api.browser.setOverlay(anyOverlayOpen || toolsMenuOpen)
+  }, [anyOverlayOpen, toolsMenuOpen])
+
+  // A tool chosen from the More menu runs only once the page is back: main
+  // re-shows it on this call, and two frames let it paint before e.g. Snapshot
+  // photographs it or Check waits for a click on it.
+  const restorePageForTool = useCallback(async (): Promise<void> => {
+    await window.api.browser.setOverlay(false)
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+  }, [])
 
   // Day 18: remember the trace policy across sessions.
   useEffect(() => {
@@ -2248,7 +2299,12 @@ function App(): React.JSX.Element {
         )
       )
     )
-    const ciWorkflow = exportCi ? generateCiWorkflow(secretNames) : undefined
+    const ciWorkflow =
+      exportCi === 'github'
+        ? generateCiWorkflow(secretNames)
+        : exportCi === 'gitlab'
+          ? generateGitlabCi(secretNames)
+          : undefined
     // F17: an opt-in cross-browser playwright.config.ts beside the spec.
     const configFile = exportXbrowser ? generatePlaywrightConfig() : undefined
     // Day 16(+): gather the upload files this test references so main can copy
@@ -2266,8 +2322,11 @@ function App(): React.JSX.Element {
       storageState,
       exportPages.length ? exportPages : undefined,
       exportHarName(), // F1: copy the .har (saved or fresh) into hars/ beside the spec
-      ciWorkflow, // F33: optional .github/workflows/playwright.yml
-      configFile // F17: optional cross-browser playwright.config.ts
+      ciWorkflow, // F33: optional GitHub workflow or .gitlab-ci.yml
+      configFile, // F17: optional cross-browser playwright.config.ts
+      exportCi === 'gitlab' ? 'gitlab' : 'github',
+      // The test's passwords, so main can blank them out of the exported .har.
+      secretSources(steps, dataRows)
     )
     if (res) {
       setSavedPath(res.path)
@@ -2325,7 +2384,13 @@ function App(): React.JSX.Element {
     editSteps(imported)
     setTestName(result.name)
     setTestFileName(null) // an import is a NEW test until it's saved
-    if (result.baseURL) setBaseURL(result.baseURL)
+    // Every test-level field the file carries is applied, and one it lacks is
+    // CLEARED rather than inherited from whatever was open before — the same
+    // rule as the session/HAR below. The device goes through applySavedDevice,
+    // exactly as opening a saved test does: an iPhone 13 test used to import
+    // and replay as desktop, because the device was exported and then ignored.
+    setBaseURL(result.baseURL ?? '')
+    applySavedDevice(result.deviceId, result.viewport)
     setTags(result.tags ?? [])
     setDataRows(result.dataRows ?? [])
     setTestVersions([])
@@ -2666,7 +2731,8 @@ function App(): React.JSX.Element {
       if (counted) {
         postbackInFlightRef.current -= 1
         if (postbackInFlightRef.current === 0) {
-          if (postbackNoteTimerRef.current !== null) window.clearTimeout(postbackNoteTimerRef.current)
+          if (postbackNoteTimerRef.current !== null)
+            window.clearTimeout(postbackNoteTimerRef.current)
           postbackNoteTimerRef.current = null
           setPostbackSending(false)
         }
@@ -2794,6 +2860,96 @@ function App(): React.JSX.Element {
     // F25: resolve {{env:}} creds + re-point navigations at the active env (if any).
     const list = await applyEnv(flat, fromBase, noEnv)
     await runOnce(list, testFileName, true)
+  }
+
+  // FR-15: ▶ Run this step / ⏩ Run from here. Runs a SLICE of the test on the
+  // page already open in the embedded browser, through the same replay IPC as
+  // ▶ Replay (so selectors, waits, checks, secrets and self-heal all behave
+  // identically) — main is only told not to wipe the session first. It
+  // deliberately does NOT go through runOnce: a one-step probe is not a test
+  // run, so it must not write run history, fire the postback, or keep a trace.
+  const handleRunStep = async (row: number, mode: StepRunMode): Promise<void> => {
+    if (isRecording || isReplaying) return
+    const { flat, map } = await buildRunPlan(steps)
+    const plan = planStepRun(flat, map, row, mode)
+    if (!plan.ok) {
+      setAiToast({ tone: 'warn', msg: plan.reason })
+      window.setTimeout(() => setAiToast(null), 6000)
+      return
+    }
+    const slice = flat.slice(plan.start, plan.end + 1)
+    // With no page open, anything but a navigate would wait out the full find
+    // timeout on a blank view and then blame the selector. Say the real reason.
+    // (An API step needs no page, so it is exempt.)
+    const firstType = slice.find((st) => !st.disabled)?.type
+    if (!hasNavigated && firstType !== 'navigate' && firstType !== 'api') {
+      setAiToast({
+        tone: 'warn',
+        msg: 'Open the page this step belongs on first — it runs on the page open now.'
+      })
+      window.setTimeout(() => setAiToast(null), 6000)
+      return
+    }
+    // Tokens resolve exactly as a full run resolves them: {{env:}} from the
+    // active environment, {{data}} from the FIRST row (the row ▶ Replay uses
+    // when it runs a single pass), and secrets in main.
+    let list: RecorderStep[]
+    const fromBase = baseURL || deriveBaseURL(flat)
+    const choice = await confirmRetarget(fromBase, slice)
+    if (choice === 'cancel') return
+    if (isDataDriven) {
+      const row0 = dataRows[0] ?? {}
+      const { values: envMap } = await resolveEnvForRun(slice, [row0])
+      list = substituteSteps(slice, resolveRow(row0, envMap), envMap)
+      if (activeEnv?.baseURL && choice !== 'noenv')
+        list = retargetSteps(list, fromBase, activeEnv.baseURL)
+    } else {
+      list = await applyEnv(slice, fromBase, choice === 'noenv')
+    }
+    // Progress arrives indexed into the SLICE; this map lands it on the rows.
+    runPlanRef.current = plan.map
+    setFailedIndex(null)
+    setReplayError(null)
+    setDoneIndices(new Set())
+    setSkippedIndices(new Set())
+    setLastFailures([])
+    setFailDetail(null)
+    setLastScreenshotPath(null)
+    setLastConsoleErrors([])
+    setLastNetworkErrors([])
+    setIsReplaying(true)
+    let result: Awaited<ReturnType<typeof window.api.recorder.replay>>
+    try {
+      result = await window.api.recorder.replay(
+        list,
+        false,
+        undefined,
+        { mode: 'off', stepTexts: list.map((s) => stepText(s)) },
+        undefined,
+        undefined,
+        false,
+        { fromCurrentPage: true }
+      )
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err)
+      result = {
+        ok: false,
+        error: raw
+          .replace(/^Error invoking remote method '[^']+':\s*/, '')
+          .replace(/^Error:\s*/, '')
+      }
+    } finally {
+      setIsReplaying(false)
+      setReplayingIndex(null)
+    }
+    if (!result.ok) {
+      // The same marks and wording a full run leaves — red row + banner text.
+      setFailedIndex(result.failedAt != null ? toDisplayIdx(result.failedAt) : null)
+      setReplayError(result.error ?? 'Replay failed')
+      setLastScreenshotPath(result.screenshotPath ?? null)
+      setLastConsoleErrors(result.consoleErrors ?? [])
+      setLastNetworkErrors(result.networkErrors ?? [])
+    }
   }
 
   // F21b: "Add checks along a replay" — ride the recorded flow and, on each page
@@ -2985,7 +3141,7 @@ function App(): React.JSX.Element {
     const failed = results.filter((r) => r.status === 'failed')
     const first = failed[0]
     const rowsSummary = failed.length
-      ? `${failed.length}/${results.length} rows failed — e.g. ${first.label}: ${first.error}`
+      ? `${failed.length}/${plural(results.length, 'row')} failed — e.g. ${first.label}: ${first.error}`
       : undefined
     // ONE postback for the whole data run, not one per row: a receiver saw N
     // separate "runs" of the same test and could not tell they belonged
@@ -4454,7 +4610,7 @@ function App(): React.JSX.Element {
             ok: failedRows.length === 0,
             failedAt: firstF?.r.failedAt,
             error: failedRows.length
-              ? `${failedRows.length}/${rowOutcomes.length} rows failed — e.g. ${firstF!.label}: ${firstF!.r.error}`
+              ? `${failedRows.length}/${plural(rowOutcomes.length, 'row')} failed — e.g. ${firstF!.label}: ${firstF!.r.error}`
               : undefined,
             screenshotPath: firstF?.r.screenshotPath,
             category: firstF?.r.category,
@@ -4885,68 +5041,27 @@ function App(): React.JSX.Element {
     setBlocksPanelOpen(true)
     refreshBlocks()
   }
-  // A block MARKER can carry per-step flags of its own — F27's 🗃️ "creates
-  // data" is set on the block row, not on the steps inside it. Expanding
-  // replaces that marker with the block's inner steps, so the flag used to
-  // vanish: a block marked "creates data" reported as creating nothing, and the
-  // suite-level "no teardown — orphaned records will pile up" warning silently
-  // never fired. The badge showed on the row the whole time, so it looked set.
-  //
-  // Carried onto the FIRST inner step: once, where a reader expects it, instead
-  // of N copies that would list the same label repeatedly in the docs. An inner
-  // step with its own marker keeps it — the block's flag never overwrites one
-  // the block's author set deliberately.
-  const carryBlockFlags = (marker: RecorderStep, inner: RecorderStep[]): RecorderStep[] => {
-    if (!marker.createsData || !inner.length) return inner
-    const [first, ...rest] = inner
-    return [first.createsData ? first : { ...first, createsData: marker.createsData }, ...rest]
-  }
-
   // Replace each linked `block` step with the block's CURRENT steps loaded FRESH
   // from disk (so a run/export always reflects the latest edit — the "live" in
-  // live-link). Flattens any nested block refs too. Identity for a test with no
-  // block steps. Used by replay + export; display uses the cached expandSteps.
-  const expandForRun = async (list: RecorderStep[]): Promise<RecorderStep[]> => {
-    const out: RecorderStep[] = []
-    for (const s of list) {
-      if (s.type === 'block') {
-        if (s.disabled || !s.blockRef) continue
-        const b = await window.api.blocks.load(s.blockRef)
-        if (b) out.push(...carryBlockFlags(s, await expandForRun(b.steps as RecorderStep[])))
-      } else {
-        out.push(s)
-      }
-    }
-    return out
+  // live-link). Flattens any nested block refs too, and carries a block's 🗃️
+  // "creates data" flag onto its first inner step (F27 — without that the
+  // suite-level "no teardown" warning silently never fired). Identity for a
+  // test with no block steps. Used by replay + export; display uses the cached
+  // expandSteps. The rule itself is planRun in src/shared/runInputs.ts — the
+  // command line expands blocks with the same code.
+  const loadBlockSteps = async (ref: string): Promise<RecorderStep[] | null> => {
+    const b = await window.api.blocks.load(ref)
+    return b ? (b.steps as RecorderStep[]) : null
   }
+  const expandForRun = async (list: RecorderStep[]): Promise<RecorderStep[]> =>
+    (await planRun(list, loadBlockSteps)).flat
   // Like expandForRun, but ALSO returns a map from each expanded index → the
   // display-row it came from (a block's inner steps all point back at the block
   // row), so replay marks line up with the collapsed UI. Set into runPlanRef
   // before a run. For a test with no linked blocks the map is the identity.
-  const buildRunPlan = async (
+  const buildRunPlan = (
     display: RecorderStep[]
-  ): Promise<{ flat: RecorderStep[]; map: number[] }> => {
-    const flat: RecorderStep[] = []
-    const map: number[] = []
-    for (let i = 0; i < display.length; i++) {
-      const s = display[i]
-      if (s.type === 'block') {
-        if (s.disabled || !s.blockRef) continue
-        const b = await window.api.blocks.load(s.blockRef)
-        // Same flag carriage as expandForRun — a block's 🗃️ marker must survive
-        // flattening here too, or the docs built from this plan lose it.
-        const inner = b ? carryBlockFlags(s, await expandForRun(b.steps as RecorderStep[])) : []
-        for (const st of inner) {
-          flat.push(st)
-          map.push(i)
-        }
-      } else {
-        flat.push(s)
-        map.push(i)
-      }
-    }
-    return { flat, map }
-  }
+  ): Promise<{ flat: RecorderStep[]; map: number[] }> => planRun(display, loadBlockSteps)
 
   // === F32: run one monitor NOW (headless, via the same Playwright path as F17
   // cross-browser) and stamp the outcome. Never throws — a broken setup is
@@ -5064,30 +5179,20 @@ function App(): React.JSX.Element {
       // F32: run against the monitor's PINNED environment, not the global "Run
       // against" — always an explicit override so the active env can't retarget it.
       const pinned = mon.envId ? envState.environments.find((e) => e.id === mon.envId) : null
+      const provided: Record<string, string> = {}
       if (pinned) {
-        for (const v of pinned.vars) if (v.name) envVars[v.name] = v.value
-        if (pinned.baseURL) envVars.BASE_URL = pinned.baseURL
+        for (const v of pinned.vars) if (v.name) provided[v.name] = v.value
+        if (pinned.baseURL) provided.BASE_URL = pinned.baseURL
       }
       // A monitor re-runs YOUR OWN saved test on YOUR machine — the secret is on
-      // disk already — so use it (a pinned env's PASSWORD still wins).
-      if (envVars.PASSWORD === undefined) {
-        // F40: the password is no longer in the step — the step carries a ref and
-        // the value lives in userData. Ask main for it (same machine, same user).
-        // A pre-F40 test that still holds a literal is honoured too, so a monitor
-        // keeps working in the window between upgrading and the migration run.
-        const refs = runSecretRefs(flat)
-        if (refs.length) {
-          const resolved = await window.api.xbrowser.resolveSecrets(refs)
-          const first = refs.map((r) => resolved[r]).find((v) => v)
-          if (first) envVars.PASSWORD = first
-        }
-        if (envVars.PASSWORD === undefined) {
-          const secretStep = flat.find(
-            (s) => s.type === 'type' && s.secret && s.value && !s.value.includes('{{')
-          )
-          if (secretStep?.value) envVars.PASSWORD = secretStep.value
-        }
-      }
+      // disk already — so use it (a pinned env's PASSWORD still wins). F40: the
+      // step carries a ref and the value lives in userData, asked of main (same
+      // machine, same user); a pre-F40 literal is honoured too, so a monitor
+      // keeps working between upgrading and the migration run.
+      //
+      // The rule is headlessRunEnv, shared with the command line — so the 🌙
+      // "runs when closed" task fills the password exactly as this does.
+      //
       // Every OTHER run path resolves {{env:…}} up front and says which names had
       // no value — in-app replay, single-row, data runs, suite runs. The monitor
       // path didn't, so an undefined variable was handed to the generator as a raw
@@ -5102,27 +5207,24 @@ function App(): React.JSX.Element {
       // guard now lives in missingEnvNames/mergeEnvValues, where a unit test pins
       // it. That is the whole point of the move: this path states WHAT it wants,
       // and the rule for HOW is written once.
-      const needed = envVarNames(flat, rows)
-      if (needed.length) {
-        // The pinned environment is passed as `provided`, so it wins.
-        const out = await resolveEnvVars(needed, envVars)
-        // Protected data cells become the PASSWORD_1… names the spec reads; the
-        // `secret:<ref>` lookup keys stay out of the child's environment.
-        Object.assign(envVars, withoutSecretKeys(out.values), secretCellEnv(rows, out.values))
-        const missing = out.missing
-        if (missing.length) {
-          const run = {
-            at: new Date().toISOString(),
-            status: 'error' as const,
-            detail: missingEnvMessage(missing, {
-              pinnedButMissing: !!mon.envId && !pinned,
-              fixHint: 'Pick an environment on the monitor’s card, or add the value to it.'
-            })
-          }
-          setMonitors(await window.api.monitors.recordRun(mon.id, run))
-          if (mon.alertOnFail) await fireMonitorAlert(mon, run)
-          return
+      // The pinned environment is passed as `provided`, so it wins.
+      const resolvedEnv = await headlessRunEnv(flat, rows, envVarNames(flat, rows), provided, {
+        resolveNames: (names) => window.api.recorder.resolveEnv(names),
+        getSecrets: (refs) => window.api.xbrowser.resolveSecrets(refs)
+      })
+      Object.assign(envVars, resolvedEnv.env)
+      if (resolvedEnv.missing.length) {
+        const run = {
+          at: new Date().toISOString(),
+          status: 'error' as const,
+          detail: missingEnvMessage(resolvedEnv.missing, {
+            pinnedButMissing: !!mon.envId && !pinned,
+            fixHint: 'Pick an environment on the monitor’s card, or add the value to it.'
+          })
         }
+        setMonitors(await window.api.monitors.recordRun(mon.id, run))
+        if (mon.alertOnFail) await fireMonitorAlert(mon, run)
+        return
       }
       session = test.storageState || undefined
     } catch (e) {
@@ -6461,6 +6563,14 @@ function App(): React.JSX.Element {
       setPrivacy={setPrivacy}
       onSave={savePrivacyPolicy}
       onClose={() => setPrivacy(null)}
+      // Evidence storage can now delete saved logins and saved edge-case runs.
+      // Re-read both lists so the session picker and the "🧨 Edge runs" list
+      // don't keep offering a file that is gone (opening one would just find
+      // nothing — loadEdgeRun returns null — but a stale entry reads as a bug).
+      onStorageChanged={() => {
+        refreshSessions()
+        void refreshEdgeHistory(testFileName)
+      }}
     />
   )
 
@@ -6848,14 +6958,21 @@ function App(): React.JSX.Element {
     )
   }
 
+  // QF-004: the loaded test's name, shown in the steps panel's test bar, is the
+  // workspace's one visible h1. When there is no test bar (an empty workspace)
+  // or the panel is collapsed (display:none drops it from the accessibility
+  // tree), a hidden app-name h1 takes its place — always exactly one h1.
+  const testNameIsHeading = !paneCollapsed && (!!testName || steps.length > 0)
+  const TestNameTag = testNameIsHeading ? 'h1' : 'span'
+
   // === Chrome view — shown once user has navigated ===
   return (
     <div className="app">
       {/* QF-004: the workspace had no heading structure at all, so a screen
-          reader user had nothing to jump between. An h1 for the app (hidden —
-          the toolbar already says where you are visually), then an h2 per
-          region: the page under test and the steps. */}
-      <h1 className="visually-hidden">QATestFlow Recorder</h1>
+          reader user had nothing to jump between. The h1 is the test's name
+          (visible, in the steps panel) with this hidden fallback; the page
+          under test is a labelled region, and Steps is the visible h2. */}
+      {!testNameIsHeading && <h1 className="visually-hidden">QATestFlow Recorder</h1>}
       {/* Day 16(+): download confirmation toast — auto-clears after a few sec.
           Three states: ok (has content), empty (downloaded but 0 bytes), and
           failed (transfer didn't finish). */}
@@ -6991,135 +7108,145 @@ function App(): React.JSX.Element {
           </button>
         </div>
 
-        {/* Row 2 — the QA tool belt, grouped by job: Author · Analyze · Network. */}
-        <div className="chrome-row tools">
-          {/* Author / capture a test. */}
-          <div className="tool-group">
-            <button
-              className={`check-btn${isPicking ? ' picking' : ''}`}
-              onClick={() => (isPicking ? handleCancelPick() : handleStartPick(null))}
-              disabled={isReplaying}
-              title={
-                isPicking
+        {/* Row 2 — the QA tool belt, grouped by job: Author · Analyze · Network.
+            QF-007: one line always; what doesn't fit goes into "More ⋯" (see
+            ToolsRow). Each tool is defined ONCE here and the row and the menu
+            both render from it, so a tool in the menu has the same handler,
+            the same disabled rule and the same on/off state as its button. */}
+        <ToolsRow
+          onOpenChange={setToolsMenuOpen}
+          beforeRun={restorePageForTool}
+          groups={[
+            // Author / capture a test.
+            [
+              {
+                id: 'check',
+                className: `check-btn${isPicking ? ' picking' : ''}`,
+                onClick: () => (isPicking ? handleCancelPick() : handleStartPick(null)),
+                disabled: isReplaying,
+                checked: isPicking,
+                title: isPicking
                   ? 'Cancel picking (or press Esc)'
-                  : 'Add a check: pick an element on the page'
+                  : 'Add a check: pick an element on the page',
+                label: `✓ ${isPicking ? 'Picking…' : 'Check'}`
+              },
+              // F18: type an intent, get draft steps grounded to the current page.
+              {
+                id: 'ai-step',
+                className: 'snapshot-btn',
+                onClick: () => {
+                  setAiPromptText('')
+                  setAiPromptNote('')
+                  setAiPromptOpen(true)
+                },
+                disabled: isReplaying || isPicking,
+                title:
+                  "AI step: describe what to do in plain English (e.g. 'log in as standard_user') and get draft steps for the current page",
+                label: '🪄 AI step'
+              },
+              // F22: turn a user story / PR diff into a draft test (no page needed).
+              {
+                id: 'draft',
+                className: 'snapshot-btn',
+                onClick: () => {
+                  setDraftStory('')
+                  setDraftDiff(null)
+                  setDraftResult(null)
+                  setDraftNote('')
+                  setDraftOpen(true)
+                },
+                disabled: isReplaying || isPicking,
+                title:
+                  "Draft a whole test from a user story (or a PR diff from the app's local repo): navigations + real AI checks, with plain-English actions you ground by recording over them.",
+                label: '📝 Draft'
+              },
+              // Day 19: capture the current page as a visual baseline.
+              {
+                id: 'snapshot',
+                className: 'snapshot-btn',
+                onClick: () => window.api.recorder.snapshot(),
+                disabled: isReplaying || isPicking,
+                title:
+                  'Visual snapshot: capture how the page looks now as a baseline; replay flags any visual change',
+                label: '📸 Snapshot'
               }
-            >
-              ✓ {isPicking ? 'Picking…' : 'Check'}
-            </button>
-            {/* F18: type an intent, get draft steps grounded to the current page. */}
-            <button
-              className="snapshot-btn"
-              onClick={() => {
-                setAiPromptText('')
-                setAiPromptNote('')
-                setAiPromptOpen(true)
-              }}
-              disabled={isReplaying || isPicking}
-              title="AI step: describe what to do in plain English (e.g. 'log in as standard_user') and get draft steps for the current page"
-            >
-              🪄 AI step
-            </button>
-            {/* F22: turn a user story / PR diff into a draft test (no page needed). */}
-            <button
-              className="snapshot-btn"
-              onClick={() => {
-                setDraftStory('')
-                setDraftDiff(null)
-                setDraftResult(null)
-                setDraftNote('')
-                setDraftOpen(true)
-              }}
-              disabled={isReplaying || isPicking}
-              title="Draft a whole test from a user story (or a PR diff from the app's local repo): navigations + real AI checks, with plain-English actions you ground by recording over them."
-            >
-              📝 Draft
-            </button>
-            {/* Day 19: capture the current page as a visual baseline. */}
-            <button
-              className="snapshot-btn"
-              onClick={() => window.api.recorder.snapshot()}
-              disabled={isReplaying || isPicking}
-              title="Visual snapshot: capture how the page looks now as a baseline; replay flags any visual change"
-            >
-              📸 Snapshot
-            </button>
-          </div>
-
-          {/* Analyze / inspect the current page. */}
-          <div className="tool-group">
-            {/* F21: paste a bug's repro + expected → a regression test (repro + a check). */}
-            <button
-              className="snapshot-btn"
-              onClick={() => {
-                setBugReproText('')
-                setBugExpectedText('')
-                setBugPromptOpen(true)
-              }}
-              disabled={isReplaying || isPicking}
-              title="Turn a bug's repro + expected result into steps + a smart AI check for the page you're on. Covers this one page — for a multi-page bug, run it on each page."
-            >
-              🐛 Bug check
-            </button>
-            {/* F13: scan the current page for WCAG A/AA accessibility violations. */}
-            <button
-              className="a11y-btn"
-              onClick={handleA11yScan}
-              disabled={isReplaying || isPicking || a11yScanning}
-              title="Accessibility scan: check this page for WCAG A/AA violations (missing labels, contrast, ARIA, keyboard traps)"
-            >
-              ♿ {a11yScanning ? 'Scanning…' : 'A11y'}
-            </button>
-            {/* F14: measure the current page's Core Web Vitals (LCP, CLS, …). */}
-            <button
-              className="perf-btn"
-              onClick={handleMeasurePerf}
-              disabled={isReplaying || isPicking || perfMeasuring}
-              title="Performance: measure this page's Core Web Vitals (load speed, layout stability)"
-            >
-              ⚡ {perfMeasuring ? 'Measuring…' : 'Perf'}
-            </button>
-            {/* F23: crawl the app from here and overlay tested vs untested pages. */}
-            <button
-              className="a11y-btn"
-              onClick={handleCoverageCrawl}
-              disabled={isReplaying || isPicking || isRecording || coverageRun?.running}
-              title="Coverage map: crawl the app from this page and show which pages your tests cover — untested pages are gaps. It walks the links (moving the browser around) then returns you here."
-            >
-              🗺️ {coverageRun?.running ? 'Crawling…' : 'Coverage'}
-            </button>
-          </div>
-
-          {/* Network: capture responses, then mock them. */}
-          <div className="tool-group">
-            {/* F1: capture network into a HAR while recording (opt-in flake-killer). */}
-            <button
-              className={`har-btn${captureNetwork ? ' on' : ''}`}
-              onClick={() => setCaptureNetwork((v) => !v)}
-              disabled={isReplaying}
-              title={
-                captureNetwork
+            ],
+            // Analyze / inspect the current page.
+            [
+              // F21: paste a bug's repro + expected → a regression test (repro + a check).
+              {
+                id: 'bug-check',
+                className: 'snapshot-btn',
+                onClick: () => {
+                  setBugReproText('')
+                  setBugExpectedText('')
+                  setBugPromptOpen(true)
+                },
+                disabled: isReplaying || isPicking,
+                title:
+                  "Turn a bug's repro + expected result into steps + a smart AI check for the page you're on. Covers this one page — for a multi-page bug, run it on each page.",
+                label: '🐛 Bug check'
+              },
+              // F13: scan the current page for WCAG A/AA accessibility violations.
+              {
+                id: 'a11y',
+                className: 'a11y-btn',
+                onClick: handleA11yScan,
+                disabled: isReplaying || isPicking || a11yScanning,
+                title:
+                  'Accessibility scan: check this page for WCAG A/AA violations (missing labels, contrast, ARIA, keyboard traps)',
+                label: `♿ ${a11yScanning ? 'Scanning…' : 'A11y'}`
+              },
+              // F14: measure the current page's Core Web Vitals (LCP, CLS, …).
+              {
+                id: 'perf',
+                className: 'perf-btn',
+                onClick: handleMeasurePerf,
+                disabled: isReplaying || isPicking || perfMeasuring,
+                title:
+                  "Performance: measure this page's Core Web Vitals (load speed, layout stability)",
+                label: `⚡ ${perfMeasuring ? 'Measuring…' : 'Perf'}`
+              },
+              // F23: crawl the app from here and overlay tested vs untested pages.
+              {
+                id: 'coverage',
+                className: 'a11y-btn',
+                onClick: handleCoverageCrawl,
+                disabled: isReplaying || isPicking || isRecording || !!coverageRun?.running,
+                title:
+                  'Coverage map: crawl the app from this page and show which pages your tests cover — untested pages are gaps. It walks the links (moving the browser around) then returns you here.',
+                label: `🗺️ ${coverageRun?.running ? 'Crawling…' : 'Coverage'}`
+              }
+            ],
+            // Network: capture responses, then mock them.
+            [
+              // F1: capture network into a HAR while recording (opt-in flake-killer).
+              {
+                id: 'net',
+                className: `har-btn${captureNetwork ? ' on' : ''}`,
+                onClick: () => setCaptureNetwork((v) => !v),
+                disabled: isReplaying,
+                checked: captureNetwork,
+                title: captureNetwork
                   ? 'Network capture is ON — while recording, API responses are saved to a standard .har file with the test (openable in Chrome DevTools; usable with Playwright routeFromHAR). Click to turn off.'
-                  : 'Capture network (HAR): while recording, save API responses to a .har file with the test — a standard archive for deterministic replay. Click to turn on.'
+                  : 'Capture network (HAR): while recording, save API responses to a .har file with the test — a standard archive for deterministic replay. Click to turn on.',
+                label: `🌐 ${harCount > 0 ? `Net · ${harCount}` : captureNetwork ? 'Net ON' : 'Net'}`
+              },
+              // F35: turn a captured response into a scenario mock + Playwright route.
+              {
+                id: 'mock',
+                className: 'snapshot-btn',
+                onClick: openMockStudio,
+                disabled: isReplaying || isPicking || harCount === 0,
+                title:
+                  harCount === 0
+                    ? 'Mock Studio: record a flow with 🌐 Net capture ON first, then edit a captured response into a scenario (sold-out, a 500, an empty list) and export the Playwright mock.'
+                    : 'Mock Studio: edit a captured API response into a scenario (sold-out, a 500, an empty list) and export the Playwright route/fulfill.',
+                label: '🎭 Mock'
               }
-            >
-              🌐 {harCount > 0 ? `Net · ${harCount}` : captureNetwork ? 'Net ON' : 'Net'}
-            </button>
-            {/* F35: turn a captured response into a scenario mock + Playwright route. */}
-            <button
-              className="snapshot-btn"
-              onClick={openMockStudio}
-              disabled={isReplaying || isPicking || harCount === 0}
-              title={
-                harCount === 0
-                  ? 'Mock Studio: record a flow with 🌐 Net capture ON first, then edit a captured response into a scenario (sold-out, a 500, an empty list) and export the Playwright mock.'
-                  : 'Mock Studio: edit a captured API response into a scenario (sold-out, a 500, an empty list) and export the Playwright route/fulfill.'
-              }
-            >
-              🎭 Mock
-            </button>
-          </div>
-        </div>
+            ]
+          ]}
+        />
       </div>
 
       {/* F1: the HAR status chips used to sit HERE, between the toolbar and the
@@ -7169,8 +7296,10 @@ function App(): React.JSX.Element {
           covered. The open dialog over a dimmed window already says why the
           page is gone, and the page returns the moment the dialog closes. */}
       <div className="workspace">
-        <div className="browser-column">
-          <h2 className="visually-hidden">Page under test</h2>
+        {/* A labelled region rather than a hidden h2: it sits BEFORE the steps
+            panel in the DOM, so a heading here came ahead of the h1 and put
+            the outline out of order. Landmarks are just as jumpable. */}
+        <div className="browser-column" role="region" aria-label="Page under test">
           {/* QF-012: the page failed to load. Above the page (never under the
               native view, which would hide it) and announced to screen readers. */}
           {showLoadError && activeLoadError && (
@@ -7238,6 +7367,8 @@ function App(): React.JSX.Element {
               aria-orientation="vertical"
               aria-label="Resize the steps panel (left and right arrow keys)"
               aria-valuenow={paneWidth}
+              aria-valuemin={PANE_MIN}
+              aria-valuemax={paneMaxWidth(window.innerWidth)}
               tabIndex={0}
               onPointerDown={startPaneDrag}
               onKeyDown={(e) => {
@@ -7275,12 +7406,15 @@ function App(): React.JSX.Element {
           {(testName || steps.length > 0) && (
             <div className="test-bar">
               {testSuite && <span className="test-suite-tag">{testSuite}</span>}
-              <span
+              {/* QF-004: the test's name IS the workspace's visible h1 — it is
+                  what this screen is about. Kept a span while the panel is
+                  collapsed (then the hidden app-name h1 stands in). */}
+              <TestNameTag
                 className={`test-name${testName ? '' : ' unnamed'}`}
                 title={testName || 'Unsaved recording — save to give it a name'}
               >
                 {testName || 'Untitled recording'}
-              </span>
+              </TestNameTag>
               {editingBase ? (
                 <input
                   className="test-base-input"
@@ -7625,7 +7759,7 @@ function App(): React.JSX.Element {
                     >
                       <span className="edge-hist-when">current run · unsaved</span>
                       <span className="edge-hist-ok">
-                        {edgeRun.results.filter((r) => !r.case.baseline).length} variants
+                        {plural(edgeRun.results.filter((r) => !r.case.baseline).length, 'variant')}
                       </span>
                     </button>
                     <button
@@ -7746,6 +7880,7 @@ function App(): React.JSX.Element {
                               className="shot-link"
                               onClick={() => window.api.library.openScreenshot(r.screenshotPath!)}
                               title="Open this row's screenshot"
+                              aria-label={`Open ${r.label}'s screenshot`}
                             >
                               📷
                             </button>
@@ -7756,6 +7891,7 @@ function App(): React.JSX.Element {
                               className="shot-link trace-link"
                               onClick={() => openTrace(r.traceId!)}
                               title="Open this row's run recording"
+                              aria-label={`Open ${r.label}'s run recording`}
                             >
                               ⏺
                             </button>
@@ -8025,6 +8161,7 @@ function App(): React.JSX.Element {
                             className="shot-link"
                             onClick={() => window.api.library.openScreenshot(f.screenshotPath!)}
                             title={`Open step ${f.index + 1}'s screenshot`}
+                            aria-label={`Open step ${f.index + 1}'s screenshot`}
                           >
                             📷
                           </button>
@@ -8265,7 +8402,7 @@ function App(): React.JSX.Element {
                 <span className="har-chip linked">🌐 network archive saved with this test</span>
               ) : harCount > 0 ? (
                 <span className="har-chip captured">
-                  🌐 {harCount} responses captured (save to keep)
+                  🌐 {plural(harCount, 'response')} captured (save to keep)
                 </span>
               ) : captureNetwork ? (
                 <span className="har-chip arm">🌐 network capture on — record to capture</span>
@@ -8789,7 +8926,10 @@ function App(): React.JSX.Element {
                           className="block-badge"
                           title="A live-linked block — editing the block updates this test. Expand it from the 🧩 Blocks panel."
                         >
-                          🔗 {step.blockRef ? (blockCache[step.blockRef]?.length ?? '…') : 0} steps
+                          🔗{' '}
+                          {step.blockRef && !blockCache[step.blockRef]
+                            ? '… steps' // still loading
+                            : plural(step.blockRef ? blockCache[step.blockRef].length : 0, 'step')}
                         </span>
                       )}
                       {/* Day 17/18: tab provenance. In a multi-tab recording EVERY
@@ -8821,6 +8961,9 @@ function App(): React.JSX.Element {
                           type="button"
                           className="step-selector"
                           onClick={() => setExpandedIndex(expandedIndex === i ? null : i)}
+                          // The caret shows open/closed by sight only; this says it
+                          // to a screen reader (the candidate ladder below).
+                          aria-expanded={expandedIndex === i}
                           title={`stability ${primaryCandidate(step)?.score ?? '?'}/100 — click to see all ways to find this element`}
                         >
                           <span
@@ -9053,6 +9196,32 @@ function App(): React.JSX.Element {
                               : 'Steps can’t be edited while a replay is running'
                         }
                       >
+                        {/* FR-15: run just this row (a block = its steps, an
+                            if/repeat = its whole block) — or this row to the end —
+                            on the page already open. Hidden on else/end markers,
+                            which mean nothing on their own. */}
+                        {!['else', 'endIf', 'endRepeat'].includes(step.type) && (
+                          <>
+                            <button
+                              className="step-action"
+                              onClick={() => handleRunStep(i, 'one')}
+                              disabled={step.disabled}
+                              title="Run only this step, on the page open now"
+                              aria-label="Run this step"
+                            >
+                              ▶
+                            </button>
+                            <button
+                              className="step-action"
+                              onClick={() => handleRunStep(i, 'toEnd')}
+                              disabled={step.disabled}
+                              title="Run from this step to the end, on the page open now"
+                              aria-label="Run from here"
+                            >
+                              ⏩
+                            </button>
+                          </>
+                        )}
                         <button
                           className="step-action"
                           onClick={() => handleMoveStep(i, -1)}
@@ -9267,7 +9436,7 @@ function App(): React.JSX.Element {
           const hasAssertion = edgeFlat.some((s) => s.type === 'assert')
           return (
             <div className="modal-backdrop" onClick={() => setEdgeModalOpen(false)}>
-              <div className="env-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="env-modal" role="dialog" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-header">
                   <span className="modal-title">🧨 Explode into edge cases</span>
                   <button
@@ -9524,6 +9693,7 @@ function App(): React.JSX.Element {
                             className="shot-link"
                             onClick={() => window.api.library.openScreenshot(r.screenshotPath!)}
                             title="Open the screenshot from this variant"
+                            aria-label={`Open the screenshot from the ${r.case.fieldLabel} variant`}
                           >
                             📷
                           </button>
@@ -9534,6 +9704,7 @@ function App(): React.JSX.Element {
                             className="shot-link"
                             onClick={() => openTrace(r.traceId!)}
                             title="Open this variant's full run recording (every step's screenshot, console & network)"
+                            aria-label={`Open the run recording from the ${r.case.fieldLabel} variant`}
                           >
                             🎬
                           </button>

@@ -20,8 +20,13 @@
 // This module is the PURE half — no Electron, no IPC, no async. It takes steps
 // and saved-test data and returns what a run needs. The thin async wrapper that
 // fetches env values and secrets lives in the renderer and calls into here, so
-// the rules themselves stay unit-testable.
+// the rules themselves stay unit-testable. The two async helpers at the end
+// (planRun, headlessRunEnv) take their disk and IPC access as arguments for the
+// same reason: the app and the command line hand in different plumbing, and
+// run the same rule.
 // =====================================================================
+
+import { secretCellEnv, withoutSecretKeys } from './secretCells'
 
 /** The subset of a step this module reads. Structural, like ControlFlowStep —
  *  src/shared must not depend on the renderer's ambient RecorderStep. */
@@ -179,4 +184,140 @@ export function missingEnvMessage(
     )
   }
   return parts.join(' ')
+}
+
+/** The subset of a step the run plan reads. */
+export interface PlanStep {
+  type: string
+  disabled?: boolean
+  blockRef?: string
+  createsData?: string
+}
+
+/**
+ * The steps a run actually executes, and where each came from.
+ *
+ * A linked `block` step is replaced by the block's CURRENT steps, loaded fresh
+ * (the "live" in live-link), nested blocks included; a disabled or dangling
+ * block contributes nothing. `map[i]` is the row in `display` that flat step
+ * `i` came from — every step inside a block points back at the block's row —
+ * so a failure on flat step `i` is shown on the row the user can see.
+ *
+ * Shared because the command line has to run a test the way the app does. It
+ * used to hand the saved steps straight to the exporter, which has no code for
+ * a `block` step and silently dropped it: a test built on a "Login" block ran
+ * from the CLI without logging in.
+ *
+ * A block MARKER can carry its own 🗃️ "creates data" flag. It is carried onto
+ * the FIRST inner step — once, where a reader expects it — unless that step
+ * has one of its own, which the block never overwrites.
+ */
+export async function planRun<T extends PlanStep>(
+  display: T[],
+  loadBlockSteps: (ref: string) => Promise<T[] | null | undefined>
+): Promise<{ flat: T[]; map: number[] }> {
+  const flat: T[] = []
+  const map: number[] = []
+  for (let i = 0; i < display.length; i++) {
+    const s = display[i]
+    if (s.type !== 'block') {
+      flat.push(s)
+      map.push(i)
+      continue
+    }
+    if (s.disabled || !s.blockRef) continue
+    const steps = await loadBlockSteps(s.blockRef)
+    if (!steps) continue
+    const inner = (await planRun(steps, loadBlockSteps)).flat
+    if (s.createsData && inner.length && !inner[0].createsData) {
+      inner[0] = { ...inner[0], createsData: s.createsData }
+    }
+    for (const st of inner) {
+      flat.push(st)
+      map.push(i)
+    }
+  }
+  return { flat, map }
+}
+
+/** A step as the headless environment rule reads it. */
+export interface EnvStep extends RunInputStep {
+  secret?: boolean
+}
+
+/** Where a headless run's values come from. Handed in, so the rule below is
+ *  the same code in the renderer (over IPC) and in main (directly), and can be
+ *  tested with fakes. */
+export interface EnvSources {
+  /** `{{env:NAME}}` and `secret:<ref>` names → values, the env:get contract:
+   *  a name with no value is in `unresolved` AND has '' in `values`. */
+  resolveNames: (names: string[]) => Promise<{
+    values: Record<string, string>
+    unresolved: string[]
+  }>
+  /** Secret-store refs → stored values; a ref it cannot read is left out. */
+  getSecrets: (refs: string[]) => Promise<Record<string, string>>
+}
+
+/**
+ * The environment a HEADLESS run hands its generated spec — the rule the
+ * in-app monitor used to write out inline, shared now so the command line (and
+ * the scheduled "runs when closed" task, which IS the command line) fills a
+ * password exactly the way the app does instead of refusing for want of one.
+ *
+ * Precedence, highest first:
+ *   1. `provided` — the environment the run was pointed at (a monitor's pinned
+ *      one). A value the user configured deliberately always wins; that is
+ *      also how every other variable already resolves (env:get puts the
+ *      environment before the process, and the child's env puts these values
+ *      over the inherited ones).
+ *   2. `external` — values already set outside the app (the command line
+ *      passes the OS environment). Beats the store, so a pipeline can override
+ *      a saved password with `set PASSWORD=…` without editing the test. The
+ *      in-app monitor passes nothing here: it has no such input.
+ *   3. the secret store — a secret step's ref for PASSWORD, a protected data
+ *      cell's ref for PASSWORD_1…, then a pre-F40 literal left on a secret step
+ *      (a test not yet migrated).
+ *
+ * `envNames` is envVarNames(flat, rows) — computed by the caller, because the
+ * token rules live with the data-driven engine in the renderer.
+ *
+ * Nothing here logs a value or puts one anywhere but `env`, which goes to the
+ * child process and nowhere else.
+ */
+export async function headlessRunEnv(
+  flat: EnvStep[],
+  rows: Record<string, string>[],
+  envNames: string[],
+  provided: Record<string, string>,
+  sources: EnvSources,
+  external: Record<string, string | undefined> = {}
+): Promise<{ env: Record<string, string>; missing: string[] }> {
+  const env: Record<string, string> = { ...provided }
+  if (env.PASSWORD === undefined && !external.PASSWORD) {
+    const refs = runSecretRefs(flat)
+    if (refs.length) {
+      const resolved = await sources.getSecrets(refs)
+      const first = refs.map((r) => resolved[r]).find((v) => v)
+      if (first) env.PASSWORD = first
+    }
+    if (env.PASSWORD === undefined) {
+      const literal = flat.find(
+        (s) => s.type === 'type' && s.secret && s.value && !s.value.includes('{{')
+      )
+      if (literal?.value) env.PASSWORD = literal.value
+    }
+  }
+  if (!envNames.length) return { env, missing: [] }
+  const resolved = await sources.resolveNames(envNames)
+  // `env` goes in as `provided`, so a value already there wins.
+  const values = mergeEnvValues(env, resolved.values)
+  const missing = missingEnvNames(envNames, resolved, env)
+  // Protected data cells become the PASSWORD_1… names the spec reads; the
+  // `secret:<ref>` lookup keys stay out of the child's environment. A cell name
+  // the outside already set is left to it — the same rule as PASSWORD above.
+  const cells = secretCellEnv(rows, values)
+  for (const name of Object.keys(cells)) if (external[name]) delete cells[name]
+  Object.assign(env, withoutSecretKeys(values), cells)
+  return { env, missing }
 }

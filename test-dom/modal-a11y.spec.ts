@@ -189,6 +189,105 @@ test.describe('Escape', () => {
   })
 })
 
+test.describe('a dialog with its own styling (the trace viewer)', () => {
+  // It cannot wear `.modal` without losing its size and colours, so it opts in
+  // with role="dialog" + data-modal-close. Before that, the trap marked the
+  // BACKDROP as the dialog and Escape found nothing to click.
+  const CUSTOM = `
+    <div class="modal-backdrop">
+      <div class="trace-modal" role="dialog">
+        <div class="trace-header">
+          <span id="trace-title">Run recording</span>
+          <button id="save-rec">Save recording</button>
+          <button class="trace-close" data-modal-close aria-label="Close">✕</button>
+        </div>
+      </div>
+    </div>
+  `
+
+  test('marks the dialog box, not the backdrop, and focuses inside it', async ({ page }) => {
+    await openDialog(page, CUSTOM)
+    await expect(page.locator('.trace-modal')).toHaveAttribute('aria-modal', 'true')
+    await expect(page.locator('.modal-backdrop')).not.toHaveAttribute('role', 'dialog')
+    expect(await activeId(page)).toBe('save-rec')
+  })
+
+  test('Escape clicks its close button', async ({ page }) => {
+    await openDialog(page, CUSTOM)
+    await page.evaluate(() => {
+      document.querySelector('[data-modal-close]')!.addEventListener('click', () => {
+        document.getElementById('host')!.innerHTML = ''
+      })
+    })
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.modal-backdrop')).toHaveCount(0)
+  })
+})
+
+test.describe('a dialog opened on top of another', () => {
+  // App.tsx switches the trap on once, when the FIRST overlay opens. A second
+  // dialog stacked on it used to get the Tab trap but no initial focus, and
+  // closing it left focus on BODY instead of back in the first dialog.
+  const SECOND = `
+    <div class="modal-backdrop" id="second">
+      <div class="modal">
+        <span class="modal-title">Are you sure?</span>
+        <button class="modal-close" aria-label="Close">×</button>
+        <button id="confirm">Confirm</button>
+      </div>
+    </div>
+  `
+
+  test('gets focus when it appears, and hands it back when it closes', async ({ page }) => {
+    await page.focus('#opener')
+    await openDialog(page)
+    // The control in the first dialog that opens the second.
+    await page.focus('#save')
+
+    // Stack the second dialog WITHOUT re-running the trap — exactly what the
+    // app does, since the overlay flag is already true.
+    await page.evaluate((markup) => {
+      document.getElementById('host')!.insertAdjacentHTML('beforeend', markup)
+    }, SECOND)
+    await expect.poll(() => activeId(page)).toBe('confirm')
+    await expect(page.locator('#second .modal')).toHaveAttribute('role', 'dialog')
+
+    // Tab stays inside the TOP dialog.
+    await page.keyboard.press('Tab')
+    await page.keyboard.press('Tab')
+    expect(
+      await page.evaluate(
+        () => !!document.querySelector('#second')?.contains(document.activeElement)
+      )
+    ).toBe(true)
+
+    await page.evaluate(() => document.getElementById('second')!.remove())
+    await expect.poll(() => activeId(page)).toBe('save')
+
+    // And the first dialog, closed in turn, still returns to its opener.
+    await page.evaluate(() => {
+      document.getElementById('host')!.innerHTML = ''
+      ;(window as unknown as { __release: () => void }).__release()
+    })
+    expect(await activeId(page)).toBe('opener')
+  })
+
+  test('Escape closes only the top dialog', async ({ page }) => {
+    await openDialog(page)
+    await page.evaluate((markup) => {
+      document.getElementById('host')!.insertAdjacentHTML('beforeend', markup)
+      document.querySelector('#second .modal-close')!.addEventListener('click', () => {
+        document.getElementById('second')!.remove()
+      })
+    }, SECOND)
+    await expect.poll(() => activeId(page)).toBe('confirm')
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.modal-backdrop')).toHaveCount(1)
+    // Back to where focus was in the first dialog when the second opened.
+    await expect.poll(() => activeId(page)).toBe('name')
+  })
+})
+
 test.describe('closing a dialog', () => {
   test('gives focus back to whatever opened it', async ({ page }) => {
     // Without this you are dumped at the top of the document and have to tab
