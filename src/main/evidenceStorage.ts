@@ -47,6 +47,12 @@ import type { PrivacySettings } from '../shared/evidencePrivacy'
  */
 export function confinedPath(dir: string, name: string): string | null {
   if (typeof name !== 'string' || !name || name.includes('\0')) return null
+  // A direct child's name never holds a separator or a drive colon — refused on
+  // EVERY platform, not just the one that treats them as path syntax. On Linux
+  // `..\x` and `C:\Windows` are legal file names, so the resolve() check below
+  // let them through there while Windows refused them; a library copied
+  // between machines must get the same answer on both.
+  if (/[\\/:]/.test(name)) return null
   const base = resolve(dir)
   const target = resolve(base, name)
   const rel = relative(base, target)
